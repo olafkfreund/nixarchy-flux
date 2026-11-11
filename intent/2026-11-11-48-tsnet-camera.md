@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 48
 author: olafkfreund
 ---
@@ -85,7 +85,10 @@ confirmed bugs that are now on master.
   owner.
 - Keep the change small, so it can be offered upstream with the owner's OK.
 
-## Open questions
+## Decisions (approved 2026-11-11)
+
+The owner approved the recommended answer to each question below (64 connections across the process).
+
 
 1. **Connection limit.** How many tailnet connections at once, and counted
    how? Recommended: 64 across all ports of the process, closing the ones
