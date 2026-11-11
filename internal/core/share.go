@@ -34,7 +34,7 @@ const maxReceives = 4
 
 // receiveIdle ends an incoming transfer when the device sends no data for
 // this time.
-const receiveIdle = time.Minute
+var receiveIdle = time.Minute
 
 // maxSharePreview is the number of characters of a shared text that the
 // desktop notification shows.
@@ -639,6 +639,21 @@ func (d *Daemon) cleanParts(dir string) {
 	d.mu.Unlock()
 	if !done {
 		removeStaleParts(dir, time.Now())
+	}
+}
+
+// removeAllParts removes every temporary file of incoming transfers, also
+// the legacy .flux-received-* files. At start no transfer is running.
+func removeAllParts(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.Type().IsRegular() && strings.HasPrefix(name, partPrefix) && (strings.HasSuffix(name, partSuffix) || strings.HasPrefix(name, ".flux-received-")) {
+			os.Remove(filepath.Join(dir, name))
+		}
 	}
 }
 

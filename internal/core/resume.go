@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"syscall"
 	"time"
 
@@ -40,7 +41,15 @@ type incomingRecord struct {
 	Hash     string `json:"hash"`
 	Path     string `json:"path,omitempty"`
 	Canceled bool   `json:"canceled,omitempty"`
+	Device   string `json:"device,omitempty"`
 }
+
+// maxPartials is the number of unfinished transfers that 1 device can have
+// at the same time. maxRecords is the number of records of 1 device.
+const (
+	maxPartials = 16
+	maxRecords  = 64
+)
 
 type resumePacket struct {
 	link    *lan.Link
@@ -198,7 +207,11 @@ func (d *Daemon) processResumePacket(dev *Device, w *resumeWorker, pkt resumePac
 	run := w.runs[b.ID]
 	if run == nil {
 		if b.Action == "offer" {
-			pruneIncoming(d.resumeDir, time.Now().Add(-7*24*time.Hour))
+			active := map[string]bool{}
+			for id := range w.runs {
+				active[incomingFolder(dev.ID, id)] = true
+			}
+			pruneIncoming(d.resumeDir, time.Now().Add(-7*24*time.Hour), dev.ID, active)
 		}
 		if !d.startReceive(dev) {
 			_ = pkt.link.Send(proto.New(proto.TypeFluxTransfer, resumeMessage{Action: "error", ID: b.ID, Error: fmt.Sprintf("the device sends more than %d files at the same time", maxReceives)}))
@@ -290,8 +303,7 @@ func (d *Daemon) endResumeRun(dev *Device, w *resumeWorker, id string, err error
 		d.trimTransfersLocked()
 		d.mu.Unlock()
 		d.markDirty()
-		key := sha256.Sum256([]byte(dev.ID + ":" + id))
-		dir := filepath.Join(d.resumeDir, hex.EncodeToString(key[:]))
+		dir := filepath.Join(d.resumeDir, incomingFolder(dev.ID, id))
 		meta := filepath.Join(dir, "state.json")
 		var record incomingRecord
 		if data, readErr := os.ReadFile(meta); readErr == nil && json.Unmarshal(data, &record) == nil {
@@ -306,16 +318,79 @@ func (d *Daemon) endResumeRun(dev *Device, w *resumeWorker, id string, err error
 	delete(w.runs, id)
 }
 
-func pruneIncoming(dir string, before time.Time) {
+// incomingFolder is the name of the folder of one transfer of one device.
+func incomingFolder(device, id string) string {
+	key := sha256.Sum256([]byte(device + ":" + id))
+	return hex.EncodeToString(key[:])
+}
+
+// pruneIncoming removes the folders older than before, except the folders in
+// keep. With a device it looks only at the records of that device; with ""
+// it looks at all folders, also those without a record.
+func pruneIncoming(dir string, before time.Time, device string, keep map[string]bool) {
 	entries, _ := os.ReadDir(dir)
+	for _, entry := range entries {
+		if !entry.IsDir() || !transferHash.MatchString(entry.Name()) || keep[entry.Name()] {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.ModTime().Before(before) {
+			continue
+		}
+		if device != "" {
+			if r, ok := readIncoming(filepath.Join(dir, entry.Name())); !ok || r.Device != device {
+				continue
+			}
+		}
+		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
+	}
+}
+
+func readIncoming(folder string) (incomingRecord, bool) {
+	var r incomingRecord
+	data, err := os.ReadFile(filepath.Join(folder, "state.json"))
+	return r, err == nil && json.Unmarshal(data, &r) == nil
+}
+
+// admitOffer checks the limits of a device before a new transfer gets a
+// state: it refuses at maxPartials unfinished transfers, and it removes the
+// oldest finished or canceled records when the device has maxRecords.
+func (d *Daemon) admitOffer(device string) error {
+	type finished struct {
+		folder string
+		at     time.Time
+	}
+	var old []finished
+	records, unfinished := 0, 0
+	entries, _ := os.ReadDir(d.resumeDir)
 	for _, entry := range entries {
 		if !entry.IsDir() || !transferHash.MatchString(entry.Name()) {
 			continue
 		}
-		if info, err := entry.Info(); err == nil && info.ModTime().Before(before) {
-			_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
+		folder := filepath.Join(d.resumeDir, entry.Name())
+		r, ok := readIncoming(folder)
+		if !ok || r.Device != device {
+			continue
+		}
+		records++
+		if r.Path == "" && !r.Canceled {
+			unfinished++
+		} else if info, err := entry.Info(); err == nil {
+			old = append(old, finished{folder, info.ModTime()})
 		}
 	}
+	if unfinished >= maxPartials {
+		return errors.New("too many unfinished transfers from this device")
+	}
+	sort.Slice(old, func(i, j int) bool { return old[i].at.Before(old[j].at) })
+	for _, f := range old {
+		if records < maxRecords {
+			break
+		}
+		_ = os.RemoveAll(f.folder)
+		records--
+	}
+	return nil
 }
 
 type ctxReader struct {
@@ -356,11 +431,10 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 	if err := os.MkdirAll(d.resumeDir, 0o700); err != nil {
 		return ack, err
 	}
-	key := sha256.Sum256([]byte(dev.ID + ":" + b.ID))
-	dir := filepath.Join(d.resumeDir, hex.EncodeToString(key[:]))
+	dir := filepath.Join(d.resumeDir, incomingFolder(dev.ID, b.ID))
 	metaPath, part := filepath.Join(dir, "state.json"), filepath.Join(dir, "data")
-	defer func() { _ = os.Chtimes(dir, time.Now(), time.Now()) }()
-	r := incomingRecord{Name: b.Name, Size: b.Size, Hash: b.Hash}
+	touch := func() { _ = os.Chtimes(dir, time.Now(), time.Now()) }
+	r := incomingRecord{Name: b.Name, Size: b.Size, Hash: b.Hash, Device: dev.ID}
 	if data, err := os.ReadFile(metaPath); err == nil {
 		var old incomingRecord
 		if json.Unmarshal(data, &old) != nil || old.Name != r.Name || old.Size != r.Size || old.Hash != r.Hash {
@@ -376,8 +450,14 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return ack, err
+	} else if b.Action != "offer" {
+		return ack, errors.New("no offer for this transfer")
+	} else if err := d.admitOffer(dev.ID); err != nil {
+		return ack, err
 	} else if err := saveJSON(metaPath, r); err != nil {
 		return ack, err
+	} else {
+		touch()
 	}
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -427,6 +507,7 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 			return ack, err
 		}
 		offset += n
+		touch()
 	}
 	ack.Offset = offset
 	if offset != b.Size {

@@ -369,6 +369,8 @@ func New(ctx context.Context, logger *log.Logger, opts Options) (*Daemon, error)
 		d.reloadTheme()
 	}
 	d.resumeDir = filepath.Join(config.DataDir(), "incoming")
+	pruneIncoming(d.resumeDir, time.Now().Add(-7*24*time.Hour), "", nil)
+	removeAllParts(d.cfg.DownloadPath())
 	d.snippetsDir = filepath.Join(config.DataDir(), "snippets")
 	if err := d.loadSnippets(); err != nil {
 		return nil, err
