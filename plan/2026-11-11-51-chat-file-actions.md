@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 51
 spec: spec/2026-11-11-51-chat-file-actions.md
 coders:
