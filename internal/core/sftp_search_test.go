@@ -112,8 +112,10 @@ func TestBrowseSearchReadsANestedRootOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer fsys.Close()
-	if len(fsys.roots) != 3 {
-		t.Fatalf("roots %d, want Home, Downloads, and Documents", len(fsys.roots))
+	// Downloads is the home folder here, so it is a duplicate of Home and
+	// openBrowseFS drops it.
+	if len(fsys.roots) != 2 {
+		t.Fatalf("roots %d, want Home and Documents", len(fsys.roots))
 	}
 	if got := searchPaths(t, fsys, "", "plan"); !slices.Equal(got, []string{filepath.Join(docs, "plan.md")}) {
 		t.Fatalf("search plan = %q", got)

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -371,6 +372,10 @@ func serveSSH(conn net.Conn, cfg *ssh.ServerConfig, fsys *browseFS, logf func(st
 // with a dot name, such as ~/.config, is left out too.
 func browseRoots(home, downloads string) [][2]string {
 	home = filepath.Clean(home)
+	realHome := home
+	if real, err := filepath.EvalSymlinks(home); err == nil {
+		realHome = real
+	}
 	roots := [][2]string{{"Home", home}}
 	for _, r := range [][2]string{
 		{"Downloads", downloads},
@@ -380,10 +385,14 @@ func browseRoots(home, downloads string) [][2]string {
 		{"Videos", filepath.Join(home, "Videos")},
 	} {
 		p := filepath.Clean(r[1])
+		realPath := p
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			realPath = real
+		}
 		switch {
-		case p != home && within(p, home):
+		case realPath != realHome && within(realPath, realHome):
 			continue
-		case within(home, p) && hiddenName(strings.TrimPrefix(p, home)):
+		case within(realHome, realPath) && hiddenName(strings.TrimPrefix(realPath, realHome)):
 			continue
 		}
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
@@ -430,17 +439,22 @@ var errBrowseDenied = sftp.ErrSSHFxPermissionDenied
 // that it cannot open, and it fails when it opens none.
 func openBrowseFS(roots [][2]string, hidden []string) (*browseFS, error) {
 	fsys := &browseFS{}
-	for _, r := range roots {
+	for i, r := range roots {
 		p := filepath.Clean(r[1])
-		if !filepath.IsAbs(p) {
-			continue
-		}
 		real, err := filepath.EvalSymlinks(p)
-		if err != nil {
-			continue
+		var root *os.Root
+		if err == nil && filepath.IsAbs(p) {
+			root, err = os.OpenRoot(p)
+		} else if err == nil {
+			err = errors.New("not an absolute path")
 		}
-		root, err := os.OpenRoot(p)
 		if err != nil {
+			// The first root is the home folder, and the dot-name rules of
+			// the other roots are relative to it, so without it nothing is
+			// served.
+			if i == 0 {
+				return nil, fmt.Errorf("cannot open the home folder %s: %w", p, err)
+			}
 			continue
 		}
 		fsys.roots = append(fsys.roots, browseRoot{name: r[0], path: p, real: real, root: root})
@@ -448,6 +462,24 @@ func openBrowseFS(roots [][2]string, hidden []string) (*browseFS, error) {
 	if len(fsys.roots) == 0 {
 		return nil, errors.New("this computer has no folder to browse")
 	}
+	home := fsys.roots[0].real
+	kept := fsys.roots[:1]
+	for _, r := range fsys.roots[1:] {
+		drop := within(home, r.real) && hiddenName(strings.TrimPrefix(r.real, home)) ||
+			!within(home, r.real) && hiddenName(r.real)
+		for _, earlier := range kept {
+			if r.real == earlier.real {
+				drop = true
+				break
+			}
+		}
+		if drop {
+			_ = r.root.Close()
+		} else {
+			kept = append(kept, r)
+		}
+	}
+	fsys.roots = kept
 	fsys.start = fsys.roots[0].path
 	for _, h := range hidden {
 		fsys.hidden = append(fsys.hidden, filepath.Clean(h))
@@ -516,8 +548,10 @@ func (fsys *browseFS) visible(r *browseRoot, real string) bool {
 	if !within(r.real, real) {
 		return false
 	}
-	if rel := strings.TrimPrefix(strings.TrimPrefix(real, r.real), "/"); rel != "" && hiddenName(rel) {
-		return false
+	for _, root := range fsys.roots {
+		if within(root.real, real) && hiddenName(strings.TrimPrefix(real, root.real)) {
+			return false
+		}
 	}
 	for _, h := range fsys.hidden {
 		if within(h, real) {

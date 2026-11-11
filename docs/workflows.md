@@ -265,6 +265,10 @@ These folders are inside the Flux data directory, normally `~/.local/share/flux`
 | `incoming` | Partial resumable receives and completion receipts. |
 | `snippets` | Saved clipboard text and images. |
 
-When another resumable offer arrives, the receiver removes inactive partial files and receipts older than seven days.
+At start and when another resumable offer arrives, the receiver removes inactive partial files and receipts older than seven days.
+A device has at most 4 resumable receives at once and 16 unfinished ones.
+A cancel deletes the partial file and refuses that transfer.
+A stalled receive keeps its partial file and resumes.
+`fluxd` checks free space like an ordinary receive.
 The phone and Mac keep partial files in private app storage.
 The desktop removes queued transfers when the destination becomes unpaired.
