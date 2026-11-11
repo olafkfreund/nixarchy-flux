@@ -18,7 +18,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // MinProtocol is the oldest herdr API protocol that Flux supports.
@@ -56,6 +59,50 @@ func SocketPath() string {
 		dir = filepath.Join(home, ".config")
 	}
 	return filepath.Join(dir, "herdr", "herdr.sock")
+}
+
+// SessionsDir returns the folder of the named herdr sessions. Each
+// session has a folder there with its own API socket.
+func SessionsDir() string {
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(dir, "herdr", "sessions")
+}
+
+// SessionSocket returns the API socket of the named session in dir.
+func SessionSocket(dir, name string) string {
+	return filepath.Join(dir, name, "herdr.sock")
+}
+
+// Sessions returns the names of the named sessions in dir that have an
+// API socket, in name order. A session that stopped can keep its folder,
+// so a name does not mean that the session runs. Sessions skips the
+// session with the socket skip, which fluxd follows as the default
+// session already.
+func Sessions(dir, skip string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || strings.HasPrefix(name, ".") {
+			continue
+		}
+		sock := SessionSocket(dir, name)
+		if filepath.Clean(sock) == filepath.Clean(skip) {
+			continue
+		}
+		if fi, err := os.Stat(sock); err != nil || fi.Mode().Type() != os.ModeSocket {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 // Error is an error response from herdr.
@@ -190,11 +237,25 @@ func GetSnapshot(ctx context.Context, path string) (Snapshot, error) {
 	return r.Snapshot, err
 }
 
+// The sources of a read. With SourceUnwrapped, herdr joins the rows that
+// the terminal wrapped. With SourceRows, each row of the terminal stays a
+// line.
+const (
+	SourceUnwrapped = "recent_unwrapped"
+	SourceRows      = "recent"
+)
+
 // ReadAgent returns up to lines rows of recent output from the agent in
 // the pane. herdr joins soft-wrapped rows. With ansi, the text keeps the
 // ANSI codes of colors and styles. Without it, herdr removes them.
 func ReadAgent(ctx context.Context, path, pane string, lines int, ansi bool) (Read, error) {
-	params := map[string]any{"target": pane, "source": "recent_unwrapped", "lines": lines}
+	return ReadAgentFrom(ctx, path, pane, SourceUnwrapped, lines, ansi)
+}
+
+// ReadAgentFrom is ReadAgent with the source of the read, SourceUnwrapped
+// or SourceRows.
+func ReadAgentFrom(ctx context.Context, path, pane, source string, lines int, ansi bool) (Read, error) {
+	params := map[string]any{"target": pane, "source": source, "lines": lines}
 	if ansi {
 		params["format"], params["strip_ansi"] = "ansi", false
 	}
@@ -227,6 +288,38 @@ func GetAgent(ctx context.Context, path, pane string) (Agent, error) {
 	}
 	err := Call(ctx, path, "agent.get", map[string]any{"target": pane}, &r)
 	return r.Agent, err
+}
+
+// PaneLayout is the size of one pane in its tab, in terminal cells.
+type PaneLayout struct {
+	Width  int
+	Height int
+}
+
+// GetLayout returns the size of the pane in its tab. fluxd opens a
+// terminal session at this size, so watching a pane does not resize the
+// terminal that the desktop shows.
+func GetLayout(ctx context.Context, path, pane string) (PaneLayout, error) {
+	var r struct {
+		Layout struct {
+			Panes []struct {
+				PaneID string `json:"pane_id"`
+				Rect   struct {
+					Width  int `json:"width"`
+					Height int `json:"height"`
+				} `json:"rect"`
+			} `json:"panes"`
+		} `json:"layout"`
+	}
+	if err := Call(ctx, path, "pane.layout", map[string]any{"pane_id": pane}, &r); err != nil {
+		return PaneLayout{}, err
+	}
+	for _, p := range r.Layout.Panes {
+		if p.PaneID == pane {
+			return PaneLayout{Width: p.Rect.Width, Height: p.Rect.Height}, nil
+		}
+	}
+	return PaneLayout{}, fmt.Errorf("herdr: pane %s has no layout", pane)
 }
 
 // AgentKinds returns the agent kinds that herdr can detect and start.
@@ -367,6 +460,10 @@ func open(ctx context.Context, path, method string, params any) (net.Conn, *bufi
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := checkOwner(conn, os.Getuid()); err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(callTimeout)
@@ -382,6 +479,35 @@ func open(ctx context.Context, path, method string, params any) (net.Conn, *bufi
 		return nil, nil, err
 	}
 	return conn, bufio.NewReader(conn), nil
+}
+
+// checkOwner checks with SO_PEERCRED that the server of conn runs as the
+// user uid. HERDR_SOCKET_PATH can name a shared folder, where another user
+// can listen first. That user must not get the prompts and the terminal
+// input of the phone.
+func checkOwner(conn net.Conn, uid int) error {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return errors.New("herdr: the socket is not a Unix socket")
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var cred *unix.Ucred
+	var credErr error
+	if err := raw.Control(func(fd uintptr) {
+		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	}); err != nil {
+		return err
+	}
+	if credErr != nil {
+		return credErr
+	}
+	if int(cred.Uid) != uid {
+		return fmt.Errorf("herdr: the socket belongs to user %d, not to user %d", cred.Uid, uid)
+	}
+	return nil
 }
 
 // await reads replies until the response to the request arrives. It
@@ -412,7 +538,7 @@ var errLineTooLong = errors.New("herdr: reply line is too long")
 func readReply(r *bufio.Reader) (response, error) {
 	var resp response
 	for {
-		line, err := readLine(r)
+		line, err := readLine(r, maxLine)
 		if err != nil {
 			return resp, err
 		}
@@ -426,12 +552,12 @@ func readReply(r *bufio.Reader) (response, error) {
 	}
 }
 
-// readLine reads one line of at most maxLine bytes.
-func readLine(r *bufio.Reader) ([]byte, error) {
+// readLine reads one line of at most max bytes.
+func readLine(r *bufio.Reader, max int) ([]byte, error) {
 	var line []byte
 	for {
 		chunk, err := r.ReadSlice('\n')
-		if len(line)+len(chunk) > maxLine {
+		if len(line)+len(chunk) > max {
 			return nil, errLineTooLong
 		}
 		line = append(line, chunk...)

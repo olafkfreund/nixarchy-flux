@@ -24,10 +24,14 @@ final class DesktopController: RemoteKeyTarget {
     @ObservationIgnored private var flush: Task<Void, Never>?
     /// True after a dictation typed its text, so that the next one starts with a space.
     @ObservationIgnored private var afterVoice = false
+    /// Waits for the permissions of a new dictation. `close` cancels it.
+    @ObservationIgnored private var starting: Task<Void, Never>?
 
     /// The panel that shows, or nil.
     var panel: Panel?
     var mods = RemoteInput.Mods()
+    var fieldText = ""
+    var draft = ""
     var optionIsAlt: Bool {
         didSet { defaults.set(optionIsAlt, forKey: optionIsAltKey) }
     }
@@ -35,11 +39,23 @@ final class DesktopController: RemoteKeyTarget {
     var pointerInside = false
     /// The monitor that the user selected. A restart of the stream keeps it.
     var monitor: String?
-    /// True after the stream stopped because this Mac slept, locked, or hid the window.
+    /// True after the stream stopped because this Mac slept, locked, or hid
+    /// the window, or when it was to start while `hidden`. `resume` starts it.
     private(set) var paused = false
+    /// True while this Mac sleeps or locks, or the window is in the Dock.
+    /// The stream does not start then, also not after a reconnect.
+    private(set) var hidden = false
     /// True after a click on a view-only screen, to explain it.
     var viewOnlyNotice = false
     var voiceError: String?
+    var audioOn = false
+    private var previousAudioVolume: Double = 1
+    var audioVolume: Double = 1 {
+        didSet { if audioVolume > 0 { previousAudioVolume = audioVolume }; plugin.setAudioVolume(Float(audioVolume)) }
+    }
+
+    func toggleAudio() { audioOn.toggle(); start() }
+    func toggleMute() { audioVolume = audioVolume == 0 ? previousAudioVolume : 0 }
 
     init(device: DeviceSnapshot, app: AppModel, plugin: DesktopPlugin, input: RemoteInputPlugin) {
         deviceId = device.id
@@ -85,11 +101,16 @@ final class DesktopController: RemoteKeyTarget {
 
     // MARK: Stream
 
-    /// Starts the stream, with the monitor that the user selected.
+    /// Starts the stream, with the monitor that the user selected. While
+    /// `hidden`, it only marks the stream to start at `resume`.
     func start() {
         guard ready else { return }
+        if hidden {
+            paused = true
+            return
+        }
         paused = false
-        plugin.start(deviceId, monitor: monitor, maxSize: Self.maxSize())
+        plugin.start(deviceId, monitor: monitor, maxSize: Self.maxSize(), audio: audioOn)
     }
 
     /// Shows another monitor of the computer.
@@ -107,13 +128,15 @@ final class DesktopController: RemoteKeyTarget {
 
     /// Stops the stream while this Mac sleeps, locks, or hides the window.
     func pause(_ reason: String) {
+        hidden = true
         guard status?.active == true else { return }
         stop(.init(.idle, reason, deviceId: deviceId))
         paused = true
     }
 
-    /// Starts the stream again after a pause.
+    /// Starts the stream again after a pause, when this Mac and the window are back.
     func resume() {
+        hidden = false
         guard paused else { return }
         paused = false
         start()
@@ -121,6 +144,7 @@ final class DesktopController: RemoteKeyTarget {
 
     /// Ends the window: the stream stops, and a dictation ends without text.
     func close() {
+        starting?.cancel()
         dictation.cancel()
         stop()
         mods = .init()
@@ -229,12 +253,15 @@ final class DesktopController: RemoteKeyTarget {
         voiceError = nil
         panel = .keys
         let language = app.core.plugin(HerdrPlugin.self)?.model.dictationLanguage ?? ""
-        Task { @MainActor [weak self] in
-            if let problem = await Dictation.authorize() {
-                self?.voiceError = problem
+        starting?.cancel()
+        starting = Task { @MainActor [weak self] in
+            let problem = await Dictation.authorize()
+            // The window closed while macOS asked for the permissions.
+            guard !Task.isCancelled, let self else { return }
+            if let problem {
+                self.voiceError = problem
                 return
             }
-            guard let self else { return }
             self.dictation.start(language: language, hints: []) { [weak self] spoken in self?.typeSpoken(spoken) }
         }
     }

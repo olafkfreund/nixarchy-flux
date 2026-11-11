@@ -32,6 +32,10 @@ public struct CameraChoice: Identifiable, Hashable, Sendable {
 public final class StillCamera: NSObject, @unchecked Sendable {
     /// The cameras of this Mac, built-in cameras first.
     public static func cameras() -> [CameraChoice] {
+        #if os(iOS)
+        // The back and front cameras, like Flux for Android.
+        return PhoneCameras.available().map { CameraChoice(id: $0.uniqueID, name: $0.name) }
+        #else
         var types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera, .external]
         // Without this Info.plist key, Continuity Camera reports itself as a
         // built-in camera and the first type finds it.
@@ -43,6 +47,7 @@ public final class StillCamera: NSObject, @unchecked Sendable {
         return devices.enumerated()
             .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
             .map { CameraChoice(id: $0.element.uniqueID, name: $0.element.localizedName) }
+        #endif
     }
 
     public let session = AVCaptureSession()
@@ -62,6 +67,9 @@ public final class StillCamera: NSObject, @unchecked Sendable {
     private let lock = NSLock()
     private var onFrame: (@Sendable (CVPixelBuffer) -> Void)?
     private var captures: Set<PhotoCapture> = []
+    #if os(iOS)
+    private var torch = false
+    #endif
 
     public override init() {
         previewLayer = AVCaptureVideoPreviewLayer(session: session)
@@ -119,6 +127,31 @@ public final class StillCamera: NSObject, @unchecked Sendable {
         }
     }
 
+    #if os(iOS)
+    /// True when the camera that runs has a torch.
+    public var hasTorch: Bool { lock.withLock { torch } }
+
+    /// Turns the torch of the running camera on or off.
+    public func setTorch(_ on: Bool) async throws {
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            queue.async { [self] in
+                c.resume(with: Result {
+                    guard let device = input?.device, device.hasTorch, device.isTorchAvailable else {
+                        throw FluxError("The torch is not available")
+                    }
+                    try device.lockForConfiguration()
+                    defer { device.unlockForConfiguration() }
+                    if on {
+                        try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+                    } else {
+                        device.torchMode = .off
+                    }
+                })
+            }
+        }
+    }
+    #endif
+
     private func startNow(_ id: String?) throws -> CameraChoice {
         let choices = Self.cameras()
         guard let choice = choices.first(where: { $0.id == id }) ?? choices.first,
@@ -140,6 +173,9 @@ public final class StillCamera: NSObject, @unchecked Sendable {
                 .max { $0.width * $0.height < $1.width * $1.height } ?? photoOutput.maxPhotoDimensions
             session.commitConfiguration()
             followRotation(device)
+            #if os(iOS)
+            lock.withLock { torch = device.hasTorch }
+            #endif
             updateFrames()
         }
         if !session.isRunning { session.startRunning() }

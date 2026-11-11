@@ -93,7 +93,8 @@ public final class Dictation {
     private static let retryDelay: Duration = .milliseconds(250)
     private static let maxRetries = 3
 
-    @ObservationIgnored private let engine = AVAudioEngine()
+    /// Made at the first start, so that a view can hold a dictation cheaply.
+    @ObservationIgnored private lazy var engine = AVAudioEngine()
     @ObservationIgnored private let feed = AudioFeed()
     @ObservationIgnored private var recognizer: SFSpeechRecognizer?
     @ObservationIgnored private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -169,6 +170,9 @@ public final class Dictation {
         startedAt = Self.now()
         spokeAt = startedAt
         phase = .listening
+        #if os(iOS)
+        Self.running[ObjectIdentifier(self)] = WeakDictation(self)
+        #endif
         listen()
         watch = Task { @MainActor [weak self] in
             while !Task.isCancelled {
@@ -217,6 +221,18 @@ public final class Dictation {
         finish()
     }
 
+    #if os(iOS)
+    /// The dictations that run.
+    private static var running: [ObjectIdentifier: WeakDictation] = [:]
+
+    /// Ends each dictation that runs and drops its text, for example when
+    /// the app leaves the screen, so that no words go out later.
+    public static func cancelAll() {
+        for d in running.values.compactMap(\.value) { d.cancel() }
+        running = [:]
+    }
+    #endif
+
     // MARK: Language
 
     /// The tag of the language to use, or nil with `error` set.
@@ -245,9 +261,23 @@ public final class Dictation {
 
     /// Starts the microphone. It returns false when this Mac has no input.
     private func startAudio() -> Bool {
+        #if os(iOS)
+        // iOS gives the engine an input only while a recording session is active.
+        do {
+            try AudioSession.activate(.dictation)
+        } catch {
+            FluxLog.plugin.error("dictation: the audio session did not start: \(String(describing: error), privacy: .public)")
+            return false
+        }
+        #endif
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { return false }
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            #if os(iOS)
+            AudioSession.deactivate(.dictation)
+            #endif
+            return false
+        }
         let feed = feed
         input.removeTap(onBus: 0)
         // The tap runs on the audio thread.
@@ -262,6 +292,9 @@ public final class Dictation {
         } catch {
             FluxLog.plugin.error("dictation: the microphone did not start: \(String(describing: error), privacy: .public)")
             input.removeTap(onBus: 0)
+            #if os(iOS)
+            AudioSession.deactivate(.dictation)
+            #endif
             return false
         }
         audioOn = true
@@ -273,6 +306,9 @@ public final class Dictation {
         audioOn = false
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
+        #if os(iOS)
+        AudioSession.deactivate(.dictation)
+        #endif
     }
 
     private func heard(_ db: Float) {
@@ -404,6 +440,9 @@ public final class Dictation {
 
     /// Ends the dictation and gives the text to the caller of `start`.
     private func finish() {
+        #if os(iOS)
+        Self.running[ObjectIdentifier(self)] = nil
+        #endif
         watch?.cancel()
         watch = nil
         finishTimer?.cancel()
@@ -425,6 +464,18 @@ public final class Dictation {
 
     private static func now() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
 }
+
+#if os(iOS)
+/// A dictation that `Dictation.cancelAll` can reach, without keeping it.
+@MainActor
+private struct WeakDictation {
+    weak var value: Dictation?
+
+    init(_ value: Dictation) {
+        self.value = value
+    }
+}
+#endif
 
 /// Carries the microphone buffers from the audio thread to the running
 /// recognition request.

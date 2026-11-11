@@ -1,115 +1,84 @@
+import AppKit
 import FluxKit
 import SwiftUI
 
+/// The main window: the list of chats in the sidebar with Control and
+/// Computers under it, and the open chat or destination in the detail
+/// column. Each destination has its own stack.
 struct ContentView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
-            DeviceListView()
-                .navigationSplitViewColumnWidth(min: 220, ideal: 240)
+            SidebarView()
+                .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 420)
         } detail: {
-            if let device = model.device {
-                DeviceDetailView(device: device)
-                    .id(device.id)
-            } else {
-                ContentUnavailableView {
-                    Label("No computer found", systemImage: "desktopcomputer")
-                } description: {
-                    Text(model.state.searching ? "Searching…" : "Start fluxd on an Omarchy computer on the same network.")
-                } actions: {
-                    Button("Search again") { model.core.search() }
-                        .disabled(model.state.searching)
-                }
+            switch model.destination {
+            case .chats:
+                NavigationStack(path: $model.chatPath) { ChatDetail() }
+            case .control:
+                NavigationStack(path: $model.controlPath) { ControlView() }
+            case .computers:
+                NavigationStack(path: $model.computersPath) { ComputersPage() }
             }
         }
-        .overlay(alignment: .bottom) {
-            if let toast = model.toast {
-                Text(toast)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.regularMaterial, in: Capsule())
-                    .padding(.bottom, 16)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-        .animation(.default, value: model.toast)
+        .modifier(ToastOverlay())
         .sheet(item: Binding(
             get: { model.pairingSheet.flatMap { id in model.state.devices.first { $0.id == id } } },
             set: { model.pairingSheet = $0?.id }
         )) { device in
             PairRequestSheet(device: device)
         }
+        .sheet(item: Binding(
+            get: { model.startAgent.map { AgentStart(id: $0) } },
+            set: { model.startAgent = $0?.id }
+        )) { start in
+            StartAgentSheet(deviceId: start.id)
+        }
     }
 }
 
-struct DeviceListView: View {
+/// The message of `AppModel.show` at the bottom of a window. The main
+/// window and the stream page windows show it.
+struct ToastOverlay: ViewModifier {
     @Environment(AppModel.self) private var model
 
-    var body: some View {
-        @Bindable var model = model
-        List(selection: $model.selection) {
-            if !model.paired.isEmpty {
-                Section("Paired") {
-                    ForEach(model.paired) { DeviceRow(device: $0).tag($0.id) }
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .bottom) {
+                if let toast = model.toast {
+                    Text(toast)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.regularMaterial, in: Capsule())
+                        .padding(.bottom, 16)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
-            Section("Available") {
-                if model.state.searching {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Searching…")
-                    }
-                    .foregroundStyle(.secondary)
-                } else if model.available.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(model.paired.isEmpty ? "No computer found" : "No other computer found")
-                            .foregroundStyle(.secondary)
-                        Button("Search again") { model.core.search() }
-                    }
-                }
-                ForEach(model.available) { DeviceRow(device: $0).tag($0.id) }
-            }
-        }
-        .toolbar {
-            ToolbarItem {
-                Button { model.core.search() } label: { Label("Search again", systemImage: "arrow.clockwise") }
-                    .help("Search the network for Omarchy computers")
-                    .disabled(model.state.searching)
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            HStack {
-                Image(systemName: FluxCore.deviceType == "laptop" ? "laptopcomputer" : "desktopcomputer")
-                Text(model.state.deviceName).lineLimit(1)
-                Spacer()
-                if !model.state.enabled { Text("Off").foregroundStyle(.secondary) }
-            }
-            .font(.caption)
-            .padding(10)
-        }
+            .animation(.default, value: model.toast)
     }
 }
 
-struct DeviceRow: View {
-    let device: DeviceSnapshot
+/// Tells the user that macOS blocks the local network for Flux, and where
+/// to allow it. Discovery and links fail without it.
+struct LocalNetworkNotice: View {
+    static let text = "Flux needs Local Network access to find and reach computers. Turn on Flux in System Settings > Privacy & Security > Local Network."
+    static let settings = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")!
 
     var body: some View {
-        HStack {
-            Image(systemName: device.symbol)
-                .frame(width: 22)
-            VStack(alignment: .leading) {
-                Text(device.name)
-                Text(device.statusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Circle()
-                .fill(device.online ? Color.green : Color.secondary.opacity(0.4))
-                .frame(width: 8, height: 8)
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Local Network is off", systemImage: "wifi.exclamationmark")
+                .font(.body.weight(.medium))
+            Text(Self.text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Open System Settings") { NSWorkspace.shared.open(Self.settings) }
+                .buttonStyle(.link)
+                .font(.caption)
         }
+        .padding(.vertical, 4)
     }
 }
 

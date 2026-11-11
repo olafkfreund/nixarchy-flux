@@ -5,17 +5,43 @@ import ".."
 // The phone camera as a webcam on this computer, and its settings. The
 // values come from state.webcam.config, so the panel follows changes that
 // are made on the phone. Each change sends only the changed key.
+// Without a webcam, the card is idle. With canStart, Start then shows.
 Card {
   id: root
   property var view: null
   property var webcam: null
   property bool settingsOpen: false
 
+  // idleTitle shows while no stream runs. With canStart, Start shows while
+  // the card is idle or failed, and emits start(). note is a line under the
+  // title or the error of an idle or failed card, for example the device
+  // to confirm on. While startActive is false, Start is dim and does
+  // nothing, for example in the 3 seconds after a request.
+  property string idleTitle: "The webcam is off"
+  property string note: ""
+  property bool canStart: false
+  property bool startActive: true
+  signal start()
+
+  readonly property bool idle: !webcam
   readonly property var cam: webcam || ({})
   readonly property var config: cam.config || ({})
   readonly property var caps: cam.caps || ({})
   readonly property bool failed: !!cam.error
   readonly property bool live: !!cam.active && !failed
+
+  // The settings belong to a stream. They close when it ends.
+  onIdleChanged: if (idle) settingsOpen = false
+
+  // The chips of each setting. fluxd keeps at most 16 values in a list, and
+  // the card also shows at most 16. A number as a Repeater model makes that
+  // number of chips, so only an array gives chips.
+  readonly property int maxChips: 16
+  function chips(v, fallback) { return Array.isArray(v) && v.length > 0 ? v.slice(0, maxChips) : fallback }
+  readonly property var aspects: chips(caps.aspects, ["16:9", "4:3", "1:1", "9:16"])
+  readonly property var resolutions: chips(caps.resolutions, [720, 1080])
+  readonly property var cameras: chips(caps.cameras, [])
+  readonly property var whiteBalances: chips(caps.whiteBalance, [])
 
   implicitHeight: col.implicitHeight + 38
 
@@ -110,15 +136,10 @@ Card {
     anchors.top: parent.top
     anchors.margins: 19
     spacing: 12
-    Row {
-      spacing: 8
-      Icon {
-        anchors.verticalCenter: parent.verticalCenter
-        name: "webcam"
-        size: 14
-        color: root.live ? Theme.err : Theme.dim
-      }
-      SectionLabel { anchors.verticalCenter: parent.verticalCenter; text: root.live ? "PHONE CAMERA · LIVE" : "PHONE CAMERA" }
+    CardTitle {
+      icon: "webcam"
+      text: "Phone camera"
+      live: root.live
     }
 
     Item {
@@ -135,7 +156,9 @@ Card {
           width: parent.width
           visible: root.live && !root.restarting
           text: (root.cam.fromName || "The phone") + " is live as " + (root.cam.label || "a webcam")
-          font.weight: Font.Bold
+          font.weight: Font.DemiBold
+          wrapMode: Text.Wrap
+          maximumLineCount: 2
           elide: Text.ElideRight
         }
         Txt {
@@ -153,15 +176,29 @@ Card {
         }
         Txt {
           width: parent.width
-          visible: !root.failed && (root.restarting || !root.cam.active)
+          visible: !root.idle && !root.failed && (root.restarting || !root.cam.active)
           text: root.restarting ? "Restarting…" : "Starting…"
           color: Theme.dim
+        }
+        Txt {
+          width: parent.width
+          visible: root.idle
+          text: root.idleTitle
+          color: Theme.dim
+          wrapMode: Text.Wrap
         }
         Txt {
           width: parent.width
           visible: root.failed
           text: root.cam.error || ""
           color: Theme.err
+          wrapMode: Text.Wrap
+        }
+        Txt {
+          width: parent.width
+          visible: (root.idle || root.failed) && root.note !== ""
+          text: root.note
+          color: Theme.dim
           wrapMode: Text.Wrap
         }
       }
@@ -172,7 +209,15 @@ Card {
         anchors.verticalCenter: parent.verticalCenter
         spacing: 8
         OutlineButton {
-          visible: !root.failed
+          objectName: "startButton"
+          visible: root.canStart && (root.idle || root.failed)
+          icon: "play"
+          text: "Start"
+          active: root.startActive
+          onClicked: root.start()
+        }
+        OutlineButton {
+          visible: !root.failed && !root.idle
           icon: root.settingsOpen ? "close" : "tune"
           text: root.settingsOpen ? "Close" : "Settings"
           onClicked: root.settingsOpen = !root.settingsOpen
@@ -188,7 +233,7 @@ Card {
 
     // Settings
     Rectangle {
-      visible: root.settingsOpen && !root.failed
+      visible: root.settingsOpen && !root.failed && !root.idle
       width: parent.width
       height: 1
       color: Theme.bg3
@@ -196,7 +241,7 @@ Card {
 
     GridLayout {
       id: settings
-      visible: root.settingsOpen && !root.failed
+      visible: root.settingsOpen && !root.failed && !root.idle
       width: parent.width
       columns: width >= 640 ? 2 : 1
       columnSpacing: 32
@@ -212,7 +257,7 @@ Card {
         Group {
           label: "FORMAT"
           Repeater {
-            model: root.caps.aspects && root.caps.aspects.length ? root.caps.aspects : ["16:9", "4:3", "1:1", "9:16"]
+            model: root.aspects
             delegate: Chip {
               required property var modelData
               text: modelData
@@ -225,7 +270,7 @@ Card {
         Group {
           label: "RESOLUTION"
           Repeater {
-            model: root.caps.resolutions && root.caps.resolutions.length ? root.caps.resolutions : [720, 1080]
+            model: root.resolutions
             delegate: Chip {
               required property var modelData
               text: modelData + "p"
@@ -237,9 +282,9 @@ Card {
 
         Group {
           label: "CAMERA"
-          visible: !!root.caps.cameras && root.caps.cameras.length > 0
+          visible: root.cameras.length > 0
           Repeater {
-            model: root.caps.cameras || []
+            model: root.cameras
             delegate: Chip {
               required property var modelData
               text: root.title(modelData)
@@ -251,9 +296,9 @@ Card {
 
         Group {
           label: "WHITE BALANCE"
-          visible: !!root.caps.whiteBalance && root.caps.whiteBalance.length > 0
+          visible: root.whiteBalances.length > 0
           Repeater {
-            model: root.caps.whiteBalance || []
+            model: root.whiteBalances
             delegate: Chip {
               required property var modelData
               text: root.title(modelData)
@@ -348,9 +393,9 @@ Card {
     }
 
     Item {
-      visible: root.settingsOpen && !root.failed
+      visible: root.settingsOpen && !root.failed && !root.idle
       width: parent.width
-      height: Math.max(resetButton.implicitHeight, note.implicitHeight)
+      height: Math.max(resetButton.implicitHeight, resetNote.implicitHeight)
       OutlineButton {
         id: resetButton
         anchors.verticalCenter: parent.verticalCenter
@@ -359,7 +404,7 @@ Card {
         onClicked: root.send({ reset: true })
       }
       Txt {
-        id: note
+        id: resetNote
         anchors.left: resetButton.right
         anchors.leftMargin: 14
         anchors.right: parent.right

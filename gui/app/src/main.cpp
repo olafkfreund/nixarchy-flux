@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "fluxbackend.h"
+#include "selfwatch.h"
 #include "singleinstance.h"
 #include "themewatcher.h"
 
@@ -121,22 +122,32 @@ int main(int argc, char *argv[])
     parser.addOption({QStringLiteral("snapshot"),
                       QStringLiteral("Render every screen with test data into PNG files in <dir>, then quit."),
                       QStringLiteral("dir")});
+    // --replace comes from the restart after an update. The new process
+    // waits for the earlier window to quit, and then takes its place.
+    QCommandLineOption replace(QStringLiteral("replace"),
+                               QStringLiteral("Wait for the running Flux window to quit, then take its place."));
+    replace.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOption(replace);
     parser.addPositionalArgument(QStringLiteral("page"),
                                  QStringLiteral("The page to open: overview, clipboard, files, notifications, "
-                                                "messages, commands, or browse. With --snapshot: the screens to render."),
+                                                "messages, or commands. With --snapshot: the screens to render."),
                                  QStringLiteral("[page]"));
     parser.process(app);
     const QString page = parser.positionalArguments().value(0);
 
     SingleInstance instance;
-    if (instance.forward(page))
+    if (!instance.claim(page, parser.isSet(replace)))
         return 0;
-    if (!instance.listen())
-        qWarning("flux-gui: cannot listen on %s", qPrintable(SingleInstance::socketPath()));
 
     QQmlApplicationEngine engine;
     FluxBackend *backend = expose(engine);
     engine.rootContext()->setContextProperty(QStringLiteral("fluxInitialPage"), page);
+    // An update replaces flux-gui and restarts fluxd. The window then
+    // offers a restart into the new version.
+    auto *self = new SelfWatch(&engine);
+    engine.rootContext()->setContextProperty(QStringLiteral("fluxSelf"), self);
+    QObject::connect(self, &SelfWatch::aboutToRestart, &instance, &SingleInstance::close);
+    QObject::connect(backend, &FluxBackend::connectedChanged, self, &SelfWatch::check);
     engine.load(QUrl(QStringLiteral("qrc:/flux/app/Main.qml")));
     if (engine.rootObjects().isEmpty())
         return 1;

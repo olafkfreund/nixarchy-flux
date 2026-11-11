@@ -47,11 +47,20 @@ public struct TermSpan: Sendable, Hashable {
     }
 }
 
-/// One line of terminal text.
+/// One line of terminal text. `fill` is the background of the blank cells
+/// after the text, for example the background of a panel. A nil fill is the
+/// default background. `cols` is the width of the terminal that drew the
+/// line, when `TermText.tidy` finds it, else 0.
 public struct TermLine: Sendable, Hashable {
     public var spans: [TermSpan]
+    public var fill: TermColor?
+    public var cols: Int
 
-    public init(_ spans: [TermSpan]) { self.spans = spans }
+    public init(_ spans: [TermSpan], fill: TermColor? = nil, cols: Int = 0) {
+        self.spans = spans
+        self.fill = fill
+        self.cols = cols
+    }
 
     public var text: String { spans.map(\.text).joined() }
 }
@@ -62,8 +71,10 @@ public enum TermText {
     private static let tabWidth = 8
 
     /// Parses text with ANSI SGR sequences into lines of styled spans. It
-    /// drops other escape sequences, carriage returns, and other control
-    /// characters. It expands tabs to the next multiple of 8 columns.
+    /// drops other escape sequences, carriage returns, and the other C0 and
+    /// C1 control characters. It shows U+FFFD in place of each character
+    /// that `isBidiMark` finds. It expands tabs to the next multiple of 8
+    /// columns.
     public static func parse(_ text: String) -> [TermLine] {
         let s = Array(text.unicodeScalars)
         var lines: [TermLine] = []
@@ -74,7 +85,8 @@ public enum TermText {
 
         func flush() {
             guard !run.isEmpty else { return }
-            if let last = spans.last, last.style == style {
+            // No copy of the last span, so that the append can grow its text in place.
+            if !spans.isEmpty, spans[spans.count - 1].style == style {
                 spans[spans.count - 1].text += String(run)
             } else {
                 spans.append(TermSpan(String(run), style))
@@ -125,12 +137,20 @@ public enum TermText {
                     i += 1
                 }
             default:
-                if c == "\r" || c.value < 0x20 || c.value == 0x7F {
+                if c == "\r" || c.value < 0x20 || (0x7F...0x9F).contains(c.value) {
                     i += 1
                     continue
                 }
-                // A no-break space shows as a space.
-                run.append(c == "\u{A0}" ? " " : c)
+                var out = c
+                if c == "\u{A0}" {
+                    // A no-break space shows as a space.
+                    out = " "
+                } else if isBidiMark(c) {
+                    out = "\u{FFFD}"
+                } else if let g = glyphs[c] {
+                    out = g
+                }
+                run.append(out)
                 column += 1
                 i += 1
             }
@@ -138,6 +158,26 @@ public enum TermText {
         flush()
         if !spans.isEmpty { lines.append(TermLine(spans)) }
         return lines
+    }
+
+    /// Symbols that agents use and that phone fonts often do not have, with
+    /// a shape of the same meaning. A missing glyph shows as an empty box,
+    /// and the record symbol can show as a color emoji. Claude Code marks
+    /// its modes with ⏵⏵. The Android app uses the same map.
+    private static let glyphs: [Unicode.Scalar: Unicode.Scalar] = ["⏵": "▸", "⏴": "◂", "⏶": "▴", "⏷": "▾", "⏺": "●"]
+
+    /// Reports whether `c` sets the direction of text, or is a line or
+    /// paragraph separator. The app shows text with the Unicode
+    /// bidirectional algorithm, and a terminal does not. So such a character
+    /// can show a command in another order. fluxd changes these characters
+    /// too, but an older fluxd does not.
+    static func isBidiMark(_ c: Unicode.Scalar) -> Bool {
+        switch c.value {
+        case 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069, 0x2028, 0x2029:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Applies the SGR parameters, for example "1;38;5;6", to `start`.
@@ -252,41 +292,9 @@ public enum TermText {
         return levels[n / 36] << 16 | levels[n / 6 % 6] << 8 | levels[n % 6]
     }
 
-    /// The longest rule line that the output view shows. The Android app
-    /// uses the same width, so both show the same output.
-    private static let ruleWidth = 32
+    static let ruleChars: Set<Character> = ["─", "━", "═", "-", "_", "="]
 
-    private static let ruleChars: Set<Character> = ["─", "━", "═", "-", "_", "="]
-
-    /// Makes terminal lines fit the output view. It removes the blanks at
-    /// the end of each line and the empty lines at the end. It also shortens
-    /// lines of box rules, because they fill the width of the terminal.
-    public static func tidy(_ lines: [TermLine]) -> [TermLine] {
-        var out = lines.map { line -> TermLine in
-            let trimmed = trimEnd(line)
-            let text = trimmed.text
-            if text.count > ruleWidth && text.allSatisfy({ ruleChars.contains($0) }) { return take(trimmed, ruleWidth) }
-            return trimmed
-        }
-        while let last = out.last, last.spans.isEmpty { out.removeLast() }
-        return out
-    }
-
-    private static func trimEnd(_ line: TermLine) -> TermLine {
-        var spans = line.spans
-        while let last = spans.last {
-            var t = Substring(last.text)
-            while let c = t.last, c.isWhitespace { t.removeLast() }
-            if !t.isEmpty {
-                spans[spans.count - 1].text = String(t)
-                break
-            }
-            spans.removeLast()
-        }
-        return TermLine(spans)
-    }
-
-    private static func take(_ line: TermLine, _ n: Int) -> TermLine {
+    static func take(_ line: TermLine, _ n: Int) -> TermLine {
         var out: [TermSpan] = []
         var left = n
         for s in line.spans {
@@ -295,25 +303,37 @@ public enum TermText {
             out.append(TermSpan(t, s.style))
             left -= t.count
         }
-        return TermLine(out)
+        return TermLine(out, fill: line.fill)
     }
 
-    /// Parses and tidies the output text of an agent.
-    public static func lines(_ text: String) -> [TermLine] { tidy(parse(text)) }
+    /// Parses and tidies the output text of an agent, see `tidy`.
+    public static func lines(_ text: String) -> [TermLine] {
+        tidy(parse(text))
+    }
 }
 
-/// A numbered choice of a question or an approval dialog. `key` is the
-/// digit that selects it.
+/// A choice of a question or an approval dialog. `key` is the number that
+/// the app shows. `keys` are the herdr key names that select the choice:
+/// the digit of a numbered dialog, or the arrows and Enter of a menu, see
+/// `findMenu`. `detail` is the line that describes the choice, or empty.
 public struct AgentChoice: Sendable, Hashable, Identifiable {
     public var key: String
     public var label: String
     public var selected: Bool
+    public var keys: [String]
+    public var detail: String
 
-    public init(_ key: String, _ label: String, selected: Bool = false) {
+    public init(_ key: String, _ label: String, selected: Bool = false, keys: [String]? = nil, detail: String = "") {
         self.key = key
         self.label = label
         self.selected = selected
+        self.keys = keys ?? [key]
+        self.detail = detail
     }
+
+    /// The line under the bubble of an answer: the digit that went to the
+    /// agent, or the menu for the arrows and Enter of a menu.
+    public var sentMeta: String { keys == [key] ? "Sent key \(key)" : "Selected in the menu" }
 
     public var id: String { key }
 
@@ -322,12 +342,31 @@ public struct AgentChoice: Sendable, Hashable, Identifiable {
     /// The last choice must be this close to the end of the output, in lines.
     private static let tailLines = 15
 
+    /// The hints under the choices of a dialog, which are not the
+    /// description of a choice.
+    private static let choiceHints = ["↑↓", "enter submit", "Enter to select", "esc dismiss", "Esc to cancel", "to navigate"]
+
+    /// A line without the panel bar of opencode.
+    private static func barless(_ line: String) -> String {
+        let t = String(line.drop(while: { $0.isWhitespace }))
+        return t.hasPrefix("┃") ? String(t.dropFirst()) : line
+    }
+
+    /// The count of spaces at the start of `s`.
+    private static func lead(_ s: String) -> Int {
+        s.prefix(while: { $0 == " " }).count
+    }
+
     /// Finds the numbered choices of the dialog at the end of the output,
-    /// for example the approval dialog of Claude Code. It takes the last run
-    /// of numbered lines that starts at 1 and counts up by 1. Other lines can
-    /// come between the choices, for example descriptions or a rule. It
+    /// for example the approval dialog of Claude Code or the question of
+    /// opencode in its panel. It takes the last run of numbered lines that
+    /// starts at 1 and counts up by 1. Other lines can come between the
+    /// choices, for example descriptions or a rule. The first line under a
+    /// choice that is indented more than the choice is its description. It
     /// returns an empty list when it finds fewer than 2 choices, or when the
-    /// choices are not near the end.
+    /// choices are not near the end. A dialog takes the place of the input,
+    /// so it also returns an empty list when an input prompt comes after the
+    /// choices. Then the lines are a numbered list in a message of the agent.
     public static func find(_ lines: [String]) -> [AgentChoice] {
         let from = max(0, lines.count - scanLines)
         var hits: [(index: Int, number: Int, choice: AgentChoice)] = []
@@ -342,15 +381,43 @@ public struct AgentChoice: Sendable, Hashable, Identifiable {
             run.append(h)
         }
         guard run.count >= 2, let last = run.last, last.index >= lines.count - tailLines else { return [] }
+        if lines[(last.index + 1)...].contains(where: isInputPrompt) { return [] }
+        var described: [AgentChoice] = []
+        for (k, h) in run.enumerated() {
+            let next = k + 1 < run.count ? run[k + 1].index : min(lines.count, h.index + 3)
+            let col = lead(barless(lines[h.index]))
+            var choice = h.choice
+            if h.index + 1 < next,
+               let d = (h.index + 1..<next).map({ barless(lines[$0]) }).first(where: { $0.contains(where: { !$0.isWhitespace }) }),
+               lead(d) > col, !choiceHints.contains(where: { d.contains($0) }) {
+                choice.detail = d.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            described.append(choice)
+        }
         // A single key selects a choice, so only 1 to 9 work.
-        return run.map(\.choice).filter { $0.key.count == 1 }
+        return described.filter { $0.key.count == 1 }
+    }
+
+    /// True when `line` is the input prompt of an agent, also inside a box,
+    /// and not a choice. Examples are "❯" of Claude Code and "› Ask Codex to
+    /// do anything" of Codex.
+    private static func isInputPrompt(_ line: String) -> Bool {
+        guard parse(line) == nil else { return false }
+        var t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasPrefix("│") { t.removeFirst() }
+        if t.hasSuffix("│") { t.removeLast() }
+        t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let c = t.first, "❯›>".contains(c) else { return false }
+        return t.count == 1 || t.dropFirst().first?.isWhitespace == true
     }
 
     /// Reads 1 line in the form `[❯›>] N. label` or `N) label`, with blanks
-    /// before and after the marker, as the Android app does.
+    /// before and after the marker, as the Android app does. The panel bar
+    /// of opencode can come first.
     private static func parse(_ line: String) -> (Int, AgentChoice)? {
         func blank(_ c: Character) -> Bool { c == " " || c == "\t" || c == "\u{0B}" || c == "\u{0C}" || c == "\r" || c == "\n" }
         var s = Substring(line).drop(while: blank)
+        if s.first == "┃" { s = s.dropFirst().drop(while: blank) }
         var selected = false
         if let c = s.first, "❯›>".contains(c) {
             selected = true
@@ -365,5 +432,78 @@ public struct AgentChoice: Sendable, Hashable, Identifiable {
         guard s.count >= 2, let space = s.first, blank(space) else { return nil }
         let label = s.trimmingCharacters(in: .whitespacesAndNewlines)
         return (number, AgentChoice(String(number), label, selected: selected))
+    }
+
+    /// How far from the end of the output a menu row can be, in lines.
+    private static let menuScanLines = 10
+    /// The words of the hints after the choices of a menu row, for example "⇆ select" and "enter confirm" of opencode.
+    private static let menuHints = ["⇆", "ctrl+", "enter confirm", "esc "]
+    /// The most choices of a menu row. herdr takes 8 keys at most, so the last choice is 6 arrows and Enter away.
+    private static let menuMax = 7
+
+    /// Splits `text` at each run of 2 or more blanks, as Kotlin splits at \s{2,}.
+    private static func splitAtGaps(_ text: String) -> [String] {
+        func blank(_ c: Character) -> Bool { c == " " || c == "\t" || c == "\u{0B}" || c == "\u{0C}" || c == "\r" || c == "\n" }
+        var parts: [String] = []
+        var current = ""
+        var gap = ""
+        for c in text {
+            if blank(c) {
+                gap.append(c)
+                continue
+            }
+            if gap.count >= 2 {
+                parts.append(current)
+                current = ""
+            } else {
+                current += gap
+            }
+            gap = ""
+            current.append(c)
+        }
+        if gap.count >= 2 {
+            parts.append(current)
+            current = ""
+        } else {
+            current += gap
+        }
+        parts.append(current)
+        return parts
+    }
+
+    /// Finds the choices of a menu row near the end of the output, for
+    /// example the permission dialog of opencode: "Allow once   Allow
+    /// always   Reject". The row has a hint with "⇆" or "enter confirm".
+    /// Each choice is a run of text with a background, before the hint.
+    /// The selected choice has another background than the others. Right
+    /// moves the selection to the next choice and wraps at the end, and
+    /// Enter confirms it. So the keys of a choice are the arrows from the
+    /// selected choice and Enter. It returns an empty list when it finds no
+    /// such row or fewer than 2 choices.
+    public static func findMenu(_ lines: [TermLine]) -> [AgentChoice] {
+        for i in lines.indices.reversed().prefix(menuScanLines) {
+            let line = lines[i]
+            let text = line.text
+            if !text.contains("⇆") && !text.contains("enter confirm") { continue }
+            var runs: [(text: String, bg: TermColor?)] = []
+            scan: for span in line.spans {
+                // Choices in the same style share a span. 2 spaces or more separate them.
+                for part in splitAtGaps(span.text) {
+                    let t = part.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if menuHints.contains(where: { part.contains($0) }) || t == "enter" || t == "esc" { break scan }
+                    if t.isEmpty || !t.contains(where: { $0.isLetter }) { continue }
+                    runs.append((t, span.style.inverse ? span.style.fg : span.style.bg))
+                }
+            }
+            if runs.count < 2 || runs.count > menuMax || runs.contains(where: { $0.bg == nil }) { return [] }
+            // The selected choice has the background that no other choice has.
+            let selected = runs.indices.first { k in runs.filter { $0.bg == runs[k].bg }.count == 1 } ?? 0
+            let n = runs.count
+            return runs.enumerated().map { k, r in
+                let steps = (k - selected + n) % n
+                return AgentChoice(String(k + 1), r.text, selected: k == selected, keys: Array(repeating: "right", count: steps) + ["enter"])
+            }
+        }
+        return []
     }
 }

@@ -68,7 +68,12 @@ func start(t *testing.T) *fakeDaemon {
 	path := t.TempDir() + "/fluxd.sock"
 	ctx, cancel := context.WithCancel(context.Background())
 	errs := make(chan error, 1)
-	go func() { errs <- ipc.Serve(ctx, path, d) }()
+	ln, err := ipc.Listen(path)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	go func() { errs <- ipc.Serve(ctx, ln, d) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-errs; err != nil {

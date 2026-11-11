@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -38,8 +40,10 @@ func approveRaw(t *testing.T, fields map[string]any) json.RawMessage {
 	return b
 }
 
+// errCode returns the code of an API error, or "" for another error.
 func errCode(err error) string {
-	if e, ok := err.(*Error); ok {
+	var e *Error
+	if errors.As(err, &e) {
 		return e.Code
 	}
 	return ""
@@ -54,6 +58,7 @@ func TestApproveRequestChecks(t *testing.T) {
 	}{
 		{"a newline in a field", map[string]any{"user": "alice\nservice=sshd"}, "bad_params"},
 		{"a short nonce", map[string]any{"nonce": "abcd"}, "bad_params"},
+		{"a negative time", map[string]any{"time": int64(math.MinInt64)}, "bad_params"},
 		{"an unknown phone", map[string]any{"device": "other"}, "not_found"},
 		{"an offline phone", nil, "offline"},
 	}
@@ -135,6 +140,11 @@ func TestApprovalExpires(t *testing.T) {
 func TestHandleApprove(t *testing.T) {
 	sig := base64.StdEncoding.EncodeToString([]byte("0123456789"))
 	key := base64.StdEncoding.EncodeToString([]byte("key"))
+	// The sizes of an RSA 2048 key of Windows Hello and its signature.
+	rsaSig := base64.StdEncoding.EncodeToString(make([]byte, 256))
+	rsaKey := base64.StdEncoding.EncodeToString(make([]byte, 294))
+	longSig := base64.StdEncoding.EncodeToString(make([]byte, approveMaxSignature+1))
+	longKey := base64.StdEncoding.EncodeToString(make([]byte, approveMaxPublicKey+1))
 	cases := []struct {
 		kind  string
 		body  map[string]any
@@ -144,6 +154,10 @@ func TestHandleApprove(t *testing.T) {
 		{"request", map[string]any{"kind": "response", "signature": sig}, "approved"},
 		{"request", map[string]any{"kind": "response", "error": "No fingerprint is set up"}, "failed"},
 		{"enroll", map[string]any{"kind": "enrolled", "signature": sig, "publicKey": key}, "enrolled"},
+		{"request", map[string]any{"kind": "response", "signature": rsaSig}, "approved"},
+		{"enroll", map[string]any{"kind": "enrolled", "signature": rsaSig, "publicKey": rsaKey}, "enrolled"},
+		{"request", map[string]any{"kind": "response", "signature": longSig}, ""},
+		{"enroll", map[string]any{"kind": "enrolled", "signature": rsaSig, "publicKey": longKey}, ""},
 		{"request", map[string]any{"kind": "response", "signature": "not base64!"}, ""},
 		{"request", map[string]any{"kind": "enrolled", "signature": sig, "publicKey": key}, ""},
 	}

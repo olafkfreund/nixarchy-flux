@@ -13,6 +13,8 @@ final class AgentsWindowModel {
     let plugin: HerdrPlugin
     /// The pane of the selected agent.
     var selection: String?
+    /// True while the sheet that starts an agent shows.
+    var newAgent = false
     /// The reply text of each pane. A draft stays when the user selects another agent.
     var drafts: [String: String] = [:]
     /// The cursor of each reply field, in UTF-16 units.
@@ -21,6 +23,8 @@ final class AgentsWindowModel {
     /// output then waits with its refresh.
     var visible = true
     let dictation = Dictation()
+    /// Waits for the permissions of a new dictation. `close` cancels it.
+    @ObservationIgnored private var starting: Task<Void, Never>?
 
     init(deviceId: String, app: AppModel, plugin: HerdrPlugin, selection: String?) {
         self.deviceId = deviceId
@@ -30,7 +34,10 @@ final class AgentsWindowModel {
     }
 
     var device: DeviceSnapshot? { app.state.devices.first { $0.id == deviceId } }
+    /// The agents of all herdr sessions of the computer.
     var herdr: HerdrState? { plugin.model.states[deviceId] }
+    /// The agents of the herdr session that the list shows.
+    var shown: HerdrState? { plugin.model.scoped(deviceId) }
 
     /// Puts dictated words in the draft of `pane` at its cursor.
     func insert(_ spoken: String, pane: String) {
@@ -41,7 +48,25 @@ final class AgentsWindowModel {
         cursors[pane] = NSRange(location: edit.cursor, length: 0)
     }
 
+    /// Starts a dictation into the draft of `pane` after macOS allowed the
+    /// microphone and the speech recognition. `onProblem` gets the message
+    /// when a permission is missing.
+    func dictate(pane: String, language: String, hints: [String], onProblem: @escaping @MainActor (String) -> Void) {
+        starting?.cancel()
+        starting = Task { @MainActor [weak self] in
+            let problem = await Dictation.authorize()
+            // The window closed while macOS asked for the permissions.
+            guard !Task.isCancelled, let self else { return }
+            if let problem {
+                onProblem(problem)
+                return
+            }
+            self.dictation.start(language: language, hints: hints) { [weak self] spoken in self?.insert(spoken, pane: pane) }
+        }
+    }
+
     func close() {
+        starting?.cancel()
         dictation.cancel()
         if let selection { plugin.closeOutput(deviceId, pane: selection) }
     }
@@ -58,9 +83,17 @@ final class AgentsWindows: NSObject, NSWindowDelegate {
     }
     private var open: [String: Entry] = [:]
 
+    /// True while the agents window of the computer `deviceId` is open.
+    func isOpen(_ deviceId: String) -> Bool { open[deviceId] != nil }
+
     /// Shows the agents window of a computer, and opens it when it is not
-    /// open. `pane` selects that agent.
+    /// open. `pane` selects that agent. herdr keeps 1 output of each
+    /// computer, so an agent chat of the same computer in the main window
+    /// gives its place to the chat of the computer.
     func show(_ deviceId: String, pane: String? = nil, app: AppModel) {
+        if case .agent(deviceId, _) = app.chat { app.chat = .computer(deviceId) }
+        // The list shows the session of the agent.
+        if let pane { app.core.plugin(HerdrPlugin.self)?.model.reveal(deviceId, pane: pane) }
         if let entry = open[deviceId] {
             if let pane { entry.model.selection = pane }
             entry.window.makeKeyAndOrderFront(nil)
@@ -69,7 +102,7 @@ final class AgentsWindows: NSObject, NSWindowDelegate {
         }
         guard let plugin = app.core.plugin(HerdrPlugin.self) else { return }
         let model = AgentsWindowModel(deviceId: deviceId, app: app, plugin: plugin, selection: pane)
-        let hosting = NSHostingController(rootView: AgentsView(model: model))
+        let hosting = NSHostingController(rootView: AgentsView(model: model).themeWindow(app))
         hosting.sizingOptions = [.minSize]
         let window = NSWindow(contentViewController: hosting)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]

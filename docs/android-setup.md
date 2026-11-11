@@ -96,8 +96,8 @@ To give Flux these permissions:
 2. Open the menu in the top corner and select **Allow restricted settings**.
    The menu item shows only after Android has shown **Restricted setting** for Flux once.
 3. Confirm with the PIN or the fingerprint of the phone.
-4. Return to Flux and open the page of the computer.
-   Scroll below the large tiles and turn on **Share notifications** or **Text messages** again.
+4. Return to Flux and open **Computers > Sync**.
+   Turn on **Share notifications** or **Text messages** again.
 
 If the menu item does not show, allow restricted settings from the computer with `adb`:
 
@@ -107,11 +107,27 @@ adb shell appops set org.omarchy.flux ACCESS_RESTRICTED_SETTINGS allow
 
 Then turn on the switch in Flux again.
 
+## Send clipboard tile
+
+The **Send clipboard** tile sends the current clip to each connected paired computer.
+To add the tile:
+
+1. Open the Quick Settings panel and open the edit screen.
+2. Drag **Send clipboard** into the panel.
+3. Copy in any app, then tap the tile.
+
+The Flux service notification also has a **Send clipboard** action while a computer is connected.
+The text selection menu of any app has a **Send to computer** action.
+It sends the selected text to the computer that you pick.
+These paths need no setup and no extra permission.
+
 ## How Flux for Android is set up
 
 ### Distribution
 
 Each GitHub release has `flux-android-VERSION.apk` and `SHA256SUMS`.
+When the release signing key is set, the release also has `SHA256SUMS.sig`, the signature of `SHA256SUMS`.
+Check the signature before you check the APK against `SHA256SUMS`.
 All release APKs use one persistent release key.
 Flux is not on Google Play.
 See [Install a release APK](android.md#install-a-release-apk) to check the download.
@@ -123,23 +139,32 @@ It keeps the links to the computers open while the app is in the background.
 Android requires a visible notification for this service, so Flux shows **Waiting for a computer on this network** or the number of connected computers.
 
 The service starts again after a restart of the phone and after an app update.
-**Turn off Flux** in the app menu or **Turn off** in the notification stops the service.
+**Turn off Flux** in **Computers** or **Turn off** in the notification stops the service.
 Flux then stays off after a restart, until you turn it on again.
+
+While the webcam or the mic streams, `StreamService` also runs.
+It is a foreground service of the `camera` and `microphone` types, so the streams keep running in the background.
+Its notification is in the **Live streams** channel.
+See [streams in the background](camera.md#streams-in-the-background).
 
 ### Network
 
-Flux uses KDE Connect protocol version 8 with Flux extensions.
+Flux uses Flux protocol version 8.
 Both devices must be on the same local network, or use an [extra address](tailscale.md).
 
 | Part | Port or name | Direction |
 | --- | --- | --- |
-| mDNS announcement | `_kdeconnect._udp` | The phone announces itself for as long as the service runs. `fluxd` finds the phone this way. |
-| UDP identity | UDP port 1716 | The phone listens for identities from computers and sends its own identity. |
-| TLS link | A TCP port from 1716 to 1764 | The phone accepts links and opens links to computers. |
+| mDNS announcement | `_flux._udp` | The phone announces itself for as long as the service runs. `fluxd` finds the phone this way. |
+| UDP identity | UDP port 12100 | The phone listens for identities from computers and sends its own identity. |
+| TLS link | A TCP port from 12100 to 12108 | The phone accepts links and opens links to computers. |
+| File, stream, and tunnel connections | A TCP port from 12070 to 12099 | The phone listens, and the paired computer connects. |
+
+An earlier Flux for Android uses other ports and cannot connect to a `fluxd` with these ports.
+See [Update the app](android.md#update-the-app).
 
 When the app opens, the phone scans for computers for 10 seconds.
 A scan sends the identity over UDP and browses mDNS, then stops.
-To scan again, tap **Scan again** on the device list.
+To scan again, open **Computers** and pull the list down, or tap **Scan again**.
 
 ### Permissions
 
@@ -150,7 +175,7 @@ The other permissions need no prompt.
 | --- | --- | --- |
 | `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE`, `CHANGE_WIFI_MULTICAST_STATE`, `CHANGE_NETWORK_STATE` | Discovery and links on the local network | No prompt |
 | `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `RECEIVE_BOOT_COMPLETED`, `WAKE_LOCK` | The background service | No prompt |
-| `POST_NOTIFICATIONS` | The service notification, pair requests, and alerts | When the app first opens |
+| `POST_NOTIFICATIONS` | The service notification, pair requests, and alerts | Once after the first pairing. **Chat** tells why. |
 | `USE_FULL_SCREEN_INTENT`, `VIBRATE` | **Find my phone** and fingerprint approval requests | No prompt |
 | Notification listener | **Share notifications** | The switch opens the Android settings page |
 | `QUERY_ALL_PACKAGES` | App names on shared notifications | No prompt |
@@ -160,11 +185,106 @@ The other permissions need no prompt.
 | `READ_MEDIA_IMAGES`, `READ_MEDIA_VISUAL_USER_SELECTED`, `READ_EXTERNAL_STORAGE` | **Send new screenshots** and **Send new photos** | When you turn on the switch |
 | `CAMERA` | The camera modes and the webcam | When a camera page opens |
 | `RECORD_AUDIO`, `FOREGROUND_SERVICE_MEDIA_PROJECTION` | The microphone, dictation, and the screen mirror | When the feature starts |
-| `USE_BIOMETRIC` | [Fingerprint approval](approvals.md) of `sudo` and polkit | No prompt |
+| `FOREGROUND_SERVICE_MEDIA_PLAYBACK` | [Play on phone](camera.md#phone-as-speaker) keeps the audio of the computer playing in the background | No prompt |
+| `USE_BIOMETRIC` | [Fingerprint approval](approvals.md) of `sudo` and polkit, and the [SSH key](ssh.md) | No prompt |
+| `HIDE_OVERLAY_WINDOWS` | The pair sheet, the approval screen, and the SSH key screen hide the windows of other apps on Android 12 and later | No prompt |
+| `REQUEST_INSTALL_PACKAGES` | [Updates that the computer sends](android.md#update-the-app) | Android asks to allow **Install unknown apps** at the first update |
+
+Flux shows no permission dialog before the first pairing.
+Keep Flux open for the first pairing. Before you allow notifications, Android 13 and later show no notification for a pair request.
+After the first pairing, **Chat** tells why Flux needs notifications: **Allow notifications, so that Flux can show when an agent needs you.**
+1 second later, Android asks once for notifications.
+If you deny it, **Chat** keeps the question with **Allow**.
+After 2 denials, Android does not show its dialog again, so **Chat** shows **Open settings** in its place.
+**Hide** removes the question. You can allow notifications in the settings of Android at any time.
 
 `READ_EXTERNAL_STORAGE` applies only to Android 12 and earlier.
 The call log and the contacts are optional for **Call alerts**. They add the number and the name of the caller.
+When you allow the call log later, the next call shows the number without a restart of Flux.
 The source of truth is `android/app/src/main/AndroidManifest.xml`.
+
+### Sync switches
+
+The switches on the **Sync** screen in **Computers** are settings of the phone.
+Each switch applies to every paired computer, not only to the computer whose page shows it.
+For example, **Text messages** lets each paired computer read your conversations and send text messages.
+**Send new photos** sends each new photo to each connected computer.
+The page lists the computers that get the data.
+
+### Shared notifications
+
+**Share notifications** sends the notifications of other apps to the connected computers.
+Flux does not send these notifications:
+
+- The notifications of Flux.
+- Ongoing notifications and the notifications of foreground services, for example a call or a VPN.
+- Group summaries.
+- Notifications whose visibility, or whose channel lock screen visibility, is `VISIBILITY_SECRET`. The lock screen setting of the whole phone does not change what Flux sends.
+
+Flux sends the notifications of the apps in a work profile too.
+
+A computer gets the reply field and the buttons of a notification.
+Flux keeps a button on the phone when it needs text input or the phone unlock.
+A reply that needs the phone unlock also stays on the phone.
+
+A computer can reply, press a button, or dismiss a notification only when Flux sent that notification to that computer.
+It can press only the buttons that Flux sent.
+When you turn off **Share notifications**, the computers remove the shared notifications, and their replies and buttons stop working.
+The same happens when you take the notification access away from Flux.
+
+### Received files and links
+
+Flux saves each received file in **Downloads**.
+Flux removes control characters and format characters, such as the marks that change the text direction, from the file name.
+A received app opens the Android installer only when it is a newer Flux with the signing key of the installed Flux.
+Flux saves any other app in **Downloads**, and its notification does not install it.
+The notification of a file with a type that Android does not know opens **Downloads**.
+
+Flux opens a received link only when it is an `http` or `https` URL with a host.
+Flux puts any other value, such as a `file:` URL, on the clipboard as text.
+
+The share sheet of Android sends the files that another app shares.
+Flux does not send `file:` paths or its own files from the share sheet.
+
+### Automatic screenshots and photos
+
+**Send new screenshots** and **Send new photos** send only the images of the default camera app and of the system apps.
+The camera and the screenshot tool of the phone are such apps.
+Flux does not send an image that another app puts in the camera or screenshot folder.
+When you turn off a switch, Flux stops the images of that switch that did not go out yet.
+
+When no computer is connected, the new images wait.
+They go out when a computer connects.
+
+When a connected computer does not take an image, Flux tries again after 1 minute.
+Each new wait is 2 times longer, up to 1 hour.
+After 8 tries, Flux stops and shows a notification.
+Only a try with a connected computer counts.
+
+### Remote control and the phone lock
+
+**Touchpad and keyboard**, **Remote desktop**, and **Extend screen** ask for the phone lock before they open.
+They ask also when the switch on the computer is off, because the computer can turn it on while the page shows.
+An unlock stays valid for 5 minutes.
+After this time, the page asks for the phone lock again in these cases:
+
+- The app comes back to the front.
+- The computer connects again, or it turns its switch on.
+
+If you cancel, the page closes.
+
+### Data and backups
+
+Flux keeps its data out of cloud backups and out of the transfer to a new phone.
+The data holds the identity of the phone and the certificates of the paired computers, so a copy could act as this phone.
+After a move to a new phone, pair each computer again.
+Then enroll [fingerprint approval](approvals.md) again with `sudo flux-cli approve enroll`.
+
+When you unpair a computer on the phone, the phone deletes its fingerprint approval key for that computer.
+The key file on the computer stays until you run `sudo flux-cli approve remove`.
+
+The [SSH key](ssh.md) stays in the Android Keystore of the phone, and no backup or transfer copies it.
+A new phone has no SSH key. Turn on **SSH key** there, and add the new public key to your servers.
 
 ## Developer verification
 

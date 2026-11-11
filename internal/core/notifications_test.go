@@ -1,13 +1,57 @@
 package core
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"flux/internal/config"
+	"flux/internal/proto"
 )
+
+// waitIdle waits until the worker of q has run all its jobs.
+func waitIdle(t *testing.T, d *Daemon, q *contentQueue) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		d.mu.Lock()
+		idle := !q.running && len(q.jobs) == 0
+		d.mu.Unlock()
+		if idle {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the worker did not finish within 5 seconds")
+}
+
+func testDaemon() *Daemon {
+	return &Daemon{
+		cfg:     &config.Config{Notifications: true, AutoClipboard: true},
+		clip:    &memClipboard{},
+		devices: map[string]*Device{},
+		logger:  log.New(io.Discard, "", 0),
+	}
+}
+
+func notificationPacket(body map[string]any) *proto.Packet {
+	return proto.New(proto.TypeNotification, body)
+}
 
 func TestDismissable(t *testing.T) {
 	list := []*PhoneNotification{
@@ -45,23 +89,142 @@ func TestDismissAllNotificationsOffline(t *testing.T) {
 	}
 }
 
-func TestPruneIcons(t *testing.T) {
-	dir := t.TempDir()
-	oldIcon, newIcon := filepath.Join(dir, "old.png"), filepath.Join(dir, "new.png")
-	for _, p := range []string{oldIcon, newIcon} {
-		if err := os.WriteFile(p, []byte("png"), 0o600); err != nil {
+// TestHandleNotificationLimits checks that fluxd cuts the text of a phone
+// notification and keeps a limited number of short actions.
+func TestHandleNotificationLimits(t *testing.T) {
+	d := testDaemon()
+	dev := newDevice("p1")
+	dev.Paired = true
+	actions := []string{"Reply", strings.Repeat("a", maxNotifAction+1)}
+	for i := range 10000 {
+		actions = append(actions, fmt.Sprint("Action ", i))
+	}
+	d.handleNotification(dev, nil, notificationPacket(map[string]any{
+		"id": "k1", "appName": strings.Repeat("é", maxNotifApp), "title": strings.Repeat("t", 5000),
+		"text": strings.Repeat("ü", 1<<20), "actions": actions, "requestReplyId": strings.Repeat("r", maxNotifID+1),
+	}))
+	if len(dev.notifications) != 1 {
+		t.Fatalf("%d notifications", len(dev.notifications))
+	}
+	n := dev.notifications[0]
+	if len(n.App) > maxNotifApp || len(n.Title) > maxNotifTitle || len(n.Text) > maxNotifText {
+		t.Errorf("app %d, title %d, text %d bytes", len(n.App), len(n.Title), len(n.Text))
+	}
+	if !utf8.ValidString(n.App) || !utf8.ValidString(n.Text) {
+		t.Error("a cut made invalid UTF-8")
+	}
+	if len(n.Actions) != maxNotifActions || n.Actions[0] != "Reply" || n.Actions[1] != "Action 0" {
+		t.Errorf("actions %q", n.Actions)
+	}
+	if n.ReplyID != "" {
+		t.Errorf("reply ID of %d bytes", len(n.ReplyID))
+	}
+
+	// An ID that is too long drops the notification.
+	d.handleNotification(dev, nil, notificationPacket(map[string]any{"id": strings.Repeat("x", maxNotifID+1), "title": "x"}))
+	if len(dev.notifications) != 1 {
+		t.Fatalf("%d notifications after a long ID", len(dev.notifications))
+	}
+}
+
+func TestNotificationActionNeedsKnownAction(t *testing.T) {
+	d := testDaemon()
+	dev := newDevice("p1")
+	dev.Name = "Pixel 8"
+	dev.notifications = []*PhoneNotification{{ID: "k1", Actions: []string{"Mark as read"}}}
+	var e *Error
+	for _, c := range [][2]string{{"k1", "Delete"}, {"k2", "Mark as read"}} {
+		if err := d.NotificationAction(dev, c[0], c[1]); !errors.As(err, &e) || e.Code != "not_found" {
+			t.Errorf("%s %s: %v", c[0], c[1], err)
+		}
+	}
+	// A known action passes the check and needs the link.
+	if err := d.NotificationAction(dev, "k1", "Mark as read"); !errors.As(err, &e) || e.Code != "offline" {
+		t.Errorf("known action: %v", err)
+	}
+}
+
+// TestSnapshotUnderLoad reads the state while phone packets change it. The
+// race detector checks that Snapshot encodes only a copy of the state.
+func TestSnapshotUnderLoad(t *testing.T) {
+	d := testDaemon()
+	dev := newDevice("p1")
+	dev.Name, dev.Paired = "Pixel 8", true
+	d.devices[dev.ID] = dev
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := range 300 {
+			d.handleNotification(dev, nil, notificationPacket(map[string]any{"id": fmt.Sprint(i % 7), "title": "t", "text": fmt.Sprint(i)}))
+			if i%5 == 0 {
+				d.handleNotification(dev, nil, notificationPacket(map[string]any{"id": fmt.Sprint(i % 7), "isCancel": true}))
+			}
+			d.handleSms(dev, smsPacket(map[string]any{"messages": []any{wireMessage(int64(i), int64(i%600), int64(i), 1, 0)}}))
+			tr := d.newTransfer(dev, "a.txt", "", "in", 10)
+			d.progress(tr)(5)
+		}
+	}()
+	for range 50 {
+		var state struct {
+			Devices []DeviceView `json:"devices"`
+		}
+		if err := json.Unmarshal(d.Snapshot(), &state); err != nil {
 			t.Fatal(err)
 		}
 	}
-	past := time.Now().Add(-2 * iconMaxAge)
-	if err := os.Chtimes(oldIcon, past, past); err != nil {
+	wg.Wait()
+}
+
+// iconPNG returns a PNG of w × h pixels as base64.
+func iconPNG(t *testing.T, w, h int) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var b bytes.Buffer
+	if err := png.Encode(&b, img); err != nil {
 		t.Fatal(err)
 	}
-	pruneIcons(dir, iconMaxAge)
-	if _, err := os.Stat(oldIcon); !os.IsNotExist(err) {
-		t.Error("the old icon is still there")
+	return base64.StdEncoding.EncodeToString(b.Bytes())
+}
+
+func TestNotificationIcon(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	d := testDaemon()
+	dev := newDevice("p1")
+	dev.Paired = true
+	icon := iconPNG(t, 96, 96)
+	d.handleNotification(dev, nil, notificationPacket(map[string]any{"id": "k1", "title": "Hi", "icon": icon}))
+	path := dev.notifications[0].Icon
+	if path == "" || filepath.Dir(path) != iconDir() {
+		t.Fatalf("icon path %q, want a file in %s", path, iconDir())
 	}
-	if _, err := os.Stat(newIcon); err != nil {
-		t.Errorf("the new icon is gone: %v", err)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if cfg, err := png.DecodeConfig(f); err != nil || cfg.Width != 96 || cfg.Height != 96 {
+		t.Errorf("stored icon: %v, %dx%d", err, cfg.Width, cfg.Height)
+	}
+	// The same icon gives the same file.
+	if again := notificationIcon(icon); again != path {
+		t.Errorf("second icon %q, want %q", again, path)
+	}
+	// The state does not hold the path.
+	if b, _ := json.Marshal(dev.notifications[0]); strings.Contains(string(b), path) {
+		t.Errorf("the state holds the icon path: %s", b)
+	}
+	for name, data := range map[string]string{
+		"not base64":   "%%%",
+		"not a PNG":    base64.StdEncoding.EncodeToString([]byte("GIF89a")),
+		"too wide":     iconPNG(t, maxNotifIconSide+1, 1),
+		"too long":     strings.Repeat("A", maxNotifIcon+4),
+		"no icon":      "",
+		"cut PNG data": icon[:len(icon)/2],
+	} {
+		if got := notificationIcon(data); got != "" {
+			t.Errorf("%s: icon %q, want none", name, got)
+		}
 	}
 }

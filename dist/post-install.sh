@@ -21,8 +21,23 @@ if modinfo v4l2loopback >/dev/null 2>&1; then
 	[ -e /dev/v4l2loopback ] && udevadm trigger --action=change /dev/v4l2loopback 2>/dev/null
 fi
 
-# Start fluxd in every graphical session.
-systemctl --global enable fluxd.service 2>/dev/null || true
+# The package does not enable fluxd for every account. `flux-cli setup`
+# enables it for the user who runs it, so another account does not announce
+# this computer on the network. An upgrade keeps the choice of the
+# administrator.
+
+# Restart a running fluxd of an earlier version, because it does not see
+# the new binary. A fluxd that restarts by itself after an update writes
+# the self-restart marker, and it waits for the end of a transfer or a
+# stream. try-restart never starts a fluxd that does not run.
+for dir in /run/user/*; do
+	uid=${dir##*/}
+	[ -S "$dir/bus" ] || continue
+	[ -e "$dir/flux/self-restart" ] && continue
+	pgrep -u "$uid" -x fluxd >/dev/null 2>&1 || continue
+	name=$(id -un "$uid" 2>/dev/null) || continue
+	systemctl --user --machine="$name@" try-restart fluxd.service || true
+done
 
 echo "Flux is installed. As your user, run: flux-cli setup"
 echo "The short name flux works after the next login, when no other flux command exists."

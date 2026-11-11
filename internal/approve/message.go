@@ -3,9 +3,12 @@
 package approve
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
@@ -13,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -28,6 +32,11 @@ const maxField = 256
 
 // maxFuture is how far in the future a signed time can be.
 const maxFuture = 5 * time.Second
+
+// maxTime is the largest time in seconds that a message can have: 2^40,
+// about the year 36812. The apps refuse a larger time, and an older app
+// can stop on it.
+const maxTime = 1 << 40
 
 var (
 	// ErrBadSignature means that the signature does not match the key and
@@ -59,6 +68,9 @@ func (r Request) Message() ([]byte, error) {
 	if err := checkFields(map[string]string{"tty": r.TTY, "rhost": r.RHost}, false); err != nil {
 		return nil, err
 	}
+	if err := checkTimeRange(r.Time); err != nil {
+		return nil, err
+	}
 	if err := checkNonce(r.Nonce); err != nil {
 		return nil, err
 	}
@@ -86,6 +98,9 @@ type Enrollment struct {
 // spki, the public key in DER.
 func (e Enrollment) Message(spki []byte) ([]byte, error) {
 	if err := checkFields(map[string]string{"host": e.Host, "user": e.User}, true); err != nil {
+		return nil, err
+	}
+	if err := checkTimeRange(e.Time); err != nil {
 		return nil, err
 	}
 	if err := checkNonce(e.Nonce); err != nil {
@@ -131,6 +146,13 @@ func checkFields(fields map[string]string, required bool) error {
 	return nil
 }
 
+func checkTimeRange(t int64) error {
+	if t <= 0 || t > maxTime {
+		return ErrStale
+	}
+	return nil
+}
+
 func checkNonce(n string) error {
 	if len(n) != 64 {
 		return errors.New("the nonce must have 64 hex digits")
@@ -143,17 +165,31 @@ func checkNonce(n string) error {
 	return nil
 }
 
-// ParsePublicKey parses a public key in DER and accepts only EC P-256.
-func ParsePublicKey(spki []byte) (*ecdsa.PublicKey, error) {
+// rsaBits is the size of the RSA keys that ParsePublicKey accepts. The
+// Windows app keeps its key in Windows Hello, which makes only RSA 2048
+// keys.
+const rsaBits = 2048
+
+// ParsePublicKey parses a public key in DER. It accepts EC P-256, the key
+// of the Android, iOS, and macOS apps, and RSA 2048 with the exponent
+// 65537, the Windows Hello key of the Windows app. It refuses each other
+// key.
+func ParsePublicKey(spki []byte) (crypto.PublicKey, error) {
 	k, err := x509.ParsePKIXPublicKey(spki)
 	if err != nil {
 		return nil, fmt.Errorf("the public key: %w", err)
 	}
-	ec, ok := k.(*ecdsa.PublicKey)
-	if !ok || ec.Curve != elliptic.P256() {
-		return nil, errors.New("the public key is not an EC P-256 key")
+	switch k := k.(type) {
+	case *ecdsa.PublicKey:
+		if k.Curve == elliptic.P256() {
+			return k, nil
+		}
+	case *rsa.PublicKey:
+		if k.N.BitLen() == rsaBits && k.E == 65537 {
+			return k, nil
+		}
 	}
-	return ec, nil
+	return nil, errors.New("the public key is not an EC P-256 key or an RSA 2048 key")
 }
 
 // Fingerprint returns the key code that the terminal and the phone show:
@@ -165,22 +201,45 @@ func Fingerprint(spki []byte) string {
 	return h[0:4] + " " + h[4:8] + " " + h[8:12] + " " + h[12:16]
 }
 
-// verify checks an ASN.1 DER ECDSA signature over the SHA-256 of msg.
-func verify(pub *ecdsa.PublicKey, msg, sig []byte) error {
-	if pub == nil || len(sig) == 0 || len(sig) > 128 {
-		return ErrBadSignature
+// SameCode reports whether typed is the key code code. It ignores white
+// space, hyphens, and case, and it needs all 16 hex digits.
+func SameCode(typed, code string) bool {
+	norm := func(s string) string {
+		return strings.ToUpper(strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) || r == '-' {
+				return -1
+			}
+			return r
+		}, s))
 	}
+	a, b := norm(typed), norm(code)
+	return len(b) == 16 && subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// verify checks a signature over the SHA-256 of msg: an ASN.1 DER ECDSA
+// signature for an EC key, or an RSASSA-PKCS1-v1_5 signature for an RSA
+// key, as Windows Hello signs.
+func verify(pub crypto.PublicKey, msg, sig []byte) error {
 	sum := sha256.Sum256(msg)
-	if !ecdsa.VerifyASN1(pub, sum[:], sig) {
-		return ErrBadSignature
+	switch pub := pub.(type) {
+	case *ecdsa.PublicKey:
+		if pub == nil || len(sig) == 0 || len(sig) > 128 || !ecdsa.VerifyASN1(pub, sum[:], sig) {
+			return ErrBadSignature
+		}
+		return nil
+	case *rsa.PublicKey:
+		if pub == nil || len(sig) != pub.Size() || rsa.VerifyPKCS1v15(pub, crypto.SHA256, sum[:], sig) != nil {
+			return ErrBadSignature
+		}
+		return nil
 	}
-	return nil
+	return ErrBadSignature
 }
 
 // Verify checks the signature of an approval. The message comes from r,
 // which the helper made itself. The signed time must be at most maxAge in
 // the past and at most 5 seconds in the future.
-func Verify(r Request, sig []byte, pub *ecdsa.PublicKey, now time.Time, maxAge time.Duration) error {
+func Verify(r Request, sig []byte, pub crypto.PublicKey, now time.Time, maxAge time.Duration) error {
 	msg, err := r.Message()
 	if err != nil {
 		return err
@@ -193,7 +252,7 @@ func Verify(r Request, sig []byte, pub *ecdsa.PublicKey, now time.Time, maxAge t
 
 // VerifyEnrollment checks the proof that the phone holds the private key
 // of spki. It returns the parsed key.
-func VerifyEnrollment(e Enrollment, spki, sig []byte, now time.Time, maxAge time.Duration) (*ecdsa.PublicKey, error) {
+func VerifyEnrollment(e Enrollment, spki, sig []byte, now time.Time, maxAge time.Duration) (crypto.PublicKey, error) {
 	pub, err := ParsePublicKey(spki)
 	if err != nil {
 		return nil, err

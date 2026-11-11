@@ -4,14 +4,19 @@ import CoreMedia
 /// Shows the H.264 frames of the remote desktop on a display layer. The
 /// layer decodes with VideoToolbox and shows each frame at once, with no
 /// clock, for a short delay. The frames arrive on a network thread, and the
-/// layer can change on the main thread, so a lock guards the state.
+/// layer can change on the main thread, so a lock guards the state. When the
+/// decoder falls behind, the frames wait in no queue: the picture skips to
+/// the next key frame.
 public final class DesktopVideo: @unchecked Sendable {
     private let lock = NSLock()
     private var renderer: AVSampleBufferVideoRenderer?
     private var format: CMVideoFormatDescription?
-    private var parameterSets: [[UInt8]] = []
+    private(set) var parameterSets: [[UInt8]] = []
     /// True until a key frame starts the picture on the renderer.
     private var needKey = true
+
+    /// The frames that the renderer had no room for since the last key frame.
+    private var dropped = 0
 
     public init() {}
 
@@ -23,6 +28,22 @@ public final class DesktopVideo: @unchecked Sendable {
             renderer?.flush()
             needKey = true
         }
+    }
+
+    /// Takes the video from the layer, when the video still shows on it.
+    /// A view that goes away calls it, so that the layer of a new view that
+    /// took the video keeps it.
+    public func detach(_ layer: AVSampleBufferDisplayLayer) {
+        lock.withLock {
+            guard let renderer, renderer === layer.sampleBufferRenderer else { return }
+            self.renderer = nil
+            needKey = true
+        }
+    }
+
+    /// True when the video shows on the layer.
+    func shows(on layer: AVSampleBufferDisplayLayer) -> Bool {
+        lock.withLock { renderer != nil && renderer === layer.sampleBufferRenderer }
     }
 
     /// Forgets the stream, so that the next stream starts clean.
@@ -50,8 +71,11 @@ public final class DesktopVideo: @unchecked Sendable {
     }
 
     /// Shows 1 frame in Annex-B form. The frames before the first key frame
-    /// do not show, because a decoder cannot start with them.
+    /// do not show, because a decoder cannot start with them. A key frame
+    /// with its own SPS and PPS sets the format first, because VAAPI puts
+    /// other sets in its key frames than in the config frame.
     func show(_ annexB: [UInt8], key: Bool) {
+        if key, let sets = DesktopH264.parameterSets(annexB) { configure(sps: sets.sps, pps: sets.pps) }
         lock.lock()
         defer { lock.unlock() }
         guard let renderer, let format else { return }
@@ -60,10 +84,27 @@ public final class DesktopVideo: @unchecked Sendable {
             renderer.flush()
             needKey = true
         }
+        if !renderer.isReadyForMoreMediaData {
+            // The decoder is behind. A frame that is not a key frame waits
+            // for none: the picture starts again at the next key frame. A
+            // key frame replaces the frames in the queue.
+            guard key else {
+                dropped += 1
+                needKey = true
+                return
+            }
+            renderer.flush()
+        }
         if needKey && !key { return }
         guard let sample = Self.sample(DesktopH264.avcc(annexB), format: format, key: key) else { return }
         renderer.enqueue(sample)
-        if key { needKey = false }
+        if key {
+            needKey = false
+            if dropped > 0 {
+                FluxLog.plugin.info("remote desktop: dropped \(self.dropped) frames while the decoder was behind")
+                dropped = 0
+            }
+        }
     }
 
     /// The format description of an H.264 stream with 4-byte NAL unit lengths.

@@ -3,9 +3,10 @@ import Quickshell
 import "Flux"
 
 // The Flux window as an omarchy-shell panel. Summon it with:
-//   omarchy-shell shell summon flux '{"page":"files"}'
-// The payload is optional. "page" selects a screen: overview, clipboard,
-// files, notifications, messages, browse, or commands.
+//   omarchy-shell shell summon flux '{"page":"chat"}'
+// The payload is optional. "page" selects a screen: chat, messages,
+// notifications, or device. The earlier keys overview, clipboard, files,
+// and commands open the page that took their place.
 Item {
   id: root
 
@@ -23,7 +24,7 @@ Item {
   property string pendingPage: ""
   // FluxView unloads while the window is hidden. The next FluxView starts
   // with the tab and the device of the last one.
-  property string savedTab: "overview"
+  property string savedTab: "chat"
   property string savedDevice: ""
   readonly property bool opened: window.visible
   readonly property alias panelWindow: window

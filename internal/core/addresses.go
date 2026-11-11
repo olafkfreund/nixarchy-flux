@@ -1,9 +1,12 @@
 package core
 
 import (
+	"net"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"flux/internal/config"
 	"flux/internal/lan"
@@ -15,7 +18,9 @@ const maxAddresses = 5
 
 // Extra addresses let fluxd reach a paired device outside the local
 // network, for example through Tailscale. mDNS and UDP broadcasts do not
-// cross a VPN, so fluxd dials each address directly. The device listens on
+// cross a VPN, so fluxd dials each address directly. On a computer, ZeroTier
+// makes an Ethernet network that carries them, but on a phone it runs as a
+// VPN, so a phone needs its ZeroTier address here too. The device listens on
 // all interfaces, and fluxd opens every connection, so the payloads,
 // tunnels, and streams also use the address of the link.
 
@@ -131,19 +136,18 @@ func (d *Daemon) syncAddresses(dev *Device) []string {
 	return t.Addresses
 }
 
-// dialHosts returns the hosts that fluxd dials for an offline device: the
-// last address first, then the extra addresses. The caller holds d.mu.
-func (dev *Device) dialHosts() []string {
-	hosts := make([]string, 0, 1+len(dev.Addresses))
-	if dev.IP != "" {
-		hosts = append(hosts, dev.IP)
-	}
-	for _, a := range dev.Addresses {
-		if !slices.Contains(hosts, a) {
-			hosts = append(hosts, a)
+// fixPortsLocked gives the default port to each device with a port that p
+// refuses, for example a port from before the port change of Flux. The
+// current app of the device listens on the first free port from
+// lan.MinTCPPort, and the next link records its real port. Without this
+// change, fluxd cannot dial an extra address of the device. The caller
+// holds d.mu.
+func (d *Daemon) fixPortsLocked(p *lan.Provider) {
+	for _, dev := range d.devices {
+		if dev.Port != 0 && !p.PeerPort(dev.Port) {
+			dev.Port = lan.MinTCPPort
 		}
 	}
-	return hosts
 }
 
 // dialPort returns the TCP port that fluxd dials. A device with extra
@@ -154,4 +158,34 @@ func (dev *Device) dialPort() int {
 		return lan.MinTCPPort
 	}
 	return dev.Port
+}
+
+// dialAddrs returns the addresses that fluxd dials for an offline device,
+// as host and port: the last address, then the address that discovery
+// reported in the last forgetAfter, then the extra addresses. The extra
+// addresses use the port of the last link, because discovery does not
+// change the port of a paired device. The caller holds d.mu.
+func (dev *Device) dialAddrs(now time.Time) []string {
+	var out []string
+	add := func(host string, port int) {
+		if host == "" || port <= 0 {
+			return
+		}
+		if a := net.JoinHostPort(host, strconv.Itoa(port)); !slices.Contains(out, a) {
+			out = append(out, a)
+		}
+	}
+	port := dev.dialPort()
+	add(dev.IP, port)
+	if dev.seenIP != "" && now.Sub(dev.seenAt) < forgetAfter {
+		seen := dev.seenPort
+		if seen == 0 {
+			seen = port
+		}
+		add(dev.seenIP, seen)
+	}
+	for _, a := range dev.Addresses {
+		add(a, port)
+	}
+	return out
 }

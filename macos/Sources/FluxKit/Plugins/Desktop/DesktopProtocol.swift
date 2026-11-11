@@ -1,12 +1,12 @@
 import CoreGraphics
 import Foundation
 
-/// The flux.desktop extension. This Mac opens a TLS listener and sends
+/// The flux.desktop packets. This Mac opens a TLS listener and sends
 /// "start" with its port, the longest side of the stream, and optionally a
 /// monitor. The computer connects and writes frames, see
 /// `DesktopFrameReader`. The computer answers "live" with the monitor and
 /// the size, "error", or "stop". The mouse goes as
-/// kdeconnect.mousepad.request with a position. docs/remote-desktop.md
+/// flux.mousepad.request with a position. docs/remote-desktop.md
 /// describes the fields.
 public enum DesktopPackets {
     /// The limits of the longest side of the stream, as fluxd has them.
@@ -21,9 +21,10 @@ public enum DesktopPackets {
         pixels <= 0 ? defaultSize : min(maxSize, max(minSize, pixels))
     }
 
-    public static func start(port: Int, monitor: String? = nil, maxSize: Int = defaultSize) -> Packet {
+    public static func start(port: Int, monitor: String? = nil, maxSize: Int = defaultSize, audio: Bool = false) -> Packet {
         var body: [String: Any?] = ["state": "start", "port": port, "maxSize": maxSize]
         if let monitor, !monitor.isEmpty { body["monitor"] = monitor }
+        if audio { body["audio"] = true }
         return Packet(PacketType.fluxDesktop, body)
     }
 
@@ -65,6 +66,7 @@ public struct DesktopFrame: Equatable, Sendable {
     public static let key: UInt8 = 2
     /// The video size: the width and the height as 2 big-endian 16-bit numbers.
     public static let format: UInt8 = 4
+    public static let audio: UInt8 = 8
 
     public let flags: UInt8
     public let data: [UInt8]
@@ -77,6 +79,7 @@ public struct DesktopFrame: Equatable, Sendable {
     public var isConfig: Bool { flags & Self.config != 0 }
     public var isKey: Bool { flags & Self.key != 0 }
     public var isFormat: Bool { flags & Self.format != 0 }
+    public var isAudio: Bool { flags == Self.audio }
 
     /// The width and the height of a format frame.
     public var size: (width: Int, height: Int)? {
@@ -139,8 +142,8 @@ public enum DesktopH264 {
         return out
     }
 
-    /// The first SPS and the first PPS of a config frame, without start
-    /// codes. It returns nil when one of them is missing.
+    /// The first SPS and the first PPS of a config frame or a key frame,
+    /// without start codes. It returns nil when one of them is missing.
     public static func parameterSets(_ data: [UInt8]) -> (sps: [UInt8], pps: [UInt8])? {
         var sps: [UInt8]?
         var pps: [UInt8]?

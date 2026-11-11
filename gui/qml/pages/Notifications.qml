@@ -13,18 +13,43 @@ Item {
   readonly property bool online: !!dev && !!dev.online
   readonly property var notifs: dev && dev.notifications ? dev.notifications : []
   readonly property int clearable: notifs.filter(function (n) { return n.dismissable !== false }).length
+  // A card shows at most this number of action buttons. fluxd keeps the
+  // same number of actions, so each action that it keeps has a button.
+  readonly property int maxActions: 8
+  property double now: Date.now() / 1000
+  Timer { interval: 1000; running: true; repeat: true; onTriggered: root.now = Date.now() / 1000 }
+
+  function ruleText(rule) {
+    var text = rule.app + ": " + rule.mode
+    if (rule.until) text += rule.until <= now ? " · Expired" : " · Until " + new Date(rule.until * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat)
+    if (rule.start && rule.end) text += " · " + rule.start + " to " + rule.end
+    return text
+  }
 
   implicitHeight: list.implicitHeight
 
   // The cards follow the notifications by ID. A new notification adds 1
   // card, and the other cards keep their state, such as a reply that the
-  // user types.
-  KeyedModel { id: rows; values: root.notifs }
+  // user types. Another device gets new cards, so a reply does not go to a
+  // notification of that device with the same ID.
+  KeyedModel { id: rows; values: root.notifs; scope: root.dev ? root.dev.id : "" }
 
   Column {
     id: list
     width: Math.min(parent.width, 760)
     spacing: 10
+
+    Repeater {
+      model: root.view && root.view.backend && root.view.backend.state.settings ?
+        (root.view.backend.state.settings.notificationRules || []).filter(r => !r.device || (root.dev && r.device === root.dev.id)) : []
+      delegate: Row {
+        required property var modelData
+        width: list.width
+        spacing: 8
+        Txt { width: Math.max(0, parent.width - removeRule.width - parent.spacing); anchors.verticalCenter: parent.verticalCenter; text: root.ruleText(modelData); color: Theme.dim; wrapMode: Text.Wrap }
+        OutlineButton { id: removeRule; anchors.verticalCenter: parent.verticalCenter; text: "Remove rule"; fontSize: 11; onClicked: root.view.call("notification.rule.remove", { id: modelData.id }) }
+      }
+    }
 
     Item {
       visible: root.clearable > 0
@@ -63,6 +88,10 @@ Item {
         readonly property var modelData: rows.byId[key] || ({})
         readonly property bool replyable: !!modelData.replyId
         property bool replying: false
+        // The action buttons. The text changes only when the actions
+        // change, so a state event does not build the buttons again.
+        readonly property string actionsText: JSON.stringify(Array.isArray(modelData.actions) ? modelData.actions.slice(0, root.maxActions) : [])
+        readonly property var actions: JSON.parse(actionsText)
         width: list.width
         implicitHeight: Math.max(36, body.implicitHeight) + 30
 
@@ -92,9 +121,10 @@ Item {
 
           Item {
             width: parent.width
-            height: appLine.implicitHeight
+            height: Math.max(appLine.implicitHeight, meta.implicitHeight)
             Txt {
               id: appLine
+              anchors.verticalCenter: parent.verticalCenter
               anchors.left: parent.left
               anchors.right: meta.left
               anchors.rightMargin: 12
@@ -106,21 +136,15 @@ Item {
             Row {
               id: meta
               anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
               spacing: 10
-              Txt { text: Fmt.age(modelData.time); color: Theme.dim; font.pixelSize: 11 }
-              Txt {
+              Txt { anchors.verticalCenter: parent.verticalCenter; text: Fmt.age(modelData.time); color: Theme.dim; font.pixelSize: 11 }
+              IconAction {
                 visible: modelData.dismissable !== false
-                text: "×"
-                color: closeArea.containsMouse ? Theme.fg : Theme.dim
-                font.pixelSize: 11
-                MouseArea {
-                  id: closeArea
-                  anchors.fill: parent
-                  anchors.margins: -4
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.view.call("notification.dismiss", { device: root.dev.id, id: modelData.id })
-                }
+                anchors.verticalCenter: parent.verticalCenter
+                icon: "close"
+                tip: "Dismiss on the phone"
+                onClicked: root.view.call("notification.dismiss", { device: root.dev.id, id: modelData.id })
               }
             }
           }
@@ -143,7 +167,13 @@ Item {
             width: parent.width
             spacing: 8
             topPadding: 8
-            visible: card.replyable || (modelData.actions && modelData.actions.length > 0)
+            visible: true
+            OutlineButton {
+              text: "Mute app for 1 hour"
+              fontSize: 11
+              padY: 4
+              onClicked: root.view.call("notification.rule.add", { config: { device: root.dev.id, app: modelData.app, mode: "mute", until: Math.floor(Date.now() / 1000) + 3600 } })
+            }
             OutlineButton {
               visible: card.replyable && !card.replying
               icon: "reply"
@@ -157,7 +187,7 @@ Item {
               }
             }
             Repeater {
-              model: modelData.actions || []
+              model: card.actions
               delegate: OutlineButton {
                 required property var modelData
                 text: modelData

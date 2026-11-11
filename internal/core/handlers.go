@@ -13,18 +13,47 @@ import (
 	"flux/internal/proto"
 )
 
-// handlePacket routes one packet from a device to its plugin.
+// handlePacket routes one packet from a device to its plugin. Only
+// flux.pair passes before the paired check. A packet from a link that is
+// no longer the link of the device counts for nothing.
 func (d *Daemon) handlePacket(dev *Device, l *lan.Link, p *proto.Packet) {
 	d.mu.Lock()
-	dev.LastSeen = time.Now()
-	paired := dev.Paired
+	current := dev.link == l
+	paired := dev.Paired && current
+	if current {
+		dev.LastSeen = time.Now()
+	}
+	name := dev.Name
 	d.mu.Unlock()
 
-	if p.Type == proto.TypePair {
-		d.handlePair(dev, p)
+	if !current {
 		return
 	}
-	if p.Type == proto.TypeFluxTunnel {
+	if p.Type == proto.TypePair {
+		d.handlePair(dev, l, p)
+		return
+	}
+	if !paired {
+		d.mu.Lock()
+		if dev.pairState == "confirm" && dev.pairLink == l {
+			if len(dev.confirmQueue) < maxConfirmQueue {
+				dev.confirmQueue = append(dev.confirmQueue, p)
+			}
+			d.mu.Unlock()
+			return
+		}
+		dev.ignored++
+		first := dev.ignored == 1
+		d.mu.Unlock()
+		// A device can send such packets in a loop, so the log shows the
+		// first one of each link.
+		if first {
+			d.logf("%s: ignored %s from a device that is not paired", name, logType(p.Type))
+		}
+		return
+	}
+	switch p.Type {
+	case proto.TypeFluxTunnel:
 		var b struct {
 			ID    string `json:"id"`
 			Port  int    `json:"port"`
@@ -33,33 +62,40 @@ func (d *Daemon) handlePacket(dev *Device, l *lan.Link, p *proto.Packet) {
 		if p.Decode(&b) == nil {
 			l.TunnelReady(b.ID, b.Port, b.Error)
 		}
-		return
-	}
-	if !paired {
-		d.logf("%s: ignored %s from a device that is not paired", dev.Name, p.Type)
-		return
-	}
-	switch p.Type {
 	case proto.TypeIdentity:
 		var id proto.Identity
 		if p.Decode(&id) == nil && id.DeviceID == dev.ID {
 			d.mu.Lock()
+			hadTheme := dev.accepts(proto.TypeFluxTheme)
 			dev.setIdentity(id)
+			newTheme := !hadTheme && dev.accepts(proto.TypeFluxTheme)
 			d.mu.Unlock()
 			d.markDirty()
+			// A phone that starts to follow the theme gets it at once. A
+			// slow send of the theme to another phone must not delay the
+			// packets of this link.
+			if newTheme {
+				go d.sendThemeTo(dev, l)
+			}
 		}
 	case proto.TypePing:
 		d.handlePing(dev, p)
 	case proto.TypeBattery:
 		d.handleBattery(dev, p)
-	case proto.TypeConnectivity:
-		d.handleConnectivity(dev, p)
 	case proto.TypeClipboard, proto.TypeClipboardConnect:
+		if !d.permitted(dev.ID, "clipboard") {
+			return
+		}
 		d.handleClipboard(dev, p)
 	case proto.TypeFluxClipboardImage:
+		if !d.permitted(dev.ID, "clipboard") {
+			return
+		}
 		d.handleClipboardImage(dev, l, p)
 	case proto.TypeShare:
 		d.handleShare(dev, l, p)
+	case proto.TypeFluxTransfer:
+		d.handleResumable(dev, l, p)
 	case proto.TypeShareUpdate:
 		// The totals of a multi-file share. Flux counts files as they arrive.
 	case proto.TypeNotification:
@@ -71,8 +107,8 @@ func (d *Daemon) handlePacket(dev *Device, l *lan.Link, p *proto.Packet) {
 		d.handleRunCommand(dev, l, p)
 	case proto.TypeMprisRequest:
 		d.handleDesktopMediaRequest(l, p)
-	case proto.TypeSftp:
-		d.handleSftp(dev, p)
+	case proto.TypeFluxAudioRequest:
+		d.handleAudioRequest(l, p)
 	case proto.TypeSftpRequest:
 		d.handleBrowseRequest(dev, l, p)
 	case proto.TypeFluxWebcam:
@@ -81,6 +117,8 @@ func (d *Daemon) handlePacket(dev *Device, l *lan.Link, p *proto.Packet) {
 		d.handleDnd(dev, p)
 	case proto.TypeFluxMic:
 		d.handleMic(dev, l, p)
+	case proto.TypeFluxSpeaker:
+		d.handleSpeaker(dev, l, p)
 	case proto.TypeFluxScreen:
 		d.handleScreen(dev, l, p)
 	case proto.TypeFluxDesktop:
@@ -89,6 +127,8 @@ func (d *Daemon) handlePacket(dev *Device, l *lan.Link, p *proto.Packet) {
 		d.handleShortcuts(dev, l, p)
 	case proto.TypeFluxApprove:
 		d.handleApprove(dev, p)
+	case proto.TypeFluxSSH:
+		d.handleSSH(dev, p)
 	case proto.TypeFluxHerdr:
 		d.handleHerdr(dev, l, p)
 	case proto.TypeMousepadRequest:
@@ -98,7 +138,7 @@ func (d *Daemon) handlePacket(dev *Device, l *lan.Link, p *proto.Packet) {
 	case proto.TypeTelephony:
 		d.handleTelephony(dev, p)
 	default:
-		d.logf("%s: no handler for %s", dev.Name, p.Type)
+		d.logf("%s: no handler for %s", name, logType(p.Type))
 	}
 }
 
@@ -111,8 +151,9 @@ func (d *Daemon) handlePing(dev *Device, p *proto.Packet) {
 	if text == "" {
 		text = "Ping"
 	}
-	d.toast("%s: %s", dev.Name, text)
-	d.notify(desktop.Notification{AppName: dev.Name, Title: "Ping from " + dev.Name, Body: body.Message})
+	name := d.nameOf(dev)
+	d.toast("%s: %s", name, text)
+	d.notifyAsync(desktop.Notification{AppName: name, Title: "Ping from " + name, Body: body.Message})
 }
 
 func (d *Daemon) handleBattery(dev *Device, p *proto.Packet) {
@@ -125,15 +166,13 @@ func (d *Daemon) handleBattery(dev *Device, p *proto.Packet) {
 		return
 	}
 	d.mu.Lock()
-	if body.Charge < 0 {
-		dev.battery = nil
-	} else {
-		dev.battery = &Battery{Charge: body.Charge, Charging: body.Charging}
-	}
+	dev.battery = &Battery{Charge: body.Charge, Charging: body.Charging}
 	alert := dev.lowBatteryAlert(body.Threshold == 1, body.Charge, body.Charging)
+	name := dev.Name
 	d.mu.Unlock()
+	d.emitAutomation(automationEvent{Kind: "battery.low", Device: dev.ID, Charge: body.Charge, Charging: body.Charging})
 	if alert {
-		d.notify(desktop.Notification{AppName: "Flux", Title: dev.Name + " battery is low", Body: strconv.Itoa(body.Charge) + "% left", Urgency: 2})
+		d.notifyAsync(desktop.Notification{AppName: "Flux", Title: name + " battery is low", Body: strconv.Itoa(body.Charge) + "% left", Urgency: 2})
 	}
 	d.markDirty()
 }
@@ -194,29 +233,6 @@ func (d *Daemon) batteryLoop(ctx context.Context) {
 	}
 }
 
-func (d *Daemon) handleConnectivity(dev *Device, p *proto.Packet) {
-	var body struct {
-		Signals map[string]struct {
-			Type     string `json:"networkType"`
-			Strength int    `json:"signalStrength"`
-		} `json:"signalStrengths"`
-	}
-	if p.Decode(&body) != nil {
-		return
-	}
-	d.mu.Lock()
-	dev.signal = nil
-	best := -1
-	for _, s := range body.Signals {
-		if s.Strength > best {
-			best = s.Strength
-			dev.signal = &Signal{Type: s.Type, Strength: s.Strength}
-		}
-	}
-	d.mu.Unlock()
-	d.markDirty()
-}
-
 func (d *Daemon) handleRunCommand(dev *Device, l *lan.Link, p *proto.Packet) {
 	var body struct {
 		Key         string `json:"key"`
@@ -231,22 +247,27 @@ func (d *Daemon) handleRunCommand(dev *Device, l *lan.Link, p *proto.Packet) {
 	if body.Key == "" {
 		return
 	}
+	name := d.nameOf(dev)
 	cmd, ok := d.command(body.Key)
 	if !ok {
-		d.logf("%s: no command with ID %q", dev.Name, body.Key)
+		d.logf("%s: no command with ID %q", name, body.Key)
 		return
 	}
-	d.logf("%s runs %s: %s", dev.Name, cmd.ID, cmd.Command)
+	d.logf("%s runs %s: %s", name, cmd.ID, cmd.Command)
 	if err := d.runLocal(cmd); err != nil {
-		d.toast("%s could not run %s: %v", dev.Name, cmd.Name, err)
+		d.toast("%s could not run %s: %v", name, cmd.Name, err)
 		return
 	}
-	d.toast("%s ran %s", dev.Name, cmd.Name)
+	d.toast("%s ran %s", name, cmd.Name)
 }
+
+// runDesktopCommand starts a shell command on the desktop. Tests replace
+// it.
+var runDesktopCommand = desktop.RunCommand
 
 // runLocal starts a command and logs a failure with its output.
 func (d *Daemon) runLocal(cmd config.Command) error {
-	return desktop.RunCommand(cmd.Command, func(err error, out []byte) {
+	return runDesktopCommand(cmd.Command, func(err error, out []byte) {
 		if err != nil {
 			d.logf("command %s failed: %v: %s", cmd.ID, err, strings.TrimSpace(string(out)))
 			d.toast("%s failed: %v", cmd.Name, err)
@@ -254,7 +275,7 @@ func (d *Daemon) runLocal(cmd config.Command) error {
 	})
 }
 
-// sendCommandList sends the command list. KDE Connect encodes the list as
+// sendCommandList sends the command list. The protocol encodes the list as
 // a JSON string inside the body. The object is written in config order,
 // because a JSON map from encoding/json sorts the keys, and phones show the
 // commands in the order they read them.
@@ -274,6 +295,5 @@ func (d *Daemon) sendCommandList(l *lan.Link) {
 	}
 	b.WriteByte('}')
 	d.mu.Unlock()
-	// canAddCommand is false: the user edits the commands in config.toml.
-	_ = l.Send(proto.New(proto.TypeRunCommand, map[string]any{"commandList": b.String(), "canAddCommand": false}))
+	_ = l.Send(proto.New(proto.TypeRunCommand, map[string]any{"commandList": b.String()}))
 }

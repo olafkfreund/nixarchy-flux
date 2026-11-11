@@ -52,7 +52,6 @@ object Ic {
     val power = R.drawable.ic_power_settings_new
     val lightMode = R.drawable.ic_light_mode
     val darkMode = R.drawable.ic_dark_mode
-    val systemTheme = R.drawable.ic_contrast
 
     val phone = R.drawable.ic_smartphone
     val laptop = R.drawable.ic_computer
@@ -120,6 +119,34 @@ object Ic {
     val keyboard = R.drawable.ic_keyboard
     val slides = R.drawable.ic_slideshow
     val grid = R.drawable.ic_grid_view
+    val inbox = R.drawable.ic_inbox
+    val devices = R.drawable.ic_devices
+    val expand = R.drawable.ic_expand_more
+    val collapse = R.drawable.ic_expand_less
+    val forward = R.drawable.ic_arrow_forward
+    val diff = R.drawable.ic_difference
+    val south = R.drawable.ic_south
+    val edit = R.drawable.ic_edit
+    val openFull = R.drawable.ic_open_in_full
+    val star = R.drawable.ic_star
+    val starFill = R.drawable.ic_star_fill
+    val web = R.drawable.ic_public
+    val docs = R.drawable.ic_menu_book
+    val bug = R.drawable.ic_bug_report
+    val handle = R.drawable.ic_alternate_email
+    val license = R.drawable.ic_license
+    val touchApp = R.drawable.ic_touch_app
+    val autoTheme = R.drawable.ic_brightness_auto
+    val radioOn = R.drawable.ic_radio_button_checked
+    val radioOff = R.drawable.ic_radio_button_unchecked
+    val volumeDown = R.drawable.ic_volume_down
+    val notes = R.drawable.ic_edit_note
+    val chat = R.drawable.ic_chat
+    val window = R.drawable.ic_web_asset
+    val down = R.drawable.ic_arrow_downward
+    val volumeOff = R.drawable.ic_volume_off
+    val speaker = R.drawable.ic_speaker
+    val speakerPhone = R.drawable.ic_speaker_phone
 }
 
 /** An icon from [Ic]. It takes the content color unless [tint] is set. */

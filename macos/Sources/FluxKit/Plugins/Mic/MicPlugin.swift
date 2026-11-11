@@ -1,8 +1,9 @@
 import AVFoundation
 import NIOCore
 
-/// How long this Mac waits for the computer to connect.
-private let connectTimeout: TimeAmount = .seconds(10)
+/// How long this Mac waits for the computer to connect, in seconds.
+private let connectSeconds: Int64 = 10
+private let connectTimeout: TimeAmount = .seconds(connectSeconds)
 /// The time between 2 level updates, about 15 per second, in nanoseconds.
 private let levelInterval: UInt64 = 66_000_000
 /// The audio chunks that wait for the network. A chunk holds 10 to 35 ms, so
@@ -35,7 +36,13 @@ public final class MicPlugin: FluxPlugin, @unchecked Sendable {
     @MainActor
     public init() {
         model = MicModel()
-        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+        #if os(iOS)
+        // A headset that comes or goes changes the route of the audio session.
+        let names = [AVAudioSession.routeChangeNotification]
+        #else
+        let names = [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification]
+        #endif
+        for name in names {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.inputsChanged() }
             })
@@ -121,6 +128,18 @@ public final class MicPlugin: FluxPlugin, @unchecked Sendable {
         lock.withLock { deviceId == device.id ? attempt : nil }
     }
 
+    // MARK: Texts
+
+    /// The error when the computer's Flux has no microphone support.
+    static func updateText(computer: String, platform: FluxPlatform = .current) -> String {
+        "Update Flux on \(computer) to use \(platform.deviceNoun) as a microphone"
+    }
+
+    /// The error when no microphone input exists.
+    static func noMicrophoneText(platform: FluxPlatform = .current) -> String {
+        "\(platform.deviceNounStart) has no microphone"
+    }
+
     // MARK: Stream
 
     private func run(_ core: FluxCore, _ deviceId: String, _ name: String, _ id: Int) async {
@@ -128,7 +147,7 @@ public final class MicPlugin: FluxPlugin, @unchecked Sendable {
             try await authorize()
             let peer = core.locked { core.device(deviceId).map { (accepts: $0.accepts(PacketType.fluxMic), certificate: $0.certificate) } }
             guard let peer else { throw FluxError("\(name) is not known") }
-            guard peer.accepts else { throw FluxError("Update Flux on \(name) to use this Mac as a microphone") }
+            guard peer.accepts else { throw FluxError(Self.updateText(computer: name)) }
             guard let certificate = peer.certificate else { throw FluxError("\(name) is not connected") }
             let stream = try await connect(core, deviceId, name, certificate, id)
             let keep = lock.withLock {
@@ -139,7 +158,7 @@ public final class MicPlugin: FluxPlugin, @unchecked Sendable {
                 return true
             }
             guard keep else {
-                stream.channel.channel.close(promise: nil)
+                await stream.discard()
                 return
             }
             try await record(stream, name, id)
@@ -158,15 +177,20 @@ public final class MicPlugin: FluxPlugin, @unchecked Sendable {
             granted = await AVCaptureDevice.requestAccess(for: .audio)
         }
         await MainActor.run { [model] in model.permission = .current }
-        guard granted else { throw FluxError("Allow the microphone for Flux in System Settings > Privacy & Security > Microphone") }
+        guard granted else { throw FluxError(Self.deniedText()) }
+    }
+
+    static func deniedText(platform: FluxPlatform = .current) -> String {
+        "Allow the microphone for Flux in \(platform.settingsApp) > Privacy & Security > Microphone"
     }
 
     /// Opens a listener, sends flux.mic "start" with its port, and waits for
     /// the computer. The computer connects out, so the stream passes a
     /// firewall that blocks incoming traffic on the computer. The connection
-    /// must use the certificate of the paired computer.
+    /// must use the certificate of the paired computer. The listener closes
+    /// a connection with another certificate and waits on.
     private func connect(_ core: FluxCore, _ deviceId: String, _ name: String, _ certificate: [UInt8], _ id: Int) async throws -> TLSStream {
-        let server = try await PayloadServer.open(tls: core.tls, expected: nil)
+        let server = try await PayloadServer.open(tls: core.tls, expected: certificate)
         let keep = lock.withLock {
             guard attempt == id else { return false }
             self.server = server
@@ -180,17 +204,12 @@ public final class MicPlugin: FluxPlugin, @unchecked Sendable {
             server.close()
             throw FluxError("Not connected to \(name)")
         }
-        let stream: TLSStream
+        let waited = ContinuousClock.now
         do {
-            stream = try await server.accept(timeout: connectTimeout)
-        } catch {
+            return try await server.accept(timeout: connectTimeout)
+        } catch where ContinuousClock.now - waited >= .seconds(connectSeconds) {
             throw FluxError("\(name) did not connect. Update Flux on the computer.")
         }
-        guard stream.peerCertificate == certificate else {
-            stream.channel.channel.close(promise: nil)
-            throw FluxError("The connection did not come from \(name)")
-        }
-        return stream
     }
 
     /// Records and writes the audio until the stream ends. It throws when the
@@ -217,15 +236,23 @@ public final class MicPlugin: FluxPlugin, @unchecked Sendable {
             self?.fail(message, id)
         })
         let input = core?.defaults.string(forKey: Self.inputKey) ?? ""
-        guard let device = MicCapture.device(for: input) else { throw FluxError("This Mac has no microphone") }
-        let keep = lock.withLock {
-            guard attempt == id else { return false }
-            self.capture = capture
-            return true
-        }
-        guard keep else { return }
-        try await capture.start(device)
+        // The capture starts inside executeThenClose, so that a capture that
+        // fails still closes the stream the way NIO requires.
         try await stream.executeThenClose { inbound, outbound in
+            #if os(macOS)
+            guard let device = MicCapture.device(for: input) else { throw FluxError(Self.noMicrophoneText()) }
+            #endif
+            let keep = lock.withLock {
+                guard attempt == id else { return false }
+                self.capture = capture
+                return true
+            }
+            guard keep else { return }
+            #if os(macOS)
+            try await capture.start(device)
+            #else
+            try await capture.start(route: input)
+            #endif
             try await withThrowingTaskGroup(of: Void.self) { group in
                 // The computer sends nothing. The inbound side ends when it closes.
                 group.addTask { for try await _ in inbound {} }
@@ -240,15 +267,24 @@ public final class MicPlugin: FluxPlugin, @unchecked Sendable {
     /// Moves a running capture to the chosen input.
     @MainActor
     private func switchCapture() {
+        #if os(iOS)
+        // The iPhone has 1 capture device. The route of the audio session picks the input.
+        if lock.withLock({ capture }) != nil { AudioSession.prefer(model.input) }
+        #else
         guard let capture = lock.withLock({ capture }), let device = MicCapture.device(for: model.input) else { return }
         capture.use(device)
+        #endif
     }
 
     /// Reloads the inputs after a device came or went. A running capture on a
     /// device that went away moves to the system default input.
     @MainActor
     private func inputsChanged() {
+        #if os(iOS)
+        if let inputs = MicCapture.inputs() { model.inputs = inputs }
+        #else
         model.inputs = MicCapture.inputs()
+        #endif
         switchCapture()
     }
 

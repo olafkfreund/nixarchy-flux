@@ -87,8 +87,9 @@ class HerdrReplyTest {
         val rule = "$esc[38;5;4m" + "─".repeat(80) + "$esc[0m"
         val lines = termLines("$rule\n$esc[1mbold$esc[0m   $esc[41m   $esc[0m\n\n  \n")
         assertEquals(2, lines.size)
-        assertEquals("─".repeat(32), lines[0].text)
-        assertEquals("a shortened rule keeps its color", TermColor.Indexed(4), lines[0].spans.single().style.fg)
+        val fitted = fitLines(lines, 32)
+        assertEquals("─".repeat(32), fitted[0].text)
+        assertEquals("a shortened rule keeps its color", TermColor.Indexed(4), fitted[0].spans.single().style.fg)
         assertEquals("trailing blanks go, also with a background", listOf(TermSpan("bold", TermStyle(bold = true))), lines[1].spans)
     }
 
@@ -154,6 +155,16 @@ class HerdrReplyTest {
         val prose = listOf("1. Check the schema", "2. Apply the change") + List(20) { "more output $it" }
         assertTrue("a list far from the end is not a dialog", findChoices(prose).isEmpty())
         assertTrue(findChoices(emptyList()).isEmpty())
+    }
+
+    @Test
+    fun aNumberedListAboveTheInputIsNotADialog() {
+        val list = listOf("● I would add these.", "", "  1. Notify when an agent needs you.", "  2. Hide finished agents.", "")
+        val rule = "─".repeat(32)
+        assertTrue("the input of Claude Code", findChoices(list + listOf("✻ Cogitated for 24s · done 10:00 AM", "", rule, "❯ ", rule, "  ⏵⏵ auto mode on")).isEmpty())
+        assertTrue("the input of Codex", findChoices(list + listOf("› Ask Codex to do anything", "", "  100% context left")).isEmpty())
+        assertTrue("the input in a box", findChoices(list + listOf("╭────────╮", "│ >      │", "╰────────╯")).isEmpty())
+        assertEquals("a dialog has no input", listOf("1", "2", "3"), findChoices(claudeDialog + listOf("", " Esc to cancel · Tab to amend")).map { it.key })
     }
 
     @Test

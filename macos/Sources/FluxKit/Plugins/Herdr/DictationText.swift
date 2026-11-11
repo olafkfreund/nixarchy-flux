@@ -23,9 +23,10 @@ public enum DictationText {
     /// Puts `spoken` in `text` in place of the selection from `start` to
     /// `end`, in UTF-16 units. A space goes between the spoken text and a
     /// word that it would touch. At the start of the text or of a sentence,
-    /// the first letter becomes a capital. The cursor goes after the spoken
+    /// the first letter becomes a capital. With `sentences` off, the case
+    /// stays, for example for a command. The cursor goes after the spoken
     /// text.
-    public static func insert(_ text: String, start: Int, end: Int, spoken: String) -> DictationEdit {
+    public static func insert(_ text: String, start: Int, end: Int, spoken: String, sentences: Bool = true) -> DictationEdit {
         let s = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
         let units = Array(text.utf16)
         let a = min(max(min(start, end), 0), units.count)
@@ -33,7 +34,7 @@ public enum DictationText {
         if s.isEmpty { return DictationEdit(text, b) }
         let before = String(decoding: units[..<a], as: UTF16.self)
         let after = String(decoding: units[b...], as: UTF16.self)
-        let words = startsSentence(before) ? s.prefix(1).uppercased() + s.dropFirst() : s
+        let words = sentences && startsSentence(before) ? s.prefix(1).uppercased() + s.dropFirst() : s
         let lead = !before.isEmpty && !(before.last?.isWhitespace ?? true) && !closing.contains(words.first ?? " ") ? " " : ""
         let trail = !after.isEmpty && !(after.first?.isWhitespace ?? true) && !closing.contains(after.first ?? " ") ? " " : ""
         let inserted = lead + words + trail
@@ -46,6 +47,16 @@ public enum DictationText {
         var s = Substring(spoken.trimmingCharacters(in: .whitespacesAndNewlines))
         while let last = s.last, queryEnd.contains(last) { s = s.dropLast() }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The words of a dictation as a command for a terminal. The recognizer
+    /// writes a sentence, so the punctuation at the end goes, and a first
+    /// word such as "Git" becomes "git". A word such as "README" stays.
+    public static func command(_ spoken: String) -> String {
+        let s = query(spoken)
+        let first = s.prefix { $0 != " " }
+        let capitalized = first.count > 1 && first.first?.isUppercase == true && first.dropFirst().allSatisfy(\.isLowercase)
+        return capitalized ? s.prefix(1).lowercased() + s.dropFirst() : s
     }
 
     /// Joins 2 texts with 1 space.
@@ -126,19 +137,31 @@ public enum DictationText {
         return name
     }
 
-    /// The message when the recognizer supports none of the Mac languages.
-    public static func unsupported(_ tags: [String]) -> String {
-        "The speech recognizer of this Mac supports none of its languages: \(tags.map(languageName).joined(separator: ", ")). Choose a language."
+    /// The message when the recognizer supports none of the device languages.
+    public static func unsupported(_ tags: [String], platform: FluxPlatform = .current) -> String {
+        "The speech recognizer of \(platform.deviceNoun) supports none of its languages: \(tags.map(languageName).joined(separator: ", ")). Choose a language."
     }
 
     /// The message when the recognizer does not support the language `tag` that the user chose.
-    public static func notSupported(_ tag: String) -> String {
-        "The speech recognizer of this Mac does not support \(languageName(tag)). Choose another language."
+    public static func notSupported(_ tag: String, platform: FluxPlatform = .current) -> String {
+        "The speech recognizer of \(platform.deviceNoun) does not support \(languageName(tag)). Choose another language."
     }
 
-    public static let speechDenied = "Allow Flux in System Settings > Privacy & Security > Speech Recognition to dictate"
-    public static let micDenied = "Allow Flux in System Settings > Privacy & Security > Microphone to dictate"
-    public static let noMicrophone = "This Mac has no microphone input. Connect a microphone, then try again."
+    public static var speechDenied: String { speechDenied(platform: .current) }
+    public static var micDenied: String { micDenied(platform: .current) }
+    public static var noMicrophone: String { noMicrophone(platform: .current) }
+
+    static func speechDenied(platform: FluxPlatform) -> String {
+        "Allow Flux in \(platform.settingsApp) > Privacy & Security > Speech Recognition to dictate"
+    }
+
+    static func micDenied(platform: FluxPlatform) -> String {
+        "Allow Flux in \(platform.settingsApp) > Privacy & Security > Microphone to dictate"
+    }
+
+    static func noMicrophone(platform: FluxPlatform) -> String {
+        "\(platform.deviceNounStart) has no microphone input. Connect a microphone, then try again."
+    }
 
     /// True for a recognizer error that means only that nobody spoke.
     public static func isSilence(domain: String, code: Int) -> Bool {
@@ -146,9 +169,9 @@ public enum DictationText {
     }
 
     /// The message for a recognizer error.
-    public static func message(domain: String, code: Int, description: String) -> String {
+    public static func message(domain: String, code: Int, description: String, platform: FluxPlatform = .current) -> String {
         if domain == NSURLErrorDomain {
-            return "Apple's speech servers are not reachable. Check the network, or choose a language that this Mac transcribes on the device."
+            return "Apple's speech servers are not reachable. Check the network, or choose a language that \(platform.deviceNoun) transcribes on the device."
         }
         return "Dictation stopped: \(description) (\(domain) \(code)). Try again."
     }

@@ -4,10 +4,13 @@ PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-ExecStart=/usr/bin/fluxd
+ExecStart=@BINDIR@/fluxd
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
+# fluxd exits with 75 after an update replaced its binary.
+SuccessExitStatus=75
+RestartForceExitStatus=75
 
 [Install]
 WantedBy=graphical-session.target

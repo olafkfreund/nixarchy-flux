@@ -2,7 +2,8 @@ import QtQuick
 import ".."
 
 // A live stream from the phone, such as the microphone or the screen
-// mirror: a heading, 1 or 2 lines of state, and Stop.
+// mirror: a heading, 1 or 2 lines of state, and Stop. A card with canStart
+// also shows Start while no stream runs.
 Card {
   id: root
   property string icon: ""
@@ -14,8 +15,21 @@ Card {
   property string detail: ""
   signal stop()
 
-  readonly property bool failed: !!stream && !!stream.error
-  readonly property bool live: !!stream && !!stream.active && !failed
+  // idle is true while no stream runs. The card then shows idleTitle. With
+  // canStart, Start shows while the card is idle or failed, and emits
+  // start(). note is a line under the title or the error of an idle or
+  // failed card, for example the device to confirm on. While startActive
+  // is false, Start is dim and does nothing, for example in the 3 seconds
+  // after a request.
+  property bool idle: false
+  property string idleTitle: ""
+  property string note: ""
+  property bool canStart: false
+  property bool startActive: true
+  signal start()
+
+  readonly property bool failed: !idle && !!stream && !!stream.error
+  readonly property bool live: !idle && !!stream && !!stream.active && !failed
 
   implicitHeight: col.implicitHeight + 38
 
@@ -27,33 +41,37 @@ Card {
     anchors.margins: 19
     spacing: 12
 
-    Row {
-      spacing: 8
-      Icon {
-        anchors.verticalCenter: parent.verticalCenter
-        name: root.icon
-        size: 14
-        color: root.live ? Theme.err : Theme.dim
-      }
-      SectionLabel { anchors.verticalCenter: parent.verticalCenter; text: root.live ? root.heading + " · LIVE" : root.heading }
+    CardTitle {
+      icon: root.icon
+      text: root.heading
+      live: root.live
     }
 
     Item {
       width: parent.width
-      height: Math.max(text.implicitHeight, stopButton.implicitHeight)
+      height: Math.max(text.implicitHeight, buttons.implicitHeight)
 
       Column {
         id: text
         anchors.left: parent.left
-        anchors.right: stopButton.left
+        anchors.right: buttons.left
         anchors.rightMargin: 14
         anchors.verticalCenter: parent.verticalCenter
         Txt {
           width: parent.width
-          visible: !root.failed
+          visible: root.idle
+          text: root.idleTitle
+          color: Theme.dim
+          wrapMode: Text.Wrap
+        }
+        Txt {
+          width: parent.width
+          visible: !root.failed && !root.idle
           text: root.live ? root.title : "Starting…"
-          font.weight: root.live ? Font.Bold : Font.Normal
+          font.weight: root.live ? Font.DemiBold : Font.Normal
           color: root.live ? Theme.fg : Theme.dim
+          wrapMode: Text.Wrap
+          maximumLineCount: 2
           elide: Text.ElideRight
         }
         Txt {
@@ -70,16 +88,34 @@ Card {
           color: Theme.err
           wrapMode: Text.Wrap
         }
+        Txt {
+          width: parent.width
+          visible: (root.idle || root.failed) && root.note !== ""
+          text: root.note
+          color: Theme.dim
+          wrapMode: Text.Wrap
+        }
       }
 
-      OutlineButton {
-        id: stopButton
+      Row {
+        id: buttons
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        visible: !root.failed
-        icon: "stop"
-        text: "Stop"
-        onClicked: root.stop()
+        spacing: 8
+        OutlineButton {
+          objectName: "startButton"
+          visible: root.canStart && (root.idle || root.failed)
+          icon: "play"
+          text: "Start"
+          active: root.startActive
+          onClicked: root.start()
+        }
+        OutlineButton {
+          visible: !root.failed && !root.idle
+          icon: "stop"
+          text: "Stop"
+          onClicked: root.stop()
+        }
       }
     }
   }

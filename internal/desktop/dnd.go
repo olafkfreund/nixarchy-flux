@@ -1,14 +1,11 @@
 package desktop
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -16,26 +13,19 @@ import (
 // Disturb.
 const makoMode = "do-not-disturb"
 
+// dndTimeout limits each run of omarchy-shell and makoctl.
+const dndTimeout = 5 * time.Second
+
 // DND reads and sets Do Not Disturb of the desktop notification service.
 // It supports the notification service of the Omarchy shell, and mako.
 type DND struct {
-	kind      string
-	statePath string
-
-	// The state file of the Omarchy shell changes only when Do Not Disturb
-	// changes. Get reads the file again only when its time or size changes.
-	mu       sync.Mutex
-	cached   bool
-	modTime  time.Time
-	size     int64
-	cachedOn bool
+	kind string
 }
 
 // NewDND picks the notification service of this desktop. Kind returns an
 // empty string when Flux supports none of the services on this desktop.
 func NewDND() *DND {
-	home, _ := os.UserHomeDir()
-	d := &DND{statePath: filepath.Join(home, ".local", "state", "omarchy", "notifications.json")}
+	d := &DND{}
 	switch {
 	case onPath("omarchy-shell"):
 		d.kind = "omarchy-shell"
@@ -43,6 +33,14 @@ func NewDND() *DND {
 		d.kind = "mako"
 	}
 	return d
+}
+
+// dndCommand returns a command that stops after the context ends. WaitDelay
+// makes Wait return also when a child keeps the output open.
+func dndCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = time.Second
+	return cmd
 }
 
 func onPath(name string) bool {
@@ -58,9 +56,17 @@ func (d *DND) Kind() string { return d.kind }
 func (d *DND) Get() (on, ok bool) {
 	switch d.kind {
 	case "omarchy-shell":
-		return d.getOmarchy()
+		ctx, cancel := context.WithTimeout(context.Background(), dndTimeout)
+		defer cancel()
+		out, err := dndCommand(ctx, "omarchy-shell", "notifications", "dndState").Output()
+		if err != nil {
+			return false, false
+		}
+		return omarchyDND(string(out))
 	case "mako":
-		out, err := exec.Command("makoctl", "mode").Output()
+		ctx, cancel := context.WithTimeout(context.Background(), dndTimeout)
+		defer cancel()
+		out, err := dndCommand(ctx, "makoctl", "mode").Output()
 		if err != nil {
 			return false, false
 		}
@@ -69,56 +75,29 @@ func (d *DND) Get() (on, ok bool) {
 	return false, false
 }
 
-// getOmarchy reads the state file of the Omarchy shell. The shell writes
-// the file atomically 200 ms after a change.
-func (d *DND) getOmarchy() (on, ok bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	st, err := os.Stat(d.statePath)
-	if errors.Is(err, os.ErrNotExist) {
-		// The shell writes the file at the first change. With no file,
-		// Do Not Disturb is off.
-		return false, true
-	}
-	if err != nil {
-		return false, false
-	}
-	if d.cached && st.ModTime().Equal(d.modTime) && st.Size() == d.size {
-		return d.cachedOn, true
-	}
-	b, err := os.ReadFile(d.statePath)
-	if err != nil {
-		return false, false
-	}
-	on, err = parseOmarchyDND(b)
-	if err != nil {
-		return false, false
-	}
-	d.cached, d.modTime, d.size, d.cachedOn = true, st.ModTime(), st.Size(), on
-	return on, true
-}
-
 // Set turns Do Not Disturb on or off.
 func (d *DND) Set(on bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), dndTimeout)
+	defer cancel()
 	switch d.kind {
 	case "omarchy-shell":
 		value := "off"
 		if on {
 			value = "on"
 		}
-		if out, err := exec.Command("omarchy-shell", "notifications", "setDnd", value).CombinedOutput(); err != nil {
+		if out, err := dndCommand(ctx, "omarchy-shell", "notifications", "setDnd", value).CombinedOutput(); err != nil {
 			return fmt.Errorf("omarchy-shell: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 		// The bar shows the state. omarchy-toggle-notification-silencing
 		// refreshes it the same way.
-		_ = exec.Command("omarchy-shell", "-q", "omarchy.indicators", "refresh").Run()
+		_ = dndCommand(ctx, "omarchy-shell", "-q", "omarchy.indicators", "refresh").Run()
 		return nil
 	case "mako":
 		flag := "-r"
 		if on {
 			flag = "-a"
 		}
-		if out, err := exec.Command("makoctl", "mode", flag, makoMode).CombinedOutput(); err != nil {
+		if out, err := dndCommand(ctx, "makoctl", "mode", flag, makoMode).CombinedOutput(); err != nil {
 			return fmt.Errorf("makoctl: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 		return nil
@@ -126,16 +105,17 @@ func (d *DND) Set(on bool) error {
 	return errors.New("no supported notification service")
 }
 
-// parseOmarchyDND reads the "dnd" key of notifications.json. A file with
-// no key means off.
-func parseOmarchyDND(b []byte) (bool, error) {
-	var s struct {
-		DND *bool `json:"dnd"`
+// omarchyDND reads the output of `omarchy-shell notifications dndState`.
+// The shell answers through the notification service that is running, so it
+// also works when a plugin replaces the built-in one.
+func omarchyDND(out string) (on, ok bool) {
+	switch strings.TrimSpace(out) {
+	case "on":
+		return true, true
+	case "off":
+		return false, true
 	}
-	if err := json.Unmarshal(b, &s); err != nil {
-		return false, err
-	}
-	return s.DND != nil && *s.DND, nil
+	return false, false
 }
 
 // makoDND reports whether the output of `makoctl mode` has the Do Not

@@ -2,15 +2,21 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"flux/internal/config"
+	"flux/internal/hc"
 	"flux/internal/herdr"
 	"golang.org/x/sys/unix"
 )
@@ -30,15 +36,18 @@ func doctor() {
 
 	var s State
 	err := callInto("state", nil, &s)
-	check(err == nil, "fluxd is running",
-		"fluxd is not running. Run: systemctl --user enable --now fluxd")
+	check(err == nil, "fluxd is running", notRunning(err))
+	checkUnit(check)
 	if err == nil {
 		check(s.Self.TCPPort > 0, fmt.Sprintf("fluxd listens on TCP %d", s.Self.TCPPort),
 			"fluxd has no TCP port. Check: journalctl --user -u fluxd")
+		checkVersion(s, check)
+		for _, fix := range oldAppProblems(&s) {
+			check(false, "", fix)
+		}
 	}
 
-	check(!running("kdeconnectd"), "kdeconnectd is not running",
-		"kdeconnectd also uses ports 1714 to 1764. Stop it: pkill kdeconnectd")
+	checkDiscoveryPort(udpHolders, os.Stdout, check)
 
 	// Flux needs no open port. fluxd opens every connection, and mDNS
 	// finds the phones. The default ufw rules let mDNS in.
@@ -57,16 +66,29 @@ func doctor() {
 	check(active("avahi-daemon"), "avahi-daemon runs, so fluxd can find phones with mDNS",
 		"avahi-daemon is not running, so fluxd cannot find phones. Run: sudo systemctl enable --now avahi-daemon")
 
+	conf, cerr := os.ReadFile(avahiConf)
+	if cerr != nil && !errors.Is(cerr, fs.ErrNotExist) {
+		fmt.Printf("? Cannot read %s, so the ZeroTier check below assumes that Avahi uses every interface\n", avahiConf)
+	}
+	checkZeroTier(active("zerotier-one"), zerotierIfaces(), string(conf), os.Stdout, check)
+
 	// Extra addresses reach a paired device outside the local network, for
-	// example through Tailscale. A host name must resolve to be of use.
+	// example through Tailscale or ZeroTier. A host name must resolve to be
+	// of use.
 	if err == nil {
-		tailscale := active("tailscaled")
+		var vpns []string
+		if active("tailscaled") {
+			vpns = append(vpns, "Tailscale")
+		}
+		if active("zerotier-one") {
+			vpns = append(vpns, "ZeroTier")
+		}
 		for _, d := range s.Devices {
 			if !d.Paired {
 				continue
 			}
-			if len(d.Addresses) == 0 && tailscale {
-				fmt.Printf("- Tailscale runs. To reach %s away from this network, run: flux-cli --device %q addresses add HOST\n", d.Name, d.Name)
+			if len(d.Addresses) == 0 && len(vpns) > 0 {
+				fmt.Printf("- %s runs. To reach %s away from this network, run: flux-cli --device %q addresses add HOST\n", strings.Join(vpns, " and "), d.Name, d.Name)
 			}
 			for _, a := range d.Addresses {
 				if net.ParseIP(a) != nil {
@@ -99,6 +121,14 @@ func doctor() {
 	_, pwErr := exec.LookPath("pw-cat")
 	check(pwErr == nil, "pw-cat is installed, so the phone can be a microphone",
 		"The phone as microphone needs pw-cat. Install it with: sudo pacman -S pipewire")
+	// The phone as speaker needs pw-record. The audio outputs on the phone
+	// and the mute of the phone speaker need pactl.
+	_, recErr := exec.LookPath("pw-record")
+	check(recErr == nil, "pw-record is installed, so the phone can play the audio of this computer",
+		"The phone as speaker needs pw-record. Install it with: sudo pacman -S pipewire")
+	_, pactlErr := exec.LookPath("pactl")
+	check(pactlErr == nil, "pactl is installed, so the phone can select the audio output of this computer",
+		"The audio outputs on the phone need pactl. Install it with: sudo pacman -S libpulse")
 	_, mpvErr := exec.LookPath("mpv")
 	_, ffplayErr := exec.LookPath("ffplay")
 	check(mpvErr == nil || ffplayErr == nil, "mpv or ffplay is installed, so the phone screen can show here",
@@ -114,7 +144,9 @@ func doctor() {
 	check(gsrErr == nil || wfErr == nil, "gpu-screen-recorder is installed, so the phone can show this screen",
 		"The remote desktop needs gpu-screen-recorder. Install it with: sudo pacman -S gpu-screen-recorder")
 	if wfErr == nil {
-		fmt.Println("✓ wf-recorder is installed, so the remote desktop also works on a GPU that gpu-screen-recorder does not support")
+		fmt.Println("✓ wf-recorder is installed, so a phone or a tablet can extend this screen, and the remote desktop also works on a GPU that gpu-screen-recorder does not support")
+	} else {
+		fmt.Println("- To extend this screen to a phone or a tablet, install wf-recorder: sudo pacman -S wf-recorder")
 	}
 	if gsrErr == nil {
 		kms := filepath.Join(filepath.Dir(gsr), "gsr-kms-server")
@@ -124,15 +156,45 @@ func doctor() {
 	}
 
 	// herdr is optional. When it runs, the phone shows its agents.
-	if _, err := exec.LookPath("herdr"); err == nil {
+	// The state error err of fluxd decides below whether checkLiveTerminal
+	// gets the state, so the error of LookPath has its own name.
+	if _, herr := exec.LookPath("herdr"); herr == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		pong, perr := herdr.Ping(ctx, herdr.SocketPath())
+		path := herdr.SocketPath()
+		pong, perr := herdr.Ping(ctx, path)
 		cancel()
-		if perr != nil {
+		switch {
+		case herdrDown(perr):
 			fmt.Println("- herdr does not run. Start herdr to show its agents on the phone")
-		} else {
+		case perr != nil:
+			// For example, the socket belongs to another user.
+			check(false, "", safe(fmt.Sprintf("The herdr socket %s does not work: %v", path, perr)))
+		default:
 			check(pong.Protocol >= herdr.MinProtocol, fmt.Sprintf("herdr %s runs, so the phone can show its agents", pong.Version),
 				fmt.Sprintf("herdr %s uses API protocol %d, and Flux needs %d or newer. Run: herdr update", pong.Version, pong.Protocol, herdr.MinProtocol))
+			if pong.Protocol >= herdr.MinProtocol {
+				var fluxd *State
+				if err == nil {
+					fluxd = &s
+				}
+				checkLiveTerminal(pong.Version, fluxd, os.Stdout, check)
+			}
+		}
+	}
+
+	// The herdr app runs its agents in herdr-core, beside herdr. It is
+	// optional too.
+	if _, herr := exec.LookPath("herdr-core"); herr == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		path := hc.SocketPath()
+		h, perr := hc.Hi(ctx, path)
+		cancel()
+		switch {
+		case herdrDown(perr):
+			fmt.Println("- The herdr app does not run. Start it to show its agents on the phone")
+		default:
+			check(perr == nil, fmt.Sprintf("herdr-core %s runs, so the phone can show the agents of the herdr app", h.Version),
+				safe(fmt.Sprintf("The herdr-core socket %s does not work: %v", path, perr)))
 		}
 	}
 
@@ -154,6 +216,67 @@ func doctor() {
 		fmt.Printf("%d problem(s) found\n", problems)
 		os.Exit(1)
 	}
+}
+
+// notRunning returns the fix for a fluxd that does not answer.
+func notRunning(err error) string {
+	if err == nil {
+		return ""
+	}
+	if config.IsOff() {
+		return "fluxd is off. To turn it on, run: flux-cli on"
+	}
+	if cerr := config.Check(); cerr != nil {
+		return fmt.Sprintf("fluxd cannot start, because config.toml has an error: %v. Fix the file, then run: flux-cli on", cerr)
+	}
+	return fmt.Sprintf("fluxd does not answer: %v. To see why, run: journalctl --user -u fluxd -e", err)
+}
+
+// checkUnit checks the unit file that systemd loads for fluxd.service. A
+// user unit from an earlier install hides the unit of the package, and
+// its fluxd can be gone.
+func checkUnit(check func(ok bool, pass, fix string)) {
+	out, err := exec.Command("systemctl", "--user", "show", "-p", "FragmentPath", "-p", "ExecStart", "fluxd.service").Output()
+	if err != nil {
+		fmt.Println("? Cannot ask systemd which fluxd.service it loads")
+		return
+	}
+	props := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			props[k] = v
+		}
+	}
+	frag := props["FragmentPath"]
+	if frag == "" {
+		check(false, "", "fluxd.service is not installed. Run: flux-cli setup")
+		return
+	}
+	if _, err := os.Stat(systemUnit); err == nil && frag != systemUnit {
+		fix := fmt.Sprintf("%s hides %s, so the service does not run the fluxd of the package. ", frag, systemUnit)
+		if b, err := os.ReadFile(frag); err == nil && setupWrote(string(b)) {
+			fix += "To remove it, run: flux-cli setup"
+		} else {
+			fix += "Remove it, then run: systemctl --user daemon-reload"
+		}
+		check(false, "", fix)
+	}
+	if path := execPath(props["ExecStart"]); path != "" {
+		_, serr := os.Stat(path)
+		check(serr == nil, "fluxd.service runs "+path,
+			fmt.Sprintf("fluxd.service runs %s, which does not exist. Run: flux-cli setup", path))
+	}
+}
+
+// execPath returns the program of an ExecStart value of systemctl show,
+// such as "{ path=/usr/bin/fluxd ; argv[]=/usr/bin/fluxd ; ... }".
+func execPath(v string) string {
+	_, rest, ok := strings.Cut(v, "path=")
+	if !ok {
+		return ""
+	}
+	path, _, _ := strings.Cut(rest, " ;")
+	return strings.TrimSpace(path)
 }
 
 func windowName(app, plugin bool) string {
@@ -180,10 +303,100 @@ func shortName() string {
 	return fmt.Sprintf("- The short name flux runs %s, not flux-cli. Use flux-cli", p)
 }
 
-func running(name string) bool {
-	return exec.Command("pgrep", "-x", name).Run() == nil
+// discoveryPort is the UDP port that fluxd listens on for identities. It
+// is lan.UDPPort. The CLI does not import the lan package, because that
+// package needs D-Bus.
+const discoveryPort = 12100
+
+// checkDiscoveryPort checks that no other program listens on the UDP port
+// of discovery. Devices send their identity to that port, and a second
+// program on it can take the identities that fluxd needs. holders returns
+// the other programs on a port.
+func checkDiscoveryPort(holders func(port int) ([]string, error), w io.Writer, check func(ok bool, pass, fix string)) {
+	others, err := holders(discoveryPort)
+	if err != nil {
+		fmt.Fprintf(w, "? Cannot run ss, so Flux cannot check UDP port %d\n", discoveryPort)
+		return
+	}
+	if len(others) == 0 {
+		fmt.Fprintf(w, "✓ no other program uses UDP port %d\n", discoveryPort)
+		return
+	}
+	for _, name := range others {
+		fix := fmt.Sprintf("Stop it: pkill -x %s", name)
+		if name == "" {
+			name, fix = "a program of another user", fmt.Sprintf("Find it: sudo ss -ulnp 'sport = :%d'", discoveryPort)
+		}
+		check(false, "", fmt.Sprintf("%s also uses UDP port %d, so devices cannot always reach fluxd. %s", name, discoveryPort, fix))
+	}
+}
+
+// udpHolders returns the programs other than fluxd that listen on the UDP
+// port. The name of a program of another user is empty, because ss shows
+// only the sockets of this user.
+func udpHolders(port int) ([]string, error) {
+	out, err := exec.Command("ss", "-Hulnp", fmt.Sprintf("sport = :%d", port)).Output()
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		name := ""
+		if _, rest, ok := strings.Cut(line, `users:(("`); ok {
+			name, _, _ = strings.Cut(rest, `"`)
+		}
+		if name != "fluxd" && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 func active(unit string) bool {
 	return exec.Command("systemctl", "is-active", "--quiet", unit).Run() == nil
+}
+
+// checkLiveTerminal checks that the phone can show the live terminal of
+// a herdr pane. The live terminal needs herdr = true and herdr_control =
+// true. The herdr server and the herdr CLI that fluxd runs both need
+// herdr.MinBridgeVersion or newer. fluxd finds the CLI in the PATH of
+// fluxd.service, which can find another herdr than the shell, so fluxd
+// checks the CLI. fluxd is nil when it does not answer. The live terminal
+// is optional, so a setting that turns it off gives a note and not a
+// problem.
+func checkLiveTerminal(server string, fluxd *State, out io.Writer, check func(ok bool, pass, fix string)) {
+	need := "herdr " + herdr.MinBridgeVersion + " or newer"
+	// fluxd checks a failed CLI again each minute. A restart checks it at
+	// once, and only a restart reads a new PATH of fluxd.service.
+	restart := "systemctl --user restart fluxd"
+	switch {
+	case fluxd != nil && !fluxd.Herdr.Enabled:
+		fmt.Fprintln(out, "- The live terminal on the phone needs herdr = true and herdr_control = true in config.toml")
+	case fluxd != nil && !fluxd.Herdr.Control:
+		fmt.Fprintln(out, "- The live terminal on the phone needs herdr_control = true in config.toml")
+	case !herdr.BridgeVersionOK(server):
+		check(false, "", fmt.Sprintf("The live terminal on the phone needs %s, and herdr %s runs. Run: herdr update", need, server))
+	case fluxd == nil:
+		fmt.Fprintf(out, "- The live terminal on the phone needs %s for the herdr server and for the herdr CLI that fluxd runs. fluxd does not answer, so doctor cannot check that CLI\n", need)
+	case !fluxd.Herdr.Running || fluxd.Herdr.CLI.Version == "" && fluxd.Herdr.CLI.Error == "":
+		fmt.Fprintf(out, "- The live terminal on the phone needs %s for the herdr server and for the herdr CLI that fluxd runs. fluxd did not check its herdr CLI yet\n", need)
+	case len(fluxd.Herdr.Bridge) > 0:
+		check(true, fmt.Sprintf("herdr %s runs, and fluxd runs %s %s, so the phone can show the live terminal",
+			server, fluxd.Herdr.CLI.Path, fluxd.Herdr.CLI.Version), "")
+	case fluxd.Herdr.CLI.Error != "":
+		check(false, "", safe(fmt.Sprintf("The live terminal on the phone needs the herdr CLI in the PATH of fluxd.service, and fluxd cannot run it: %s. After the fix, run: %s",
+			fluxd.Herdr.CLI.Error, restart)))
+	default:
+		check(false, "", safe(fmt.Sprintf("The live terminal on the phone needs %s, and fluxd runs %s %s. Update that herdr, or put a newer herdr first in the PATH of fluxd.service. Then run: %s",
+			need, fluxd.Herdr.CLI.Path, fluxd.Herdr.CLI.Version, restart)))
+	}
+}
+
+// herdrDown reports whether err is a plain connection failure to the
+// herdr socket: the socket does not exist, or nothing listens on it.
+func herdrDown(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
 }

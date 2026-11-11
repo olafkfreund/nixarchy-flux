@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import XCTest
 @testable import FluxKit
 
@@ -8,7 +10,7 @@ final class RemoteInputTests: XCTestCase {
 
     func testCapabilitiesMatchTheComputer() {
         let plugin = RemoteInputPlugin()
-        XCTAssertEqual(plugin.outgoing, ["kdeconnect.mousepad.request"])
+        XCTAssertEqual(plugin.outgoing, ["flux.mousepad.request"])
         XCTAssertEqual(plugin.incoming, ["flux.input"])
     }
 
@@ -43,7 +45,7 @@ final class RemoteInputTests: XCTestCase {
         XCTAssertEqual(RemoteInput.click(.left).body.count, 1)
     }
 
-    func testKeysUseTheKdeNumbers() throws {
+    func testKeysUseTheProtocolNumbers() throws {
         let enter = try roundTrip(RemoteInput.key(.enter))
         XCTAssertEqual(enter.int("specialKey"), 12)
         XCTAssertEqual(enter.body.count, 1)
@@ -58,6 +60,65 @@ final class RemoteInputTests: XCTestCase {
         XCTAssertFalse(tab.has("super"))
     }
 
+    func testKeysRepeatOnlyWhenTheComputerCan() throws {
+        XCTAssertTrue(RemoteInput.keys(.backspace, count: 0, repeat: true).isEmpty)
+        XCTAssertTrue(RemoteInput.keys(.backspace, count: -3, repeat: false).isEmpty)
+        let plain = RemoteInput.keys(.backspace, count: 3, repeat: false)
+        XCTAssertEqual(plain.count, 3, "an older fluxd gets 1 packet for each press")
+        XCTAssertTrue(plain.allSatisfy { $0.int("specialKey") == 1 && !$0.has("repeat") })
+
+        let one = RemoteInput.keys(.backspace, count: 1, repeat: true)
+        XCTAssertEqual(one.count, 1)
+        XCTAssertFalse(one[0].has("repeat"), "1 press needs no repeat")
+
+        let many = try roundTrip(XCTUnwrap(RemoteInput.keys(.backspace, count: 40, mods: .init(ctrl: true), repeat: true).first))
+        XCTAssertEqual(many.int("specialKey"), 1)
+        XCTAssertEqual(many.int("repeat"), 40)
+        XCTAssertEqual(many.bool("ctrl"), true)
+        XCTAssertEqual(RemoteInput.keys(.backspace, count: 40, repeat: true).count, 1)
+
+        let huge = RemoteInput.keys(.delete, count: RemoteInput.maxRepeat * 2 + 1, repeat: true)
+        XCTAssertEqual(huge.map { $0.int("repeat") }, [RemoteInput.maxRepeat, RemoteInput.maxRepeat, nil])
+        XCTAssertEqual(huge.last?.int("specialKey"), 13)
+    }
+
+    func testDraftTypesLinesWithShiftEnter() throws {
+        XCTAssertTrue(RemoteInput.draft("").isEmpty)
+        let one = RemoteInput.draft("Hello team")
+        XCTAssertEqual(one.count, 1)
+        XCTAssertEqual(one[0].string("key"), "Hello team")
+
+        let lines = RemoteInput.draft("Hi,\r\nthe build is ready.\n\nBye")
+        XCTAssertEqual(lines.map { $0.string("key") }, ["Hi,", nil, "the build is ready.", nil, nil, "Bye"])
+        for p in lines where !p.has("key") {
+            XCTAssertEqual(p.int("specialKey"), 12)
+            XCTAssertEqual(p.bool("shift"), true, "a line break goes as Shift+Enter")
+        }
+        XCTAssertEqual(RemoteInput.draft("a\rb").count, 3)
+        XCTAssertEqual(RemoteInput.draft("a\n").map { $0.string("key") }, ["a", nil], "a line break at the end stays")
+    }
+
+    func testDraftLimits() {
+        XCTAssertEqual(RemoteInput.maxDraftLines, 100)
+        XCTAssertEqual(RemoteInput.limitDraft("a\nb"), "a\nb")
+        let lines = (1...150).map(String.init).joined(separator: "\n")
+        let cut = RemoteInput.limitDraft(lines)
+        XCTAssertEqual(cut.split(separator: "\n", omittingEmptySubsequences: false).count, RemoteInput.maxDraftLines)
+        XCTAssertTrue(cut.hasSuffix("\n100"), "the text after line 100 goes away")
+        XCTAssertEqual(RemoteInput.draft(cut).count, 199, "100 lines and 99 line breaks")
+        XCTAssertEqual(RemoteInput.limitDraft(String(repeating: "x", count: 5000)).count, RemoteInput.maxDraft)
+    }
+
+    func testDraftSplitsLongLinesBetweenCharacters() {
+        let long = String(repeating: "a", count: RemoteInput.maxText) + "👍🏽b"
+        let parts = RemoteInput.draft(long).compactMap { $0.string("key") }
+        XCTAssertEqual(parts.count, 2)
+        XCTAssertEqual(parts[0].unicodeScalars.count, RemoteInput.maxText)
+        XCTAssertEqual(parts[1], "👍🏽b", "a character stays in 1 packet")
+        XCTAssertEqual(parts.joined(), long)
+        XCTAssertEqual(RemoteInput.chunks(String(repeating: "x", count: 10)), [String(repeating: "x", count: 10)])
+    }
+
     func testTextWithSuper() throws {
         let p = try roundTrip(RemoteInput.text(" ", mods: .init(meta: true)))
         XCTAssertEqual(p.string("key"), " ")
@@ -66,9 +127,11 @@ final class RemoteInputTests: XCTestCase {
     }
 
     func testMacModifiersMapToTheComputer() {
+        #if os(macOS)
         let m = RemoteInput.Mods([.control, .option, .shift, .command, .function])
         XCTAssertEqual(m, .init(ctrl: true, alt: true, shift: true, meta: true))
         XCTAssertFalse(RemoteInput.Mods([.capsLock, .function]).any)
+        #endif
         XCTAssertEqual(RemoteInput.Mods(ctrl: true).union(.init(meta: true)), .init(ctrl: true, meta: true))
     }
 
@@ -84,6 +147,7 @@ final class RemoteInputTests: XCTestCase {
         XCTAssertNil(RemoteInput.key(macKeyCode: 114))
     }
 
+    #if os(macOS)
     func testPresses() {
         func press(_ code: UInt16, _ flags: NSEvent.ModifierFlags, _ plain: String?, optionIsAlt: Bool = false, commandIsSuper: Bool = true) -> RemoteInput.Press {
             RemoteInput.press(keyCode: code, flags: flags, plain: plain, optionIsAlt: optionIsAlt, commandIsSuper: commandIsSuper)
@@ -109,6 +173,7 @@ final class RemoteInputTests: XCTestCase {
         // A function key without a number, such as F13, stays on the Mac.
         XCTAssertEqual(press(105, .control, "\u{F710}"), .ignore)
     }
+    #endif
 
     func testMacScrollFollowsTheMac() throws {
         // macOS moves the content up for a negative delta, so the computer scrolls down.
@@ -185,6 +250,7 @@ final class RemoteInputTests: XCTestCase {
         XCTAssertTrue(t.leftUp().isEmpty)
     }
 
+    #if os(macOS)
     func testReleaseChord() {
         var c = ReleaseChord()
         XCTAssertFalse(c.flags(.control))
@@ -206,6 +272,7 @@ final class RemoteInputTests: XCTestCase {
         XCTAssertFalse(c.flags([.control, .option, .capsLock]))
         XCTAssertTrue(c.flags(.capsLock))
     }
+    #endif
 
     func testStateFollowsTheComputer() {
         let model = RemoteInputModel()
@@ -216,5 +283,15 @@ final class RemoteInputTests: XCTestCase {
         model.set("a", false)
         XCTAssertEqual(model.enabled["a"], false)
         XCTAssertFalse(model.isOn("a"))
+        XCTAssertFalse(model.canRepeat("a"), "an older fluxd does not tell keyRepeat")
+        model.set("a", true, desktop: true, keyRepeat: true)
+        XCTAssertTrue(model.canRepeat("a"))
+        model.set("a", true)
+        XCTAssertFalse(model.canRepeat("a"), "each flux.input tells the state again")
+        XCTAssertTrue(model.scrollsNaturally("a"), "a computer without Hyprland scrolls the natural way")
+        model.set("a", true, naturalScroll: false)
+        XCTAssertFalse(model.scrollsNaturally("a"))
+        model.set("a", true)
+        XCTAssertTrue(model.scrollsNaturally("a"))
     }
 }

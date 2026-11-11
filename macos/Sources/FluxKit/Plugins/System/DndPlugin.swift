@@ -14,6 +14,12 @@ import Observation
 ///   `focusChanged(_:)`.
 /// - Setting: Shortcuts that the user picks, one that turns a Focus on and one
 ///   that turns it off, run with `/usr/bin/shortcuts run`.
+///
+/// iOS gives apps no way to set the Focus, so the iPhone only reports its
+/// Focus through the same filter. The state that a computer sends shows in
+/// the model and changes nothing on the iPhone. iOS runs the filter also
+/// while Flux has no link, so a change waits in a `FocusBacklog` for each
+/// computer that was not connected.
 public final class DndPlugin: FluxPlugin, @unchecked Sendable {
     private weak var core: FluxCore?
     public let model: DndModel
@@ -25,8 +31,13 @@ public final class DndPlugin: FluxPlugin, @unchecked Sendable {
     public let outgoing = [PacketType.fluxDnd]
 
     static let syncKey = "dnd.sync"
+    #if os(macOS)
     static let shortcutOnKey = "dnd.shortcutOn"
     static let shortcutOffKey = "dnd.shortcutOff"
+    #else
+    /// Set once in `attach`, before the network starts.
+    private var backlog: FocusBacklog?
+    #endif
 
     @MainActor
     public init() { model = DndModel() }
@@ -36,24 +47,37 @@ public final class DndPlugin: FluxPlugin, @unchecked Sendable {
         let defaults = core.defaults
         let model = model
         DispatchQueue.main.async { model.load(defaults) }
+        #if os(iOS)
+        backlog = FocusBacklog(defaults: defaults)
+        #endif
     }
 
     /// Sets the Focus state at launch, so that the start is not a change.
+    /// On iOS, a state that differs from the last one that Flux saw is a
+    /// change that came while Flux did not run.
     public func start(focusOn on: Bool) {
         _ = dndGuard.local(on, now: Self.now())
         let model = model
         Task { @MainActor in model.focusOn = on }
+        #if os(iOS)
+        report(on)
+        #endif
     }
 
     /// Handles a Focus change on this Mac, reported by the Flux Focus filter.
     public func focusChanged(_ on: Bool) {
         let model = model
         Task { @MainActor in model.focusOn = on }
+        #if os(iOS)
+        report(on)
+        #else
         guard let core, dndGuard.local(on, now: Self.now()), sync(core) else { return }
-        FluxLog.plugin.info("Do Not Disturb is \(on ? "on" : "off", privacy: .public) on this Mac")
+        FluxLog.plugin.info("Do Not Disturb is \(on ? "on" : "off", privacy: .public) on \(FluxPlatform.current.deviceNoun, privacy: .public)")
         send(on, except: nil)
+        #endif
     }
 
+    #if os(macOS)
     /// Handles flux.dnd from a computer. The shortcut runs in a Task, because
     /// the core lock is held.
     public func handle(_ packet: Packet, from device: Device) {
@@ -77,14 +101,52 @@ public final class DndPlugin: FluxPlugin, @unchecked Sendable {
             send(on, except: from)
         }
     }
+    #else
+    /// Shows the Do Not Disturb state of a computer. The iPhone does not follow it.
+    public func handle(_ packet: Packet, from device: Device) {
+        guard let on = packet.bool("on") else { return }
+        let id = device.id
+        let model = model
+        Task { @MainActor in model.computers[id] = on }
+    }
+
+    /// Called when the link closes and after an unpair. An unpaired
+    /// computer stops its wait for a Focus change.
+    public func onDisconnected(_ device: Device) {
+        let id = device.id
+        if !device.paired { backlog?.forget(id) }
+        let model = model
+        Task { @MainActor in model.computers[id] = nil }
+    }
+
+    /// Sends a Focus change that came while this computer was not
+    /// connected. The core lock is held, so it sends on the device.
+    public func onConnected(_ device: Device) {
+        guard let core, let backlog, sync(core), device.accepts(PacketType.fluxDnd),
+              let on = backlog.take(for: device.id) else { return }
+        _ = device.send(Packet(PacketType.fluxDnd, ["on": on]))
+    }
+
+    /// Takes a Focus state from the filter. A change goes to the connected
+    /// computers now and waits in the backlog for the other computers that
+    /// are paired now.
+    private func report(_ on: Bool) {
+        guard let core, let backlog,
+              backlog.report(on, paired: core.trust.all().map(\.id), keep: sync(core)) else { return }
+        FluxLog.plugin.info("Do Not Disturb is \(on ? "on" : "off", privacy: .public) on \(FluxPlatform.current.deviceNoun, privacy: .public)")
+        let packet = Packet(PacketType.fluxDnd, ["on": on])
+        let reached = core.connectedPairedIds(accepting: PacketType.fluxDnd).filter { core.send(packet, to: $0) }
+        backlog.reached(reached, on: on)
+    }
+    #endif
 
     private func sync(_ core: FluxCore) -> Bool { core.defaults.object(forKey: Self.syncKey) as? Bool ?? true }
 
     /// Sends the state to each connected computer that accepts flux.dnd, except `except`.
     private func send(_ on: Bool, except: String?) {
         guard let core else { return }
-        for d in core.connectedPaired() where d.id != except && d.accepts(PacketType.fluxDnd) {
-            _ = d.send(Packet(PacketType.fluxDnd, ["on": on]))
+        for id in core.connectedPairedIds(accepting: PacketType.fluxDnd) where id != except {
+            core.send(Packet(PacketType.fluxDnd, ["on": on]), to: id)
         }
     }
 
@@ -97,20 +159,27 @@ public final class DndPlugin: FluxPlugin, @unchecked Sendable {
 public final class DndModel {
     /// The Focus state that the Focus filter reported, or nil before the first report.
     public internal(set) var focusOn: Bool?
+    #if os(macOS)
     /// The last shortcut error, or nil after a shortcut that worked.
     public internal(set) var lastError: String?
     /// The names of the user's shortcuts, for the pickers.
     public private(set) var shortcuts: [String] = []
+    #else
+    /// The Do Not Disturb state that each computer sent, by device ID.
+    public internal(set) var computers: [String: Bool] = [:]
+    #endif
 
     public var sync = true {
         didSet { defaults?.set(sync, forKey: DndPlugin.syncKey) }
     }
+    #if os(macOS)
     public var shortcutOn = "" {
         didSet { defaults?.set(shortcutOn, forKey: DndPlugin.shortcutOnKey) }
     }
     public var shortcutOff = "" {
         didSet { defaults?.set(shortcutOff, forKey: DndPlugin.shortcutOffKey) }
     }
+    #endif
 
     @ObservationIgnored private var defaults: UserDefaults?
 
@@ -118,16 +187,22 @@ public final class DndModel {
 
     func load(_ defaults: UserDefaults) {
         sync = defaults.object(forKey: DndPlugin.syncKey) as? Bool ?? true
+        #if os(macOS)
         shortcutOn = defaults.string(forKey: DndPlugin.shortcutOnKey) ?? ""
         shortcutOff = defaults.string(forKey: DndPlugin.shortcutOffKey) ?? ""
+        #endif
         self.defaults = defaults
     }
 
+    #if os(macOS)
     /// Reads the shortcut names with `shortcuts list`.
     public func reloadShortcuts() async {
         shortcuts = await Shortcuts.list()
     }
+    #endif
 }
+
+#if os(macOS)
 
 /// Runs the Shortcuts command-line tool.
 enum Shortcuts {
@@ -177,3 +252,4 @@ enum Shortcuts {
         }
     }
 }
+#endif

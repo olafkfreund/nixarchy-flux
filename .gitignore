@@ -15,5 +15,20 @@ __pycache__/
 /dist/arch/pkg/
 /dist/arch/*.pkg.tar.*
 /dist/aur/
+/dist/release/
 *.jks
 *.keystore
+.DS_Store
+# Private keys and signing files. Keep them out of the checkout.
+*.p8
+*.p12
+*.pem
+*.key
+*.cer
+*.mobileprovision
+*.provisionprofile
+*.idsig
+# Design review captures, decision pages, and critiques. They are large and stay local.
+/.impeccable/review/
+/.impeccable/questions/
+/.impeccable/critique/

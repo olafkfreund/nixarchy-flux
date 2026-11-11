@@ -25,6 +25,8 @@ enum PluginRegistry {
             BatteryPlugin(),
             DndPlugin(),
             ApprovePlugin(),
+            ThemePlugin(),
+            StreamRequestPlugin(),
         ]
     }
 }
@@ -126,6 +128,13 @@ enum FeatureHooks {
         AgentsFeature.didLaunch(model: model)
         ShareServices.install(model: model)
         ApprovePromptWindow.install(model: model)
+        StreamRequestFeature.install(model: model)
+    }
+
+    /// Runs after each change of the core state.
+    static func stateChanged(_ state: CoreState, model: AppModel) {
+        // A stream that a click started waits for the link of its computer.
+        StreamRequestFeature.check(model: model)
     }
 
     /// Files dropped on the Dock icon or opened with Flux.

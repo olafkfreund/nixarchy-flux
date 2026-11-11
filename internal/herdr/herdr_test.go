@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -277,10 +278,15 @@ func TestSubscribe(t *testing.T) {
 
 func TestReadLineLimit(t *testing.T) {
 	long := strings.Repeat("x", maxLine+1) + "\n"
-	if _, err := readLine(bufio.NewReader(strings.NewReader(long))); !errors.Is(err, errLineTooLong) {
+	r := bufio.NewReader(strings.NewReader(long))
+	if _, err := readLine(r, maxLine); !errors.Is(err, errLineTooLong) {
 		t.Fatalf("error %v, want errLineTooLong", err)
 	}
-	line, err := readLine(bufio.NewReader(strings.NewReader("abc\nrest")))
+	small := bufio.NewReader(strings.NewReader("abcd\n"))
+	if _, err := readLine(small, 4); !errors.Is(err, errLineTooLong) {
+		t.Fatalf("error %v, want errLineTooLong for a small limit", err)
+	}
+	line, err := readLine(bufio.NewReader(strings.NewReader("abc\nrest")), maxLine)
 	if err != nil || string(line) != "abc\n" {
 		t.Fatalf("line %q, error %v", line, err)
 	}
@@ -295,5 +301,31 @@ func TestSocketPath(t *testing.T) {
 	t.Setenv("HERDR_SOCKET_PATH", "/run/herdr-test.sock")
 	if got := SocketPath(); got != "/run/herdr-test.sock" {
 		t.Fatalf("path %q", got)
+	}
+}
+
+func TestCheckOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "owner.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := checkOwner(conn, os.Getuid()); err != nil {
+		t.Errorf("a socket of this user: %v", err)
+	}
+	if err := checkOwner(conn, os.Getuid()+1); err == nil || !strings.Contains(err.Error(), "belongs to user") {
+		t.Errorf("a socket of another user: %v", err)
+	}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	if err := checkOwner(a, os.Getuid()); err == nil {
+		t.Error("a pipe is not a Unix socket")
 	}
 }

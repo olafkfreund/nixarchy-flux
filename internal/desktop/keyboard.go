@@ -2,11 +2,15 @@ package desktop
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
+	"unicode/utf8"
 )
 
 // errNoWtype is the error when wtype is missing.
@@ -21,41 +25,81 @@ type Keyboard struct{}
 // Modifiers that wtype accepts, as Keyboard takes them.
 var wtypeMods = map[string]bool{"shift": true, "ctrl": true, "alt": true, "logo": true}
 
-// Type types text while it holds the modifiers mods, such as "ctrl".
-func (Keyboard) Type(text string, mods []string) error {
+// Type types text while it holds the modifiers mods, such as "ctrl". It
+// stops when ctx ends. Text without modifiers goes through the virtual
+// keyboard of fluxd, see typeText. A shortcut with modifiers, or a
+// compositor without that protocol, uses wtype.
+func (Keyboard) Type(ctx context.Context, text string, mods []string) error {
 	if text == "" {
 		return nil
 	}
+	if len(mods) == 0 {
+		ctx, cancel := context.WithTimeout(ctx, wtypeTimeout(utf8.RuneCountInString(text)))
+		defer cancel()
+		if err := typeText(ctx, text); !errors.Is(err, errNoVirtualKeyboard) {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("the text did not finish in %s", wtypeTimeout(utf8.RuneCountInString(text)))
+			}
+			return err
+		}
+	}
 	// wtype reads the text from stdin, so the text is not in the process list.
-	return runWtype(append(modArgs(mods), "-"), text)
+	return runWtype(ctx, withMods(mods, "-"), text, utf8.RuneCountInString(text))
 }
 
 // Key presses and releases the key with the XKB name, such as "Return",
-// while it holds the modifiers mods.
-func (Keyboard) Key(name string, mods []string) error {
-	return runWtype(append(modArgs(mods), "-k", name), "")
+// times times, while it holds the modifiers mods. It stops when ctx ends.
+func (Keyboard) Key(ctx context.Context, name string, mods []string, times int) error {
+	var keys []string
+	for range max(1, times) {
+		keys = append(keys, "-k", name)
+	}
+	return runWtype(ctx, withMods(mods, keys...), "", max(1, times))
 }
 
-// modArgs returns the wtype arguments that press mods. wtype releases the
-// modifiers when it exits.
-func modArgs(mods []string) []string {
-	var args []string
+// withMods returns the wtype arguments that press mods, run args, and then
+// release mods in the reverse order. Hyprland 0.56 keeps a modifier down
+// after wtype exits, so a modifier that wtype does not release changes
+// each later key into a shortcut.
+func withMods(mods []string, args ...string) []string {
+	var press, release []string
 	for _, m := range mods {
 		if wtypeMods[m] {
-			args = append(args, "-M", m)
+			press = append(press, "-M", m)
+			release = append([]string{"-m", m}, release...)
 		}
 	}
-	return args
+	return append(append(press, args...), release...)
 }
 
-func runWtype(args []string, stdin string) error {
-	cmd := exec.Command("wtype", args...)
+// wtypeTimeout returns the longest time that wtype can take for a text of
+// n characters, or for n key presses. wtype waits about 4 ms for each character. A compositor
+// that does not answer then does not stop the next keys.
+func wtypeTimeout(n int) time.Duration {
+	return 5*time.Second + time.Duration(n)*5*time.Millisecond
+}
+
+// runWtype runs wtype with the args and the text on stdin. n is the number
+// of characters or key presses, for the timeout.
+func runWtype(ctx context.Context, args []string, stdin string, n int) error {
+	timeout := wtypeTimeout(n)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "wtype", args...)
+	// The kernel stops wtype when fluxd exits.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	cmd.Stdin = strings.NewReader(stdin)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
 			return errNoWtype
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("wtype did not finish in %s", timeout)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return fmt.Errorf("wtype: %s", msg)

@@ -14,6 +14,7 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -23,6 +24,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -36,6 +39,7 @@ import org.omarchy.flux.core.Ringer
 import org.omarchy.flux.core.SmsSync
 import org.omarchy.flux.protocol.PROTOCOL_VERSION
 import org.omarchy.flux.protocol.cleanName
+import org.omarchy.flux.ui.ClipboardSendActivity
 import org.omarchy.flux.ui.MainActivity
 
 /**
@@ -67,14 +71,48 @@ class FluxService : Service() {
             if (pct == lastBattery && charging == lastCharging) return
             lastBattery = pct
             lastCharging = charging
-            FluxCore.connectedPaired().forEach { Plugins.sendBattery(FluxCore, it) }
+            sendBattery()
         }
     }
+
+    /** Sends the battery state to each connected paired computer. */
+    private fun sendBattery() = FluxCore.connectedPaired().forEach { Plugins.sendBattery(FluxCore, it) }
 
     private val dndReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == NotificationManager.ACTION_NOTIFICATION_POLICY_ACCESS_GRANTED_CHANGED) FluxCore.refresh()
             else DndSync.onLocalChange(FluxCore)
+        }
+    }
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) = search()
+    }
+
+    /**
+     * True for [SEARCH_MS] after a trigger: the start of the service, a
+     * rediscover, a dropped link, or the screen on. A rediscover comes with
+     * a new network, the app on screen, a scan, and Retry. See
+     * [multicastNeeded]. Only the main thread uses these fields.
+     */
+    private val searching = MutableStateFlow(false)
+    private var searchUntil = 0L
+    private var searchEnd: Job? = null
+
+    /** Starts the time of [searching] again. It runs on the main thread. */
+    private fun search() {
+        searchUntil = SystemClock.elapsedRealtime() + SEARCH_MS
+        searching.value = true
+        if (searchEnd?.isActive == true) return
+        searchEnd = scope.launch {
+            // A delay counts only the time while the phone is awake. Short
+            // steps end the time soon after the phone wakes from a sleep.
+            while (true) {
+                val left = searchUntil - SystemClock.elapsedRealtime()
+                if (left <= 0) break
+                delay(minOf(left, SEARCH_STEP_MS))
+            }
+            searching.value = false
         }
     }
 
@@ -121,7 +159,7 @@ class FluxService : Service() {
     }
 
     /**
-     * KDE Connect desktops announce _kdeconnect._udp over mDNS. Flux answers a
+     * fluxd announces _flux._udp over mDNS. Flux answers a
      * found host with a unicast identity, and the host then connects.
      */
     @Suppress("DEPRECATION")
@@ -140,7 +178,7 @@ class FluxService : Service() {
     private var registration: NsdManager.RegistrationListener? = null
 
     /**
-     * Announces this phone as _kdeconnect._udp over mDNS. A computer that
+     * Announces this phone as _flux._udp over mDNS. A computer that
      * blocks incoming connections finds the phone this way and connects to it.
      * The service name is the device ID. The port is the TCP link port.
      */
@@ -189,7 +227,6 @@ class FluxService : Service() {
         startInForeground(0)
         multicast = getSystemService(WifiManager::class.java)?.createMulticastLock("flux")?.apply {
             setReferenceCounted(false)
-            acquire()
         }
         getSystemService(ConnectivityManager::class.java)?.registerDefaultNetworkCallback(networkCallback)
         ContextCompat.registerReceiver(this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -199,6 +236,7 @@ class FluxService : Service() {
             addAction(NotificationManager.ACTION_NOTIFICATION_POLICY_ACCESS_GRANTED_CHANGED)
         }
         ContextCompat.registerReceiver(this, dndReceiver, dndChanges, ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, screenReceiver, IntentFilter(Intent.ACTION_SCREEN_ON), ContextCompat.RECEIVER_NOT_EXPORTED)
         CaptureWatch.refresh(this)
         FluxCore.startNetwork()
         nsd = getSystemService(NsdManager::class.java)
@@ -206,6 +244,33 @@ class FluxService : Service() {
         scope.launch { FluxCore.listenPort.collect { announce() } }
         scope.launch {
             FluxCore.state.map { s -> s.devices.count { it.paired && it.online } }.distinctUntilChanged().collect { startInForeground(it) }
+        }
+        // The multicast lock makes the Wi-Fi chip wake the phone for each
+        // broadcast on the network, which uses the battery. See [multicastNeeded].
+        search()
+        scope.launch { FluxCore.rediscovered.collect { search() } }
+        // Android can skip a battery broadcast, for example in Doze, and the
+        // computers then show an old state. The phone sends the state again
+        // each BATTERY_RESEND_MS, so the computers correct it.
+        scope.launch {
+            while (true) {
+                delay(BATTERY_RESEND_MS)
+                sendBattery()
+            }
+        }
+        scope.launch {
+            var online = emptySet<String>()
+            FluxCore.state.map { s -> s.devices.filter { it.paired && it.online }.map { it.id }.toSet() }.distinctUntilChanged().collect { now ->
+                if (!now.containsAll(online)) search()
+                online = now
+            }
+        }
+        scope.launch {
+            combine(FluxCore.state, searching) { s, window ->
+                multicastNeeded(s.scanning, s.devices.any { it.paired }, s.devices.any { it.paired && !it.online }, window)
+            }
+                .distinctUntilChanged()
+                .collect { need -> runCatching { if (need) multicast?.acquire() else multicast?.release() } }
         }
         // Call alerts follow the switch on the device screen and the phone permission.
         scope.launch {
@@ -232,6 +297,7 @@ class FluxService : Service() {
         when (intent?.action) {
             ACTION_STOP_RING -> Ringer.stop(this)
             ACTION_APPROVE_DENY -> org.omarchy.flux.core.Approvals.deny(FluxCore)
+            ACTION_SSH_DENY -> org.omarchy.flux.core.SshAgent.deny(FluxCore)
             ACTION_TURN_OFF -> {
                 FluxCore.setEnabled(false)
                 return START_NOT_STICKY
@@ -243,6 +309,7 @@ class FluxService : Service() {
                 FluxCore.rediscover()
                 // The device name can change in the system settings.
                 announce()
+                sendBattery()
             }
             ACTION_SCAN -> scan()
         }
@@ -258,8 +325,9 @@ class FluxService : Service() {
         runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(networkCallback) }
         runCatching { unregisterReceiver(batteryReceiver) }
         runCatching { unregisterReceiver(dndReceiver) }
+        runCatching { unregisterReceiver(screenReceiver) }
         CaptureWatch.stop(this)
-        multicast?.release()
+        runCatching { multicast?.release() }
         FluxCore.stopNetwork()
         super.onDestroy()
     }
@@ -271,38 +339,65 @@ class FluxService : Service() {
             this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val text = when (connected) {
-            0 -> "Waiting for a computer on this network"
-            1 -> "1 computer connected"
+        val text = when {
+            connected == 0 -> "Waiting for a computer on this network"
+            connected == 1 -> "1 computer connected"
             else -> "$connected computers connected"
         }
-        val n = NotificationCompat.Builder(this, Android.CHANNEL_SERVICE)
+        val b = NotificationCompat.Builder(this, Android.CHANNEL_SERVICE)
             .setSmallIcon(R.drawable.ic_stat_flux)
             .setContentTitle("Flux")
             .setContentText(text)
             .setContentIntent(open)
-            .addAction(
-                R.drawable.ic_power_settings_new,
-                "Turn off",
-                PendingIntent.getService(
-                    this, 1, Intent(this, FluxService::class.java).setAction(ACTION_TURN_OFF),
+        // A copy in another app reaches the computer with 1 tap.
+        if (connected > 0) {
+            b.addAction(
+                R.drawable.ic_content_paste_go,
+                "Send clipboard",
+                PendingIntent.getActivity(
+                    this, 2,
+                    Intent(this, ClipboardSendActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                 ),
             )
-            .setOngoing(true)
-            .setSilent(true)
-            .build()
+        }
+        b.addAction(
+            R.drawable.ic_power_settings_new,
+            "Turn off",
+            PendingIntent.getService(
+                this, 1, Intent(this, FluxService::class.java).setAction(ACTION_TURN_OFF),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            ),
+        )
+        val n = b.setOngoing(true).setSilent(true).build()
         ServiceCompat.startForeground(this, Android.ID_SERVICE, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
     }
 
     companion object {
         const val ACTION_STOP_RING = "org.omarchy.flux.STOP_RING"
         const val ACTION_APPROVE_DENY = "org.omarchy.flux.APPROVE_DENY"
+        const val ACTION_SSH_DENY = "org.omarchy.flux.SSH_DENY"
         const val ACTION_REFRESH = "org.omarchy.flux.REFRESH"
         const val ACTION_TURN_OFF = "org.omarchy.flux.TURN_OFF"
         const val ACTION_SCAN = "org.omarchy.flux.SCAN"
         const val SCAN_MS = 10_000L
-        const val MDNS_TYPE = "_kdeconnect._udp"
+
+        /** The time between 2 battery sends when no broadcast comes. The computer polls its own battery each minute. */
+        private const val BATTERY_RESEND_MS = 5 * 60_000L
+
+        /**
+         * How long the multicast lock stays on after a trigger while a paired
+         * computer is away. fluxd resolves an away phone over mDNS every 30
+         * seconds, and after 10 minutes every 2 to 2.5 minutes. It also
+         * broadcasts each minute. This time covers at least 1 of each.
+         */
+        private const val SEARCH_MS = 3 * 60_000L
+
+        /** The longest step of the timer of [SEARCH_MS]. */
+        private const val SEARCH_STEP_MS = 10_000L
+
+        const val MDNS_TYPE = "_flux._udp"
 
         fun start(context: Context, action: String? = null) {
             // Flux stays off until the user turns it on again.
@@ -314,6 +409,18 @@ class FluxService : Service() {
         }
     }
 }
+
+/**
+ * True when the phone holds the Wi-Fi multicast lock: while it is
+ * [scanning], before the first pairing, and in the [searching] time after
+ * a trigger while a paired computer is away. A paired computer finds the
+ * phone at its last address without the lock, because fluxd dials that
+ * address. After the phone gets a new address, fluxd finds it through
+ * mDNS, or the phone answers a broadcast of fluxd. Without the lock, the
+ * Wi-Fi chip can drop both.
+ */
+internal fun multicastNeeded(scanning: Boolean, paired: Boolean, pairedAway: Boolean, searching: Boolean): Boolean =
+    scanning || !paired || (pairedAway && searching)
 
 /** Starts Flux after the phone boots. */
 class BootReceiver : BroadcastReceiver() {

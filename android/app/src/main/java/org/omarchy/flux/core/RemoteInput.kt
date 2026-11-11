@@ -9,11 +9,11 @@ import kotlin.math.roundToInt
 
 /**
  * The touchpad and the keyboard of this phone for a computer, with
- * kdeconnect.mousepad.request. The computer runs the input only while its
+ * flux.mousepad.request. The computer runs the input only while its
  * remote_input setting is on. It tells the phone with flux.input.
  */
 object RemoteInput {
-    /** Special keys, with the numbers that KDE Connect uses. */
+    /** Special keys, with the specialKey numbers of flux.mousepad.request. */
     enum class Key(val code: Int, val label: String) {
         Backspace(1, "⌫"), Tab(2, "tab"), Left(4, "←"), Up(5, "↑"), Right(6, "→"), Down(7, "↓"),
         Home(10, "home"), End(11, "end"), Enter(12, "⏎"), Delete(13, "del"), Escape(14, "esc"),
@@ -39,6 +39,25 @@ object RemoteInput {
     /** A positive [dy] scrolls down, and a positive [dx] scrolls right. */
     fun scroll(dx: Float, dy: Float) = Packet(Types.MOUSEPAD_REQUEST, bodyOf("scroll" to true, "dx" to round(dx), "dy" to round(dy)))
 
+    /**
+     * True when the touchpad scrolls the natural way, so the content moves
+     * with the fingers. [mode] is the setting of this phone. [computer] is
+     * the naturalScroll of flux.input, or null when the computer does not
+     * tell it.
+     */
+    fun naturalScroll(mode: ScrollMode, computer: Boolean?): Boolean = when (mode) {
+        ScrollMode.Natural -> true
+        ScrollMode.Traditional -> false
+        ScrollMode.Computer -> computer ?: true
+    }
+
+    /**
+     * The scroll for a motion of 2 fingers on the touchpad. A positive [dy]
+     * is a motion down. With [natural], the content moves with the fingers,
+     * so a motion down scrolls up.
+     */
+    fun touchpadScroll(dx: Float, dy: Float, natural: Boolean): Packet = if (natural) scroll(-dx, -dy) else scroll(dx, dy)
+
     fun click(c: Click) = Packet(Types.MOUSEPAD_REQUEST, bodyOf(c.field to true))
 
     /** Presses the left button for a drag, or releases it. */
@@ -48,8 +67,67 @@ object RemoteInput {
 
     fun key(k: Key, mods: Mods = Mods()) = Packet(Types.MOUSEPAD_REQUEST, bodyOf("specialKey" to k.code, *mods.fields().toTypedArray()))
 
+    /** The most presses of a key in 1 packet. */
+    const val MAX_REPEAT = 4096
+
+    /** The most characters of text in 1 packet. The computer cuts a longer text. */
+    private const val MAX_TEXT = 4096
+
+    /** The longest draft, in characters, see [draft]. */
+    const val MAX_DRAFT = 4000
+
     /**
-     * Flux extension: puts the pointer on the position [x], [y] of the
+     * The most lines of a draft. Each line and each line break is 1
+     * packet, and the computer drops packets after 256 waiting actions.
+     */
+    const val MAX_DRAFT_LINES = 100
+
+    /** Returns [s] without the lines after [MAX_DRAFT_LINES]. */
+    fun draftLines(s: String): String {
+        var breaks = 0
+        for (i in s.indices) {
+            if (s[i] == '\n' && ++breaks == MAX_DRAFT_LINES) return s.substring(0, i)
+        }
+        return s
+    }
+
+    /**
+     * Presses [k] [count] times. With [repeat], 1 packet holds up to
+     * [MAX_REPEAT] presses. A computer tells with keyRepeat in flux.input
+     * that it reads repeat. Without it, each press is 1 packet.
+     */
+    fun keys(k: Key, count: Int, repeat: Boolean, mods: Mods = Mods()): List<Packet> {
+        if (count <= 0) return emptyList()
+        if (!repeat) return List(count) { key(k, mods) }
+        return buildList {
+            var left = count
+            while (left > 0) {
+                val n = min(left, MAX_REPEAT)
+                add(if (n == 1) key(k, mods) else Packet(Types.MOUSEPAD_REQUEST, bodyOf("specialKey" to k.code, "repeat" to n, *mods.fields().toTypedArray())))
+                left -= n
+            }
+        }
+    }
+
+    /**
+     * Types a draft: each line as text, and Shift+Enter between the lines,
+     * so that a chat box keeps the lines in 1 message. A long line goes in
+     * parts that the computer takes whole.
+     */
+    fun draft(s: String): List<Packet> = buildList {
+        s.replace("\r\n", "\n").replace('\r', '\n').split('\n').forEachIndexed { i, line ->
+            if (i > 0) add(key(Key.Enter, Mods(shift = true)))
+            var start = 0
+            while (start < line.length) {
+                val end = if (line.codePointCount(start, line.length) <= MAX_TEXT) line.length else line.offsetByCodePoints(start, MAX_TEXT)
+                add(text(line.substring(start, end)))
+                start = end
+            }
+        }
+    }
+
+    /**
+     * Puts the pointer on the position [x], [y] of the
      * remote desktop, from 0 at the top left corner to 1 at the bottom right
      * corner. The computer runs the action of the packet after the move.
      */
@@ -100,6 +178,57 @@ object RemoteInput {
         val id = volumeKeysDevice ?: return false
         send(core, id, key(if (up) Key.Left else Key.Right))
         return true
+    }
+}
+
+/**
+ * The text that the type field typed on the computer since it started. A
+ * change of the field goes to the computer as backspaces and new text, see
+ * [TextEdit]. A tap, a key, or a dictation moves the cursor of the
+ * computer, so the field then starts again with [reset].
+ */
+class TypeMirror {
+    /** The text that the computer has from the field. */
+    var sent = ""
+        private set
+
+    /** What a change of the field does on the computer. */
+    sealed interface Change {
+        /** Press Backspace [backspaces] times, then type [text]. */
+        data class Edit(val backspaces: Int, val text: String) : Change
+
+        /** A modifier is held, so the new text goes as a shortcut, such as ctrl and c. The field starts again. */
+        data class Shortcut(val text: String) : Change
+    }
+
+    /** Handles the new [text] of the field, without the text that the keyboard composes. */
+    fun change(text: String, modsHeld: Boolean): Change {
+        val edit = TextEdit.between(sent, text)
+        if (modsHeld && edit.text.isNotEmpty()) {
+            sent = ""
+            return Change.Shortcut(edit.text)
+        }
+        sent = text
+        return Change.Edit(edit.backspaces, edit.text)
+    }
+
+    /** Returns the backspaces that delete the text on the computer, and starts again. */
+    fun clear(): Int {
+        val n = sent.codePointCount(0, sent.length)
+        sent = ""
+        return n
+    }
+
+    /** Removes the last character, for the Backspace key. It returns false when the field typed nothing. */
+    fun dropLast(): Boolean {
+        if (sent.isEmpty()) return false
+        sent = sent.substring(0, sent.offsetByCodePoints(sent.length, -1))
+        return true
+    }
+
+    /** Forgets the text, for example after a tap on the computer. */
+    fun reset() {
+        sent = ""
     }
 }
 

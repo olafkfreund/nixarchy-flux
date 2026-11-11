@@ -29,12 +29,19 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Slider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -49,17 +56,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
@@ -72,16 +83,18 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import org.omarchy.flux.core.DeviceUi
 import org.omarchy.flux.core.FluxCore
 import org.omarchy.flux.core.RemoteInput
 import org.omarchy.flux.desktop.DesktopSession
 import org.omarchy.flux.desktop.DesktopViewport
+import org.omarchy.flux.desktop.ExtendSize
 import org.omarchy.flux.protocol.Packet
 import org.omarchy.flux.voice.Dictation
 import org.omarchy.flux.voice.rememberVoiceTyping
-import kotlin.math.abs
-import kotlin.math.roundToInt
 
 /** A finger that stays this long without a motion clicks the right button, or drags when it moves. */
 private const val DESKTOP_HOLD_MS = 450L
@@ -93,17 +106,37 @@ private val DoubleTapDistance = 24.dp
 /** The controls under the video, or next to it in landscape. */
 private enum class Panel { Omarchy, Keys }
 
+/** The time that the layout of the video must stay the same before the extended screen takes its size. */
+private const val EXTEND_SETTLE_MS = 300L
+
 /**
  * The screen of the computer on the phone. The computer streams the
  * screen while remote_desktop is on. The touches click, drag, and scroll
  * on the computer while remote_input is on. The phone turns to landscape
  * while the stream shows. The Omarchy panel moves between workspaces and
  * windows, and the keys and the mic type on the computer.
+ *
+ * With [extend], the computer adds a monitor with the size of the video on
+ * this phone and streams it, so that the phone or the tablet is a second
+ * monitor. The monitor goes away when the stream stops.
  */
 @Composable
-fun DesktopScreen(d: DeviceUi, onBack: () -> Unit) {
+fun DesktopScreen(d: DeviceUi, onBack: () -> Unit, extend: Boolean = false) {
+    val audio by DesktopSession.audio.collectAsState()
+    val volume by DesktopSession.volume.collectAsState()
+    val audioText = Tn.text
     val status by DesktopSession.status.collectAsState()
-    val ready = d.online && d.desktopSupported && d.remoteDesktop == true
+    val supported = d.desktopSupported && (!extend || d.extendSupported)
+    // The screen shows and takes input only after the phone lock, see rememberRemoteUnlock.
+    val unlocked = rememberRemoteUnlock(
+        d.online && supported && d.remoteDesktop == true,
+        if (extend) "Extend the computer screen" else "Show the computer screen",
+        if (extend) "extend the computer screen" else "show the computer screen",
+        onBack, sample = isDemo(d.id),
+    )
+    val ready = d.online && supported && d.remoteDesktop == true && unlocked
+    // The size of the added monitor, after the video has its place in landscape.
+    val extendSize = remember(d.id) { mutableStateOf<ExtendSize?>(null) }
     val control = d.remoteInput == true
     var panel by rememberSaveable { mutableStateOf<Panel?>(null) }
     // The monitor that the user selected. A restart of the stream keeps it.
@@ -113,9 +146,14 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit) {
     // In landscape, a rail at the side holds the buttons, so that the video has the full height.
     val wide = ready && landscape
     val shown = panel.takeIf { control }
+    // A click, a dictation, or the Omarchy panel can move the cursor of the computer, so the type field then starts again.
+    // It also starts again when the keys hide.
+    val typing = remember(d.id) { RemoteTyping() }
+    LaunchedEffect(shown) { if (shown != Panel.Keys) typing.end() }
     // Dictation types its words on the computer. A dictation right after another starts with a space.
     var afterVoice by remember { mutableStateOf(false) }
     val voice = rememberVoiceTyping { spoken ->
+        typing.end()
         sendInput(d, RemoteInput.text(if (afterVoice) " $spoken" else spoken))
         afterVoice = true
     }
@@ -128,23 +166,27 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit) {
         panel = if (panel == p) null else p
     }
     val buttons: @Composable () -> Unit = {
-        if (ready && status.deviceId == d.id && status.monitors.size > 1) {
+        if (ready) {
+            // The button shows from the start, so that the rail keeps its width when the extended screen takes its size.
+            // Before that size, the button does nothing, because a start without the size shows a monitor that exists.
+            TextButton(onClick = {
+                if (!extend || extendSize.value != null) DesktopSession.setAudio(FluxCore, d.id, !audio, extendSize.value)
+            }) { Text(if (audio) "Audio off" else "Audio on", color = audioText) }
+        }
+        if (ready && !extend && status.deviceId == d.id && status.monitors.size > 1) {
             val next = status.monitors[(status.monitors.indexOf(status.monitor) + 1) % status.monitors.size]
-            T(
-                status.monitor,
-                Modifier.clip(RoundedCornerShape(8.dp)).background(Tn.tile)
-                    .clickable(onClickLabel = "Show $next") {
-                        monitor = next
-                        DesktopSession.start(FluxCore, d.id, next)
-                    }.padding(horizontal = 10.dp, vertical = 8.dp),
-                size = 12, color = Tn.sub, family = Mono, weight = FontWeight.Medium, maxLines = 1,
-            )
+            // The key shows the monitor on screen. A tap shows the next monitor.
+            MonitorKey(status.monitor, next) {
+                monitor = next
+                DesktopSession.start(FluxCore, d.id, next)
+            }
         }
         if (ready && control) {
             if (d.shortcutsSupported) PanelButton(Ic.grid, "Omarchy", shown == Panel.Omarchy) { toggle(Panel.Omarchy) }
             PanelButton(Ic.keyboard, "Keys", shown == Panel.Keys) { toggle(Panel.Keys) }
             if (voice.available) {
-                PanelButton(Ic.mic, if (dictating) "Stop dictation" else "Dictate", dictating, Tn.red) {
+                // Green marks a live microphone, as the privacy dot of Android does.
+                PanelButton(Ic.mic, if (dictating) "Stop dictation" else "Dictate", dictating, Tn.green) {
                     panel = Panel.Keys
                     if (dictating) voice.dictation.stop() else voice.start()
                 }
@@ -154,7 +196,13 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit) {
     val gutter = Modifier.padding(horizontal = TiledGutter)
     Column(Modifier.fillMaxSize().then(if (wide) Modifier.displayCutoutPadding() else Modifier).imePadding()) {
         if (!wide) {
-            Box(gutter) { TiledTopBar("desktop · ${d.name}", onBack) { buttons() } }
+            Box(gutter) { TiledTopBar(if (extend) "Extend screen" else "Remote desktop", onBack, context = d.name) { buttons() } }
+        }
+        if (audio && ready) {
+            Row(gutter.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = DesktopSession::toggleMute) { Text(if (volume == 0f) "Unmute" else "Mute", color = audioText) }
+                Slider(value = volume, onValueChange = DesktopSession::setVolume, modifier = Modifier.weight(1f).semantics { contentDescription = "Remote audio volume" })
+            }
         }
         when {
             !d.online -> Box(gutter) { NotReachable(d, "The screen and the controls") }
@@ -163,9 +211,20 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit) {
                 "This version of Flux on ${d.name} does not stream its screen.",
                 gutter.padding(top = 48.dp),
             )
+            !supported -> EmptyState(
+                Ic.devices, "Update Flux on ${d.name}",
+                "This version of Flux on ${d.name} cannot add a monitor for this device.",
+                gutter.padding(top = 48.dp),
+            )
             d.remoteDesktop != true -> EmptyState(
                 Ic.desktop, "Remote desktop is off",
-                "On ${d.name}, set remote_desktop = true in ~/.config/flux/config.toml, then run systemctl --user reload fluxd.",
+                "On ${d.name}, set remote_desktop = true in ~/.config/flux/config.toml, then run systemctl --user reload fluxd." +
+                    if (extend) " The extended screen uses the same setting." else "",
+                gutter.padding(top = 48.dp),
+            )
+            !unlocked -> EmptyState(
+                Ic.desktop, "Unlock to continue",
+                if (extend) "Confirm with the phone lock to extend the screen of ${d.name}." else "Confirm with the phone lock to show ${d.name}.",
                 gutter.padding(top = 48.dp),
             )
             else -> {
@@ -183,12 +242,18 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit) {
                         }
                     }
                     Column(Modifier.weight(1f).fillMaxHeight()) {
-                        RemoteDesktop(d, monitor, hint = shown == null && !wide)
+                        RemoteDesktop(d, monitor, extend, extendSize, wide, hint = shown == null && !wide, onClick = typing::end)
                     }
                     if (wide) {
                         when (shown) {
                             Panel.Omarchy -> OmarchyPanel(d, Modifier.width(300.dp).fillMaxHeight().padding(8.dp))
-                            Panel.Keys -> KeyPanel(d, ::sendKey, Modifier.width(300.dp).align(Alignment.Bottom).padding(8.dp), voice)
+                            // The keys panel is wider, so that the type field keeps room for the text next to its keys.
+                            // With the phone keyboard open, the panel scrolls, and the type field at its bottom shows.
+                            Panel.Keys -> KeyPanel(
+                                d, typing, ::sendKey,
+                                Modifier.width(320.dp).align(Alignment.Bottom).verticalScroll(rememberScrollState(), reverseScrolling = true).padding(8.dp),
+                                voice,
+                            )
                             null -> Unit
                         }
                     }
@@ -196,7 +261,7 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit) {
                 if (!wide) {
                     when (shown) {
                         Panel.Omarchy -> OmarchyPanel(d, gutter.padding(top = TileGap, bottom = 10.dp).heightIn(max = 380.dp))
-                        Panel.Keys -> KeyPanel(d, ::sendKey, gutter.padding(top = TileGap, bottom = 10.dp), voice)
+                        Panel.Keys -> KeyPanel(d, typing, ::sendKey, gutter.padding(top = TileGap, bottom = 10.dp), voice)
                         null -> Unit
                     }
                 }
@@ -205,16 +270,33 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit) {
     }
 }
 
-/** A button that shows or hides a panel. It has the [accent] color while [on]. */
+/**
+ * A button that shows or hides a panel: a 40 dp key that takes taps on
+ * 48 dp. It has the [accent] color while [on], and TalkBack reads its state.
+ */
 @Composable
 private fun PanelButton(@DrawableRes icon: Int, description: String, on: Boolean, accent: Color = Tn.blue, onClick: () -> Unit) {
     val shape = RoundedCornerShape(8.dp)
     Box(
-        Modifier.clip(shape).background(if (on) Tn.tileHi else Tn.tile)
-            .border(1.dp, if (on) accent else Tn.tile, shape)
-            .clickable(onClickLabel = description, onClick = onClick)
-            .padding(8.dp),
-    ) { Sym(icon, description, tint = if (on) accent else Tn.sub, size = 20.dp) }
+        Modifier.minimumInteractiveComponentSize().size(40.dp).clip(shape).background(if (on) Tn.accentTile else Tn.tile)
+            .border(1.dp, if (on) accent else Tn.line, shape)
+            .toggleable(value = on, role = Role.Switch, onValueChange = { onClick() })
+            .semantics { contentDescription = description },
+        contentAlignment = Alignment.Center,
+    ) { Sym(icon, tint = if (on) accent else Tn.sub, size = 20.dp) }
+}
+
+/** The monitor that the stream shows, in mono. A tap shows the [next] monitor. */
+@Composable
+private fun MonitorKey(current: String, next: String, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(8.dp)
+    Box(
+        Modifier.minimumInteractiveComponentSize().heightIn(min = 40.dp).clip(shape).background(Tn.tile).border(1.dp, Tn.line, shape)
+            .clickable(onClickLabel = "Show $next", role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Monitor $current" }
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) { T(current, size = 12, color = Tn.text, family = Mono, weight = FontWeight.Medium) }
 }
 
 /**
@@ -247,15 +329,37 @@ private fun sendInput(d: DeviceUi, p: Packet) {
 /**
  * The video of the computer screen, with its gestures. The stream runs
  * while the app shows. [hint] shows the gestures under the video.
+ * [onClick] runs for each click and each drag on the computer. With
+ * [extend], the stream starts after the video has its size in landscape,
+ * see [wide], and [extendSize] keeps that size.
  */
 @Composable
-private fun ColumnScope.RemoteDesktop(d: DeviceUi, monitor: String?, hint: Boolean) {
+private fun ColumnScope.RemoteDesktop(
+    d: DeviceUi,
+    monitor: String?,
+    extend: Boolean,
+    extendSize: MutableState<ExtendSize?>,
+    wide: Boolean,
+    hint: Boolean,
+    onClick: () -> Unit,
+) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val selected by rememberUpdatedState(monitor)
+    val startStream by rememberUpdatedState {
+        // After the unlock ends, the page asks for the phone lock again before the stream starts.
+        // The size comes from the state itself, so a start right after the size is set has it.
+        if (ReplyLock.valid() || isDemo(d.id)) {
+            if (!extend) {
+                DesktopSession.start(FluxCore, d.id, selected)
+            } else {
+                extendSize.value?.let { DesktopSession.start(FluxCore, d.id, extend = it) }
+            }
+        }
+    }
     DisposableEffect(d.id, lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> DesktopSession.start(FluxCore, d.id, selected)
+                Lifecycle.Event.ON_START -> startStream()
                 Lifecycle.Event.ON_STOP -> DesktopSession.stop()
                 else -> Unit
             }
@@ -264,6 +368,18 @@ private fun ColumnScope.RemoteDesktop(d: DeviceUi, monitor: String?, hint: Boole
         onDispose {
             lifecycle.removeObserver(observer)
             DesktopSession.stop()
+        }
+    }
+    var box by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current
+    if (extend) {
+        // The added monitor gets the size of the video once the turn to landscape is over. A panel that opens later
+        // makes the video smaller, and the monitor keeps its size. Even sides keep each pixel of the monitor on 1 pixel.
+        LaunchedEffect(box, wide) {
+            if (extendSize.value != null || !wide || box.width <= box.height) return@LaunchedEffect
+            delay(EXTEND_SETTLE_MS)
+            extendSize.value = ExtendSize(box.width / 2 * 2, box.height / 2 * 2, density.density)
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) startStream()
         }
     }
     val status by DesktopSession.status.collectAsState()
@@ -286,17 +402,22 @@ private fun ColumnScope.RemoteDesktop(d: DeviceUi, monitor: String?, hint: Boole
         }
     }
 
-    var box by remember { mutableStateOf(IntSize.Zero) }
     // The video keeps its place before the size is known, so that its surface is ready for the first frame.
     val videoW = status.width.takeIf { it > 0 } ?: 16
     val videoH = status.height.takeIf { it > 0 } ?: 10
-    // A new size starts a new viewport at scale 1, and the gestures start again with it.
-    val viewport = remember(box, videoW, videoH) { mutableStateOf(DesktopViewport(box.width.toFloat(), box.height.toFloat(), videoW, videoH)) }
-    val vp = viewport.value
-    val density = LocalDensity.current
+    // The position of the last click on the video. When the keyboard or a panel makes the view smaller, it stays in view.
+    var focus by remember(d.id) { mutableStateOf<Pair<Float, Float>?>(null) }
+    val viewport = remember { mutableStateOf(DesktopViewport(0f, 0f, videoW, videoH)) }
+    // A new view size keeps the zoom, and a new video size starts at scale 1, see DesktopViewport.resized.
+    val vp = viewport.value.resized(box.width.toFloat(), box.height.toFloat(), videoW, videoH, focus)
+    SideEffect { viewport.value = vp }
+    val clicked by rememberUpdatedState { p: Pair<Float, Float> ->
+        focus = p
+        if (control) onClick()
+    }
     // The gestures work only on a live video. Over a wait or an error, a tap must not click on the computer.
     val gestures = if (live && status.width > 0) {
-        Modifier.desktopGestures(viewport, { viewport.value = it }, { send(it) }) { haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
+        Modifier.desktopGestures(viewport, { viewport.value = it }, { send(it) }, { clicked(it) }) { haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
     } else {
         Modifier
     }
@@ -318,21 +439,27 @@ private fun ColumnScope.RemoteDesktop(d: DeviceUi, monitor: String?, hint: Boole
                 )
             }
         }
-        StreamState(d, status, Modifier.fillMaxSize())
+        StreamState(d, status, Modifier.fillMaxSize()) {
+            if (!extend) {
+                DesktopSession.start(FluxCore, d.id, status.monitor.ifEmpty { null })
+            } else {
+                extendSize.value?.let { DesktopSession.start(FluxCore, d.id, extend = it) }
+            }
+        }
     }
     if (hint) {
         T(
             if (control) "Tap clicks · hold for the right button · hold, then move to drag\n2 fingers scroll · pinch zooms · 1 finger moves the zoomed view"
             else "View only · pinch zooms · 1 finger moves the zoomed view",
             Modifier.fillMaxWidth().padding(horizontal = TiledGutter, vertical = 8.dp),
-            size = 11, color = Tn.dim, align = TextAlign.Center, lineHeight = 1.5f,
+            size = 11, color = Tn.sub, align = TextAlign.Center, lineHeight = 1.5f,
         )
     }
 }
 
-/** The state of the stream over the video: a wait, an error, or a stop. */
+/** The state of the stream over the video: a wait, an error, or a stop. [onRestart] starts the stream again. */
 @Composable
-private fun StreamState(d: DeviceUi, status: DesktopSession.Status, modifier: Modifier) {
+private fun StreamState(d: DeviceUi, status: DesktopSession.Status, modifier: Modifier, onRestart: () -> Unit) {
     val mine = status.deviceId == d.id
     val waiting = !mine || status.phase == DesktopSession.Phase.Connecting ||
         (status.phase == DesktopSession.Phase.Live && status.width == 0)
@@ -342,16 +469,21 @@ private fun StreamState(d: DeviceUi, status: DesktopSession.Status, modifier: Mo
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
         ) {
-            CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp, color = Tn.blue)
+            Spinner(Modifier.size(28.dp), color = Tn.blue)
             T(if (mine) status.message else "Connecting to ${d.name}…", size = 13, color = Tn.sub)
         }
-        status.phase == DesktopSession.Phase.Error || status.phase == DesktopSession.Phase.Idle -> Box(modifier.background(Tn.bg), contentAlignment = Alignment.Center) {
+        status.phase == DesktopSession.Phase.Error || status.phase == DesktopSession.Phase.Idle -> Box(
+            modifier.background(Tn.bg).verticalScroll(rememberScrollState()),
+            contentAlignment = Alignment.Center,
+        ) {
+            val problem = if (status.phase == DesktopSession.Phase.Error) desktopProblem(status.message, d.name) else null
             EmptyState(
                 Ic.desktop,
-                if (status.phase == DesktopSession.Phase.Error) "The screen does not show" else "The stream stopped",
-                // The computer writes its errors in lower case.
-                status.message.replaceFirstChar { it.uppercase() }.ifEmpty { "Start the stream again." },
-                action = { TextButton(onClick = { DesktopSession.start(FluxCore, d.id, status.monitor.ifEmpty { null }) }) { Text("Start again") } },
+                problem?.title ?: "The stream stopped",
+                problem?.let { "${it.cause} ${it.step}" } ?: "${status.message.ifEmpty { "The stream stopped" }}. Start the stream again.",
+                action = {
+                    FluxButton("Start again", onRestart, kind = ButtonKind.Tonal, icon = Ic.refresh)
+                },
             )
         }
     }
@@ -386,12 +518,14 @@ private class Tap(val time: Long, val point: Offset, val position: Pair<Float, F
  * The gestures of the remote desktop. A tap clicks. A finger that holds
  * still clicks the right button, or drags when it then moves. 2 fingers
  * scroll, and a tap with 2 fingers clicks the right button. A pinch zooms,
- * and 1 finger moves the zoomed view. [onHold] runs when a finger holds.
+ * and 1 finger moves the zoomed view. [onClick] gets the position of each
+ * click and each drag start. [onHold] runs when a finger holds.
  */
 private fun Modifier.desktopGestures(
     viewport: State<DesktopViewport>,
     onViewport: (DesktopViewport) -> Unit,
     send: (Packet) -> Unit,
+    onClick: (Pair<Float, Float>) -> Unit,
     onHold: () -> Unit,
 ): Modifier = pointerInput(viewport) {
     val slop = viewConfiguration.touchSlop
@@ -443,7 +577,10 @@ private fun Modifier.desktopGestures(
                     val p = (down.firstOrNull { it.id == first.id } ?: down[0]).position
                     if (mode == Touch.Held && (p - start).getDistance() >= slop) {
                         mode = Touch.Drag
-                        video(start, clamp = true)?.let { (x, y) -> send(RemoteInput.holdAt(true, x, y)) }
+                        video(start, clamp = true)?.let { (x, y) ->
+                            onClick(x to y)
+                            send(RemoteInput.holdAt(true, x, y))
+                        }
                     }
                     if (mode == Touch.Drag && p != last) video(p, clamp = true)?.let { (x, y) -> send(RemoteInput.at(x, y)) }
                     last = p
@@ -484,12 +621,19 @@ private fun Modifier.desktopGestures(
                 val now = SystemClock.uptimeMillis()
                 val prev = lastTap
                 val at = if (prev != null && now - prev.time < DOUBLE_TAP_MS && (start - prev.point).getDistance() < doubleTap) prev.position else position
+                onClick(at)
                 send(RemoteInput.clickAt(RemoteInput.Click.Left, at.first, at.second))
                 lastTap = Tap(now, start, at)
             }
-            Touch.Held -> video(start)?.let { (x, y) -> send(RemoteInput.clickAt(RemoteInput.Click.Right, x, y)) }
+            Touch.Held -> video(start)?.let { (x, y) ->
+                onClick(x to y)
+                send(RemoteInput.clickAt(RemoteInput.Click.Right, x, y))
+            }
             Touch.Drag -> video(last, clamp = true)?.let { (x, y) -> send(RemoteInput.holdAt(false, x, y)) }
-            Touch.Multi -> video(startCentroid)?.let { (x, y) -> send(RemoteInput.clickAt(RemoteInput.Click.Right, x, y)) }
+            Touch.Multi -> video(startCentroid)?.let { (x, y) ->
+                onClick(x to y)
+                send(RemoteInput.clickAt(RemoteInput.Click.Right, x, y))
+            }
             else -> Unit
         }
     }

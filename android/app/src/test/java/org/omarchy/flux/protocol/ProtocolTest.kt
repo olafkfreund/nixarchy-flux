@@ -20,7 +20,9 @@ class ProtocolTest {
         assertEquals(false, q.bool("open"))
         assertEquals(2, q.int("numberOfFiles"))
         assertEquals(1234L, q.payloadSize)
-        assertEquals(1740, q.payloadPort)
+        // Only this phone announces a payload port, so the parse ignores it.
+        assertTrue(line.contains(""""payloadTransferInfo":{"port":1740}"""))
+        assertEquals(0, q.payloadPort)
     }
 
     @Test
@@ -32,7 +34,7 @@ class ProtocolTest {
 
     @Test
     fun parseAcceptsStringId() {
-        val p = Packet.parse("""{"id":"1790000000123","type":"kdeconnect.ping","body":{}}""")!!
+        val p = Packet.parse("""{"id":"1790000000123","type":"flux.ping","body":{}}""")!!
         assertEquals(1790000000123L, p.id)
     }
 
@@ -62,7 +64,21 @@ class ProtocolTest {
         assertEquals("phone", back.deviceType)
         assertEquals(8, back.protocolVersion)
         assertEquals(INCOMING, back.incoming)
+        assertEquals(if (org.omarchy.flux.BuildConfig.DEBUG) "android-debug" else "android", back.app)
+        assertEquals(org.omarchy.flux.BuildConfig.VERSION_NAME, back.appVersion)
         assertNull(Identity.from(Packet(Types.IDENTITY, bodyOf("deviceId" to "short"))))
+        assertNull(Identity.from(Packet(Types.IDENTITY, bodyOf("deviceId" to id.deviceId, "deviceName" to "pc"))))
+    }
+
+    @Test
+    fun identityWithoutApp() {
+        // An earlier Flux sends no app fields.
+        val old = Identity("fedcba9876543210fedcba9876543210", "pc", "laptop", 8, emptyList(), emptyList())
+        val body = Packet.parse(old.toPacket().serialize())!!
+        assertNull(body.string("app"))
+        val back = Identity.from(body)!!
+        assertEquals("", back.app)
+        assertEquals("", back.appVersion)
     }
 
     @Test
@@ -90,12 +106,14 @@ class ProtocolTest {
 
     @Test
     fun verificationKeyVector() {
-        // Expected values come from Python: sha256(larger + smaller + "1790000000").
+        // The shared vector of all Flux apps: the first 8 bytes of
+        // sha256(larger + smaller + "1790000000") in uppercase hex.
         val a = byteArrayOf(0x30, 0x82.toByte(), 0x01, 0x22, 0x80.toByte())
         val b = byteArrayOf(0x30, 0x82.toByte(), 0x01, 0x22, 0x7f)
-        assertEquals("5EE6825F", verificationKey(a, b, 1790000000))
-        assertEquals("5EE6825F", verificationKey(b, a, 1790000000))
-        assertEquals("5BB22DB1", verificationKey(a, b, 0))
+        assertEquals("5EE6825F974ED59A", verificationKey(a, b, 1790000000))
+        assertEquals("5EE6825F974ED59A", verificationKey(b, a, 1790000000))
+        assertEquals("5BB22DB11047F34B", verificationKey(a, b, 0))
+        assertEquals("5EE6 825F 974E D59A", groupKey(verificationKey(a, b, 1790000000)))
     }
 
     @Test
@@ -104,15 +122,33 @@ class ProtocolTest {
         val c = LocalCertificate.generate(id)
         assertEquals(id, c.deviceId)
         val dn = c.certificate.subjectX500Principal.name
-        assertTrue(dn.contains("O=KDE"))
-        assertTrue(dn.contains("OU=KDE Connect"))
+        assertTrue(dn.contains("O=Omarchy"))
+        assertTrue(dn.contains("OU=Flux"))
         val spki = subjectPublicKeyInfo(c.certificate)
         assertTrue(spki.contentEquals(c.certificate.publicKey.encoded))
         val other = LocalCertificate.generate("fedcba9876543210fedcba9876543210")
         val k1 = verificationKey(c.certificate, other.certificate, 1790000000)
         val k2 = verificationKey(other.certificate, c.certificate, 1790000000)
         assertEquals(k1, k2)
-        assertEquals(8, k1.length)
-        assertNotNull(k1.toLongOrNull(16))
+        assertEquals(VERIFICATION_KEY_DIGITS, k1.length)
+        assertNotNull(k1.toULongOrNull(16))
+    }
+
+    @Test
+    fun brokenIdentityIsKept() {
+        val dir = kotlin.io.path.createTempDirectory("flux-identity").toFile()
+        try {
+            val first = LocalCertificate.loadOrCreate(dir)
+            assertEquals(first.deviceId, LocalCertificate.loadOrCreate(dir).deviceId)
+            java.io.File(dir, "privateKey.der").writeBytes(byteArrayOf(1, 2, 3))
+            var replaced = false
+            val second = LocalCertificate.loadOrCreate(dir) { replaced = true }
+            assertTrue(replaced)
+            assertTrue(second.deviceId != first.deviceId)
+            assertTrue("the broken files stay for a later look", java.io.File(dir, "privateKey.der.broken").exists())
+            assertEquals(second.deviceId, LocalCertificate.loadOrCreate(dir).deviceId)
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 }

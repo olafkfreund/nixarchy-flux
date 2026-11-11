@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreMedia
 import CoreVideo
 import XCTest
@@ -5,6 +6,15 @@ import XCTest
 
 @MainActor
 final class DesktopTests: XCTestCase {
+    func testAudioIsOptInAndFramesStaySeparate() throws {
+        XCTAssertFalse(DesktopPackets.start(port: 1742).has("audio"))
+        XCTAssertEqual(DesktopPackets.start(port: 1742, audio: true).bool("audio"), true)
+        var reader = DesktopFrameReader()
+        let result = try reader.push(frames([(DesktopFrame.audio, [1, 2, 3, 4]), (DesktopFrame.key, [0, 0, 1, 0x65])]))
+        XCTAssertTrue(result[0].isAudio)
+        XCTAssertFalse(result[0].isConfig || result[0].isKey || result[0].isFormat)
+        XCTAssertTrue(result[1].isKey)
+    }
     private func roundTrip(_ p: Packet) throws -> Packet { try XCTUnwrap(Packet.parse(p.serialize())) }
 
     private func frames(_ list: [(UInt8, [UInt8])]) -> [UInt8] {
@@ -105,6 +115,46 @@ final class DesktopTests: XCTestCase {
         XCTAssertEqual(DesktopH264.avcc(frame), [0, 0, 0, 3, 0x65, 1, 2, 0, 0, 0, 2, 0x06, 5])
         XCTAssertEqual(DesktopH264.avcc([0, 0, 0, 1, 0x41, 3]), [0, 0, 0, 2, 0x41, 3])
         XCTAssertEqual(DesktopH264.avcc([]), [])
+    }
+
+    private func hex(_ s: String) -> [UInt8] {
+        var out: [UInt8] = []
+        var i = s.startIndex
+        while i < s.endIndex {
+            let j = s.index(i, offsetBy: 2)
+            out.append(UInt8(s[i..<j], radix: 16)!)
+            i = j
+        }
+        return out
+    }
+
+    /// With VAAPI the key frames carry an SPS and a PPS that differ from the
+    /// config frame. These are the sets of the stream in issue 62.
+    func testAKeyFrameSetsItsOwnFormat() {
+        let headerSPS = hex("67640c32ac2b4014005ad350101014000003000400000300f23c2010a8")
+        let headerPPS = hex("68ee0462c0")
+        let keySPS = hex("67640c32ac2b4014005ad350101014000003000400000300f23c2211a8")
+        let keyPPS = hex("68ee3830")
+        let start: [UInt8] = [0, 0, 0, 1]
+        // The frames are joined from typed parts: a long chain of + with a
+        // literal takes the compiler too long to type-check.
+        let slice: [UInt8] = [0x65, 0x88, 0x84]
+        let frame: [UInt8] = [start, keySPS, start, keyPPS, start, slice].flatMap { $0 }
+
+        let video = DesktopVideo()
+        XCTAssertTrue(video.configure(sps: headerSPS, pps: headerPPS))
+        video.show(frame, key: false)
+        XCTAssertEqual(video.parameterSets, [headerSPS, headerPPS])
+        video.show(frame, key: true)
+        XCTAssertEqual(video.parameterSets, [keySPS, keyPPS])
+
+        // A set that VideoToolbox refuses keeps the format.
+        let bad: [UInt8] = [0x67, 0x00]
+        XCTAssertNil(DesktopVideo.format(sps: bad, pps: keyPPS))
+        let badSlice: [UInt8] = [0x65, 0x88]
+        let badFrame: [UInt8] = [start, bad, start, keyPPS, start, badSlice].flatMap { $0 }
+        video.show(badFrame, key: true)
+        XCTAssertEqual(video.parameterSets, [keySPS, keyPPS])
     }
 
     func testTheVideoFitsTheView() throws {
@@ -263,5 +313,19 @@ final class DesktopTests: XCTestCase {
         XCTAssertEqual(attachments.first?[kCMSampleAttachmentKey_DisplayImmediately] as? Bool, true)
         XCTAssertEqual(attachments.first?[kCMSampleAttachmentKey_NotSync] as? Bool, false)
         XCTAssertNil(DesktopVideo.sample([], format: format, key: false))
+    }
+
+    /// A rotation makes a new view before the old one goes away. The old
+    /// view must not take the video from the new one.
+    func testAnOldLayerDoesNotDetachTheNewOne() {
+        let video = DesktopVideo()
+        let old = AVSampleBufferDisplayLayer()
+        let new = AVSampleBufferDisplayLayer()
+        video.attach(old)
+        video.attach(new)
+        video.detach(old)
+        XCTAssertTrue(video.shows(on: new))
+        video.detach(new)
+        XCTAssertFalse(video.shows(on: new))
     }
 }

@@ -18,6 +18,27 @@ import java.io.IOException
 
 class DesktopTest {
     @Test
+    fun muteRestoresTheSelectedVolume() {
+        DesktopSession.setVolume(0.3f)
+        DesktopSession.toggleMute()
+        assertEquals(0f, DesktopSession.volume.value, 0.0001f)
+        DesktopSession.toggleMute()
+        assertEquals(0.3f, DesktopSession.volume.value, 0.0001f)
+        DesktopSession.setVolume(1f)
+    }
+    @Test
+    fun audioIsOptInAndFramesStaySeparate() {
+        assertFalse(DesktopPackets.start(1742).has("audio"))
+        assertEquals(true, DesktopPackets.start(1742, audio = true).bool("audio"))
+        val data = byteArrayOf(1, 2, 3, 4)
+        val reader = FrameReader(ByteArrayInputStream(frames(Frame.AUDIO to data, Frame.KEY to byteArrayOf(0, 0, 1, 0x65))))
+        val audio = reader.next()!!
+        assertTrue(audio.isAudio)
+        assertFalse(audio.isConfig || audio.isKey || audio.isFormat)
+        assertArrayEquals(data, audio.data.copyOf(audio.length))
+        assertTrue(reader.next()!!.isKey)
+    }
+    @Test
     fun capabilityIsInBothLists() {
         assertTrue(Types.FLUX_DESKTOP in INCOMING)
         assertTrue(Types.FLUX_DESKTOP in OUTGOING)
@@ -33,6 +54,27 @@ class DesktopTest {
         assertFalse(p.has("monitor"))
         assertEquals("DP-1", DesktopPackets.start(1742, "DP-1").string("monitor"))
         assertEquals("stop", DesktopPackets.stop().string("state"))
+    }
+
+    @Test
+    fun extendStartHasTheScreenAndNoMonitor() {
+        val p = DesktopPackets.start(1742, "eDP-1", 2182, extend = ExtendSize(2182, 1080, 2.625f))
+        assertEquals(true, p.bool("extend"))
+        assertEquals(2182, p.int("width"))
+        assertEquals(1080, p.int("height"))
+        assertEquals(2.625, p.double("density")!!, 0.0001)
+        assertEquals(2182, p.int("maxSize"))
+        assertFalse(p.has("monitor"))
+        assertFalse(DesktopPackets.start(1742).has("extend"))
+    }
+
+    @Test
+    fun parsesAnExtendedLive() {
+        val live = Packet(
+            Types.FLUX_DESKTOP,
+            bodyOf("state" to "live", "monitor" to "FLUX-1", "monitors" to listOf("FLUX-1"), "width" to 2182, "height" to 1080, "extend" to true),
+        )
+        assertEquals(DesktopReply.Live("FLUX-1", listOf("FLUX-1"), 2182, 1080, extend = true), DesktopReply.parse(live))
     }
 
     @Test
@@ -152,9 +194,43 @@ class DesktopTest {
     }
 
     @Test
-    fun resizeStartsAtScaleOne() {
+    fun aNewVideoStartsAtScaleOne() {
         val v = DesktopViewport(1000f, 625f, 1920, 1200).zoom(3f, 10f, 10f)
         assertTrue(v.resized(1000f, 625f, 1920, 1200) === v)
+        assertEquals(1f, v.resized(1000f, 625f, 2560, 1440).scale, 0.001f)
+        assertEquals(1f, DesktopViewport(0f, 0f, 1920, 1200).resized(1000f, 625f, 1920, 1200).scale, 0.001f)
+    }
+
+    @Test
+    fun theKeyboardKeepsTheTappedPointInView() {
+        val v = DesktopViewport(1000f, 625f, 1920, 1200)
+        // The keyboard takes the lower half: the video keeps its size.
+        val small = v.resized(1000f, 300f, 1920, 1200, focus = 0.5f to 0.9f)
+        assertEquals(v.pixel, small.pixel, 0.001f)
+        val (x, y) = small.toVideo(500f, 270f)!!
+        assertEquals(0.5f, x, 0.001f)
+        assertEquals(0.9f, y, 0.001f)
+        // Without a focus, the center stays in the center.
+        val centered = v.resized(1000f, 300f, 1920, 1200)
+        assertEquals(0.5f, centered.toVideo(500f, 150f)!!.second, 0.001f)
+        // A focus out of view uses the center.
+        val zoomed = v.zoom(2f, 500f, 312.5f)
+        val center = zoomed.toVideo(500f, 312.5f)!!
+        val moved = zoomed.resized(1000f, 300f, 1920, 1200, focus = 0.9f to 0.9f).toVideo(500f, 150f)!!
+        assertEquals(center.first, moved.first, 0.001f)
+        assertEquals(center.second, moved.second, 0.001f)
+        // The keyboard closes: the view is as before.
+        assertEquals(1f, small.resized(1000f, 625f, 1920, 1200).scale, 0.001f)
+    }
+
+    @Test
+    fun aResizeKeepsTheZoom() {
+        val v = DesktopViewport(1000f, 625f, 1920, 1200).zoom(3f, 500f, 300f)
+        val wide = v.resized(800f, 625f, 1920, 1200)
+        assertEquals(v.pixel, wide.pixel, 0.001f)
+        // A larger view does not go under scale 1.
+        assertEquals(1f, DesktopViewport(1000f, 300f, 1920, 1200).resized(1000f, 1250f, 1920, 1200).scale, 0.001f)
+        // A rotation changes both sides and starts again at scale 1.
         assertEquals(1f, v.resized(625f, 1000f, 1920, 1200).scale, 0.001f)
     }
 }

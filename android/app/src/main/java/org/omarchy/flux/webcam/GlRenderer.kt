@@ -119,6 +119,17 @@ class GlRenderer {
         attachPreview()
     }
 
+    /**
+     * Stops the preview when it still shows on [texture]. A Webcam screen
+     * that closes calls it. A newer screen can have given its own preview.
+     */
+    fun removePreview(texture: SurfaceTexture) = runSync {
+        if (previewTexture !== texture) return@runSync
+        preview?.let { destroySurface(it.surface) }
+        preview = null
+        previewTexture = null
+    }
+
     /** Draws into the preview that the screen gave, when GL is ready. */
     private fun attachPreview() {
         val texture = previewTexture ?: return
@@ -142,6 +153,8 @@ class GlRenderer {
         makeCurrent(pbuffer)
         runCatching { st.updateTexImage() }.onFailure { return }
         st.getTransformMatrix(texMatrix)
+        // The computer gets the image as the camera sees it. Only the mirror setting mirrors it.
+        FrameGeometry.unmirror(texMatrix)
         val natural = FrameGeometry.swapsAxes(texMatrix)
         val contentAspect = if (natural) cameraSize.height.toFloat() / cameraSize.width else cameraSize.width.toFloat() / cameraSize.height
         val rotation = FrameGeometry.uprightRotation(deviceOrientation, sensorOrientation, front, natural) + extraRotation

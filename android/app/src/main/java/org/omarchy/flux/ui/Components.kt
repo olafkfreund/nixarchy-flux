@@ -1,8 +1,10 @@
 package org.omarchy.flux.ui
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.annotation.DrawableRes
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -14,29 +16,25 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.TextAutoSize
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -46,10 +44,11 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -76,6 +75,7 @@ fun T(
     maxLines: Int = Int.MAX_VALUE,
     letterSpacing: Float = 0f,
     lineHeight: Float = 0f,
+    fit: Boolean = false,
 ) {
     BasicText(
         text = text,
@@ -91,37 +91,33 @@ fun T(
         ),
         maxLines = maxLines,
         overflow = if (maxLines == Int.MAX_VALUE) TextOverflow.Clip else TextOverflow.Ellipsis,
+        // A label that must fit its box, such as a key, shrinks at a large font size, to half its size at most.
+        autoSize = if (fit) TextAutoSize.StepBased(minFontSize = (size * 0.5f).sp, maxFontSize = size.sp, stepSize = 0.5.sp) else null,
     )
 }
 
+/** Opens the Android settings of Flux, where the user can allow a permission that Android does not ask for again. */
+fun openAppSettings(context: Context) {
+    runCatching {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }
+}
+
 /**
- * The top bar of an inner screen: a back button, the title with an
- * optional subtitle, and optional actions at the end.
+ * A permission that the user refused: what it is for, and a button that
+ * opens the app settings, where the user can allow it.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TopBar(title: String, onBack: () -> Unit, subtitle: String? = null, trailing: @Composable RowScope.() -> Unit = {}) {
-    TopAppBar(
-        title = {
-            Column {
-                Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (!subtitle.isNullOrEmpty()) {
-                    Text(
-                        subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        },
-        navigationIcon = { IconButton(onClick = onBack) { Sym(Ic.back, "Back") } },
-        actions = trailing,
-        // The root of the activity already pads for the system bars.
-        windowInsets = WindowInsets(0),
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-    )
+fun PermissionNotice(text: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    Column(modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        // TalkBack reads the notice when it shows.
+        T(text, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, size = 13, color = Tn.red, lineHeight = 1.3f)
+        FluxButton("Open app settings", { openAppSettings(context) }, Modifier.offset(x = (-12).dp), kind = ButtonKind.Text, icon = Ic.settings)
+    }
 }
 
 /**
@@ -157,17 +153,7 @@ fun EmptyState(
     }
 }
 
-/** A button with a leading icon, in the Material 3 filled style. */
-@Composable
-fun IconTextButton(@DrawableRes icon: Int, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
-    Button(onClick = onClick, modifier = modifier, enabled = enabled, contentPadding = ButtonDefaults.ButtonWithIconContentPadding) {
-        Sym(icon, size = ButtonDefaults.IconSize)
-        Spacer(Modifier.size(ButtonDefaults.IconSpacing))
-        Text(label)
-    }
-}
-
-/** A confirmation dialog. [destructive] shows the confirm button in the error color. */
+/** A confirmation dialog. [destructive] shows the confirm button as a destructive button: a red outline and red text. */
 @Composable
 fun ConfirmDialog(
     title: String,
@@ -182,18 +168,39 @@ fun ConfirmDialog(
         onDismissRequest = onCancel,
         icon = icon?.let { { Sym(it) } },
         title = { Text(title) },
-        text = { Text(body) },
-        confirmButton = {
-            Button(
-                onClick = onConfirm,
-                colors = if (destructive) {
-                    ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError)
-                } else {
-                    ButtonDefaults.buttonColors()
-                },
-            ) { Text(confirm) }
+        // The body scrolls when a large font size makes it taller than the dialog.
+        text = { Text(body, Modifier.verticalScroll(rememberScrollState())) },
+        confirmButton = { FluxButton(confirm, onConfirm, kind = if (destructive) ButtonKind.Destructive else ButtonKind.Filled) },
+        dismissButton = { FluxButton("Cancel", onCancel, kind = ButtonKind.Text) },
+    )
+}
+
+/** The command that deletes the approval key file on the computer. Only root can delete it. */
+const val APPROVE_REMOVE_COMMAND = "sudo flux-cli approve remove"
+
+/**
+ * The question before an unpair. The command that deletes the key file on
+ * the computer shows in a mono block with a copy key.
+ */
+@Composable
+fun UnpairDialog(name: String, onCancel: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        icon = { Sym(Ic.unlink) },
+        title = { Text("Unpair $name?") },
+        text = {
+            // The body scrolls when a large font size makes it taller than the dialog, so the command stays reachable.
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("This phone and $name stop connecting. This phone deletes its fingerprint approval key for $name. You can pair them again later.")
+                Text(
+                    "The key file on $name stays until you run this command there:",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                CommandBlock(APPROVE_REMOVE_COMMAND)
+            }
         },
-        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } },
+        confirmButton = { FluxButton("Unpair", onConfirm, kind = ButtonKind.Destructive) },
+        dismissButton = { FluxButton("Cancel", onCancel, kind = ButtonKind.Text) },
     )
 }
 
@@ -218,7 +225,7 @@ fun RingOverlay(from: String, onStop: () -> Unit) {
         ) {
             IconBadge(Ic.ring, Modifier.scale(pulse), container = scheme.onPrimary.copy(alpha = 0.16f), content = scheme.onPrimary, size = 120.dp)
             Spacer(Modifier.height(8.dp))
-            Text("Find my phone", style = MaterialTheme.typography.titleMedium, color = scheme.onPrimary.copy(alpha = 0.8f))
+            Text("Find my phone", style = MaterialTheme.typography.titleMedium, color = scheme.onPrimary)
             Text(
                 "$from is ringing this phone",
                 style = MaterialTheme.typography.headlineMedium,
@@ -228,8 +235,8 @@ fun RingOverlay(from: String, onStop: () -> Unit) {
             Spacer(Modifier.height(16.dp))
             Button(
                 onClick = onStop,
-                modifier = Modifier.height(64.dp),
-                shape = CircleShape,
+                modifier = Modifier.heightIn(min = 64.dp),
+                shape = TileShape,
                 colors = ButtonDefaults.buttonColors(containerColor = scheme.onPrimary, contentColor = scheme.primary),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 40.dp),
             ) {
@@ -245,72 +252,20 @@ fun RingOverlay(from: String, onStop: () -> Unit) {
  * The Flux mark, Φ phi: a square ring with an accent bar through it. The
  * geometry uses a 16-unit box. The ring is 10 units wide at 3 units, with a
  * 2-unit stroke. The bar is 2 by 14 units at 7 and 1 units, over the ring.
- *
- * [ring] and [bar] give the drawn part of each shape, from 0 to 1, for the
- * start animation. The ring draws clockwise from the top center. The bar
- * draws from the top down. The draw phase reads them, so an animation does
- * not recompose the mark.
+ * The system splash screen shows the same mark, see
+ * res/drawable/flux_splash_mark.xml.
  */
 @Composable
-fun FluxMark(
-    size: Dp,
-    fg: Color = Palette.text,
-    accent: Color = Palette.accent,
-    ring: () -> Float = { 1f },
-    bar: () -> Float = { 1f },
-) {
+fun FluxMark(size: Dp, fg: Color = Palette.text, accent: Color = Palette.accent) {
     Spacer(
         Modifier.size(size).drawWithCache {
             val u = this.size.minDimension / 16f
             // A stroke is centered on its path, so the path is 1 unit inside the outer edge.
-            val square = Path().apply {
-                moveTo(8f * u, 4f * u)
-                lineTo(12f * u, 4f * u)
-                lineTo(12f * u, 12f * u)
-                lineTo(4f * u, 12f * u)
-                lineTo(4f * u, 4f * u)
-                close()
-            }
-            val measure = PathMeasure().apply { setPath(square, false) }
-            val part = Path()
             val stroke = Stroke(width = 2f * u)
             onDrawBehind {
-                val r = ring().coerceIn(0f, 1f)
-                if (r == 1f) {
-                    drawPath(square, fg, style = stroke)
-                } else if (r > 0f) {
-                    part.reset()
-                    measure.getSegment(0f, measure.length * r, part)
-                    drawPath(part, fg, style = stroke)
-                }
-                val b = bar().coerceIn(0f, 1f)
-                if (b > 0f) drawRect(accent, topLeft = Offset(7f * u, 1f * u), size = Size(2f * u, 14f * u * b))
+                drawRect(fg, topLeft = Offset(4f * u, 4f * u), size = Size(8f * u, 8f * u), style = stroke)
+                drawRect(accent, topLeft = Offset(7f * u, 1f * u), size = Size(2f * u, 14f * u))
             }
         },
     )
-}
-
-/**
- * The start screen: the Flux mark draws the ring, then the bar over the
- * ring, and the screen fades out. [onDone] runs at the end. The screen takes
- * the taps, so that the app under it does not react.
- */
-@Composable
-fun FluxSplash(onDone: () -> Unit) {
-    val ring = remember { Animatable(0f) }
-    val bar = remember { Animatable(0f) }
-    val alpha = remember { Animatable(1f) }
-    LaunchedEffect(Unit) {
-        ring.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
-        bar.animateTo(1f, tween(300, easing = FastOutSlowInEasing))
-        alpha.animateTo(0f, tween(240, delayMillis = 260))
-        onDone()
-    }
-    Box(
-        Modifier.fillMaxSize().graphicsLayer { this.alpha = alpha.value }.background(Palette.background)
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { },
-        contentAlignment = Alignment.Center,
-    ) {
-        FluxMark(96.dp, ring = { ring.value }, bar = { bar.value })
-    }
 }

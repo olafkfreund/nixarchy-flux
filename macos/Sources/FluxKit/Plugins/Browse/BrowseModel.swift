@@ -19,11 +19,13 @@ public struct BrowseDownload: Identifiable, Sendable, Equatable {
     /// The part done, or nil when the size is unknown.
     public var fraction: Double? { size > 0 ? min(1, Double(received) / Double(size)) : nil }
 
-    /// A remote name as a local file name: the last path component, or
-    /// "download" for a name without one.
+    /// A remote name as a local file name: the last path component without
+    /// control characters and bidirectional controls, or "download" for a
+    /// name without one.
     public static func safeName(_ name: String) -> String {
-        let base = name.replacingOccurrences(of: "\\", with: "/").split(separator: "/").last.map(String.init) ?? ""
-        return base.isEmpty || base == "." || base == ".." ? "download" : base
+        let last = name.replacingOccurrences(of: "\\", with: "/").split(separator: "/").last.map(String.init) ?? ""
+        let base = ShareWire.visibleName(last)
+        return base.trimmingCharacters(in: .whitespaces).isEmpty || base == "." || base == ".." ? "download" : base
     }
 
     /// The first free URL for the name in the folder: "a.txt", then
@@ -56,8 +58,25 @@ public final class BrowseModel {
     public private(set) var entries: [BrowseEntry] = []
     public private(set) var downloads: [BrowseDownload] = []
 
-    /// How long the computer has to answer kdeconnect.sftp.request.
+    /// True when the computer can search the names in its shared folders.
+    public private(set) var canSearch = false
+    /// The text in the search field. While it holds more than spaces, the
+    /// window shows the search in place of the folder.
+    public private(set) var searchText = ""
+    /// True from the first key of a search until its answer.
+    public private(set) var searching = false
+    /// The last answer of the computer, or nil before it.
+    public private(set) var found: BrowseFound?
+    /// Why the search failed, or nil.
+    public private(set) var searchError: String?
+
+    /// How long the computer has to answer flux.sftp.request.
     static let answerTimeout: Duration = .seconds(10)
+    /// How long the computer has to answer a search. It stops a search
+    /// after 10 seconds.
+    static let searchTimeout: Duration = .seconds(20)
+    /// The time after the last key before a search starts.
+    static let searchDelay: Duration = .milliseconds(350)
 
     @ObservationIgnored private let core: FluxCore
     @ObservationIgnored private var session: BrowseSession?
@@ -69,11 +88,16 @@ public final class BrowseModel {
     /// True after the link closed, so that the next link starts again.
     @ObservationIgnored private var lostLink = false
     @ObservationIgnored private var transfers: [UUID: Task<Void, Never>] = [:]
+    /// The ID of the latest search. Only its answer shows. It starts at the
+    /// clock, so that an answer to an earlier window does not match.
+    @ObservationIgnored private var searchId = Packet.now()
+    /// The wait after the last key of the search.
+    @ObservationIgnored private var typing: Task<Void, Never>?
 
     init(core: FluxCore, deviceId: String) {
         self.core = core
         self.deviceId = deviceId
-        deviceName = core.device(deviceId)?.name ?? "The computer"
+        deviceName = core.withDevice(deviceId) { $0.name } ?? "The computer"
     }
 
     /// True when a folder above the current one is inside a root.
@@ -87,18 +111,41 @@ public final class BrowseModel {
 
     public var activeDownloads: Int { downloads.filter { $0.state == .running }.count }
 
+    /// True while the window shows the search in place of the folder.
+    public var inSearch: Bool { !BrowseSearch.query(searchText).isEmpty }
+
+    /// True when Back has a step: it ends the search, or it opens the
+    /// folder above the current one.
+    public var canGoBack: Bool { inSearch || canGoUp }
+
+    /// The query of the search on screen.
+    public var query: String { BrowseSearch.query(searchText) }
+
+    /// The folder that a search reads, see `BrowseSearch.scope`.
+    public var searchScope: String { BrowseSearch.scope(path: path, roots: roots) }
+
+    /// The placeholder of the search field.
+    public var searchPrompt: String {
+        searchScope.isEmpty ? "Search all shared folders" : "Search in \(crumbs.last?.name ?? "this folder")"
+    }
+
+    /// The place of a search result, such as "Home/Documents".
+    public func location(of entry: BrowseEntry) -> String { BrowseSearch.location(of: entry.path, roots: roots) }
+
     /// Asks the computer for a new SFTP session.
     public func start() {
         closeSession()
         attempt += 1
         let current = attempt
-        deviceName = core.device(deviceId)?.name ?? deviceName
+        deviceName = core.withDevice(deviceId) { $0.name } ?? deviceName
         loading = true
         error = nil
         roots = []
         path = ""
         entries = []
         lostLink = false
+        canSearch = false
+        endSearch()
         guard core.send(Packet(PacketType.sftpRequest, ["startBrowsing": true]), to: deviceId) else {
             awaitingOffer = false
             loading = false
@@ -115,9 +162,10 @@ public final class BrowseModel {
         }
     }
 
-    /// Opens a folder of the session.
+    /// Opens a folder of the session. It ends the search.
     public func open(_ folder: String) {
         guard let session else { return }
+        if inSearch || found != nil || searchError != nil { endSearch() }
         listing += 1
         let current = listing
         loading = true
@@ -138,27 +186,98 @@ public final class BrowseModel {
         }
     }
 
-    /// Opens the folder that contains the current one.
+    /// Ends the search, or else opens the folder that contains the current one.
     public func goUp() {
-        if canGoUp { open(BrowsePath.parent(path)) }
+        if inSearch {
+            endSearch()
+        } else if canGoUp {
+            open(BrowsePath.parent(path))
+        }
     }
 
-    /// Lists the current folder again, or starts a new session when the
-    /// session ended.
+    /// Searches again, lists the current folder again, or starts a new
+    /// session when the session ended.
     public func retry() {
-        if session != nil, !path.isEmpty { open(path) } else { start() }
+        if session != nil, inSearch {
+            search(searchText)
+        } else if session != nil, !path.isEmpty {
+            open(path)
+        } else {
+            start()
+        }
     }
 
-    /// Enters a folder or downloads a file.
+    /// Sets the text of the search field. The search starts when no key
+    /// comes for `searchDelay`. Text with only spaces ends the search.
+    public func setSearchText(_ text: String) {
+        searchText = text
+        typing?.cancel()
+        typing = nil
+        searchId += 1
+        guard !BrowseSearch.query(text).isEmpty else {
+            searching = false
+            found = nil
+            searchError = nil
+            return
+        }
+        searching = true
+        typing = Task { [weak self] in
+            try? await Task.sleep(for: Self.searchDelay)
+            guard !Task.isCancelled, let self else { return }
+            self.search(text)
+        }
+    }
+
+    /// Asks the computer for the files and the folders whose names hold
+    /// each word of the text. The search reads `searchScope`.
+    public func search(_ text: String) {
+        typing?.cancel()
+        typing = nil
+        searchText = text
+        searchId += 1
+        let current = searchId
+        let q = BrowseSearch.query(text)
+        guard canSearch, session != nil, !q.isEmpty else {
+            searching = false
+            return
+        }
+        searching = true
+        searchError = nil
+        guard core.send(BrowseSearch.request(id: current, query: q, path: searchScope), to: deviceId) else {
+            searching = false
+            searchError = "\(deviceName) is not connected. Try again when it connects."
+            return
+        }
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.searchTimeout)
+            guard let self, self.searchId == current, self.searching else { return }
+            self.searching = false
+            self.searchError = "\(self.deviceName) did not answer the search"
+        }
+    }
+
+    /// Clears the search field and shows the folder again.
+    public func endSearch() {
+        typing?.cancel()
+        typing = nil
+        searchId += 1
+        searchText = ""
+        searching = false
+        found = nil
+        searchError = nil
+    }
+
+    /// Enters a folder or downloads a file. A folder of the search results
+    /// opens in place of the search.
     public func activate(_ entry: BrowseEntry) {
         if entry.dir { open(entry.path) } else { download(entry) }
     }
 
-    /// Saves a file in ~/Downloads under a free name.
+    /// Saves a file in the downloads folder under a free name.
     public func download(_ entry: BrowseEntry) {
         guard let session, !entry.dir else { return }
         let fm = FileManager.default
-        let folder = fm.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+        let folder = FluxFolders.downloads
         let dest = BrowseDownload.uniqueURL(for: BrowseDownload.safeName(entry.name), in: folder) {
             fm.fileExists(atPath: $0.path) || fm.fileExists(atPath: $0.path + ".part")
         }
@@ -195,9 +314,9 @@ public final class BrowseModel {
             switch result {
             case .done(let url):
                 Notifier.shared.post(id: "browse-\(id.uuidString)", category: BrowsePlugin.downloadCategory,
-                                     title: "Downloaded \(url.lastPathComponent)", body: "Saved in Downloads",
+                                     title: "Downloaded \(url.lastPathComponent)", body: "Saved in \(FluxFolders.downloadsName)",
                                      subtitle: self.deviceName, userInfo: [BrowsePlugin.pathKey: url.path])
-                core.toast("Saved \(url.lastPathComponent) in Downloads")
+                core.toast("Saved \(url.lastPathComponent) in \(FluxFolders.downloadsName)")
             case .failed(let reason):
                 if !Task.isCancelled { core.toast("Downloading \(entry.name) failed: \(reason)") }
             case .running:
@@ -218,8 +337,14 @@ public final class BrowseModel {
 
     // MARK: Plugin events
 
-    /// Handles kdeconnect.sftp from the computer.
-    func receive(_ p: Packet, tls: FluxTLS, certificate: [UInt8]?, address: String?) {
+    /// Handles flux.sftp from the computer: the offer of a session, or the
+    /// answer to a search.
+    func receive(_ p: Packet, tls: FluxTLS, certificate: [UInt8]?) {
+        // An answer to a search is never an offer.
+        if p.object("search") != nil {
+            if let answer = BrowseFound.parse(p) { searchAnswered(answer) }
+            return
+        }
         guard awaitingOffer else { return }
         awaitingOffer = false
         if let message = p.string("errorMessage") {
@@ -237,7 +362,7 @@ public final class BrowseModel {
         Task { [weak self, core] in
             do {
                 let session = try await BrowseSession.open(
-                    offer, tls: tls, certificate: certificate, address: address,
+                    offer, tls: tls, certificate: certificate,
                     announce: { core.send($0, to: deviceId) },
                     onClose: { Task { @MainActor in self?.sessionEnded(current) } }
                 )
@@ -247,6 +372,7 @@ public final class BrowseModel {
                 }
                 self.session = session
                 self.roots = offer.roots
+                self.canSearch = offer.search
                 self.open(offer.roots[0].path)
             } catch {
                 guard let self, self.attempt == current else { return }
@@ -264,6 +390,7 @@ public final class BrowseModel {
         awaitingOffer = false
         lostLink = true
         loading = false
+        searching = false
         error = "\(deviceName) disconnected. Browsing starts again when it connects."
     }
 
@@ -280,6 +407,20 @@ public final class BrowseModel {
     }
 
     // MARK: Private
+
+    /// Shows the answer of the latest search. An answer to an older search
+    /// does not show.
+    private func searchAnswered(_ answer: BrowseFound) {
+        guard answer.id == searchId, searching else { return }
+        searching = false
+        if let error = answer.error {
+            found = nil
+            searchError = error
+        } else {
+            found = answer
+            searchError = nil
+        }
+    }
 
     /// The SSH connection of start number `ended` closed.
     private func sessionEnded(_ ended: Int) {

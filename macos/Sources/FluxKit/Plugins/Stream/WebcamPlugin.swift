@@ -82,6 +82,9 @@ public final class WebcamPlugin: FluxPlugin, @unchecked Sendable {
             },
             onCameraError: { [weak self] message in self?.ui { $0.cameraError = message } }
         )
+        #if os(iOS)
+        pipeline.onCameraResume { [weak self] in self?.ui { $0.cameraError = nil } }
+        #endif
         pipeline.apply(applied)
         for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
             _ = NotificationCenter.default.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in
@@ -114,23 +117,44 @@ public final class WebcamPlugin: FluxPlugin, @unchecked Sendable {
 
     /// Starts a stream to the computer. A running stream stops first.
     public func start(_ deviceId: String) {
-        guard let core else { return }
+        guard let core, let started = beginAttempt(deviceId) else { return }
+        Task { await self.run(core: core, deviceId: deviceId, name: started.name, id: started.id) }
+    }
+
+    /// Opens a new attempt for deviceId and shows that Flux waits for the
+    /// computer. It returns the number of the attempt and the name of the
+    /// computer, or nil without a core. `start` then runs the stream. The
+    /// tests use it to hold a session without the stream task.
+    func beginAttempt(_ deviceId: String) -> (id: Int, name: String)? {
+        guard let core else { return nil }
         stop(notify: true, status: StreamStatus())
         let id = lock.withLock { () -> Int in
             attempt += 1
             session = Session(deviceId: deviceId)
             return attempt
         }
-        let name = core.device(deviceId)?.name ?? "the computer"
+        let name = core.withDevice(deviceId) { $0.name } ?? "the computer"
         setStatus(StreamStatus(.connecting, "Waiting for \(name)…", deviceId: deviceId))
         ui { $0.cameraError = nil }
-        Task { await self.run(core: core, deviceId: deviceId, name: name, id: id) }
+        return (id, name)
     }
 
     /// Stops the stream and tells the computer.
     public func stop() {
         stop(notify: true, status: StreamStatus())
     }
+
+    #if os(iOS)
+    /// Stops a running stream because Flux left the screen, and tells the
+    /// computer. iOS gives the camera only to the app on the screen.
+    public func stopInBackground() {
+        guard let deviceId = lock.withLock({ session?.deviceId }) else { return }
+        stop(notify: true, status: StreamStatus(.idle, Self.backgroundText, deviceId: deviceId))
+    }
+
+    /// The status after the stream stopped in the background.
+    static let backgroundText = "The webcam stopped when Flux left the screen. iOS gives the camera only to the app on the screen."
+    #endif
 
     /// Changes the settings. The image changes at once, a new camera switches
     /// without a new stream, and a new frame size starts the stream again.
@@ -208,13 +232,27 @@ public final class WebcamPlugin: FluxPlugin, @unchecked Sendable {
         Task { self.stop(notify: false, status: StreamStatus(.error, "The connection to \(name) closed", deviceId: deviceId)) }
     }
 
+    // MARK: Texts
+
+    /// The error when the computer's Flux has no webcam support.
+    static func updateText(computer: String, platform: FluxPlatform = .current) -> String {
+        "Update Flux on \(computer) to use \(platform.deviceNoun) as a webcam"
+    }
+
+    /// The error when no camera is available.
+    static func noCameraText(platform: FluxPlatform = .current) -> String {
+        "\(platform.deviceNounStart) has no usable camera"
+    }
+
     // MARK: Session
 
     private func run(core: FluxCore, deviceId: String, name: String, id: Int) async {
         do {
-            guard let d = core.device(deviceId) else { throw FluxError("\(name) is not known") }
-            guard d.accepts(PacketType.fluxWebcam) else { throw FluxError("Update Flux on \(name) to use this Mac as a webcam") }
-            guard let certificate = d.certificate else { throw FluxError("\(name) is not connected") }
+            // The core lock guards the fields of the device.
+            let peer = core.withDevice(deviceId) { (accepts: $0.accepts(PacketType.fluxWebcam), certificate: $0.certificate) }
+            guard let peer else { throw FluxError("\(name) is not known") }
+            guard peer.accepts else { throw FluxError(Self.updateText(computer: name)) }
+            guard let certificate = peer.certificate else { throw FluxError("\(name) is not connected") }
             try await CameraSource.authorize()
             try await openCamera(id: id)
             let config = settings.config
@@ -265,7 +303,7 @@ public final class WebcamPlugin: FluxPlugin, @unchecked Sendable {
     private func openCamera(id: Int) async throws {
         let cameras = CameraSource.available()
         publishCameras(cameras)
-        guard let first = cameras.first else { throw FluxError("This Mac has no usable camera") }
+        guard let first = cameras.first else { throw FluxError(Self.noCameraText()) }
         if let next = settings.setCaps(Self.caps(cameras)) { changed(next) }
         let config = settings.config
         let camera = cameras.first { $0.id == config.camera } ?? first

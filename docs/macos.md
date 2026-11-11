@@ -3,7 +3,7 @@
 [Documentation index](README.md)
 
 Flux for macOS connects a Mac to an Omarchy computer that runs `fluxd`.
-The Mac takes the place of the Android phone: it uses KDE Connect protocol version 8 with Flux extensions and pairs, shares, and streams the same way.
+The Mac takes the place of the Android phone: it uses Flux protocol version 8 and pairs, shares, and streams the same way.
 The app requires macOS 14 or later.
 
 ## Build and run
@@ -22,7 +22,8 @@ make test-macos
 open macos/build/Build/Products/Debug/Flux.app
 ```
 
-`make macos` generates `macos/Flux.xcodeproj` from `macos/project.yml` and signs the app ad hoc.
+`make macos` generates `macos/Flux.xcodeproj` from `macos/project.yml` and signs the app ad hoc with the hardened runtime.
+The app version is the last release tag, such as `0.7.0`. The app sends it to `fluxd`, and the Flux window on the computer shows it.
 The generated project and `macos/build` stay out of Git.
 To work in Xcode, run `xcodegen generate` in `macos/` and open `Flux.xcodeproj`.
 
@@ -34,13 +35,51 @@ make install-macos
 
 The target runs `scripts/install-macos.sh`.
 It quits a running Flux, replaces `/Applications/Flux.app`, and opens the new app.
+f.lux also installs as `/Applications/Flux.app`.
+If `/Applications/Flux.app` does not have the bundle ID `org.omarchy.flux.mac`, the script stops and changes nothing.
 Add `--no-open` when you run the script directly to skip the last step.
 
+The `macos` job in `.github/workflows/build.yml` runs `swift test` and builds a universal Release app for each push to `master` and each release.
+Pull requests run no build.
+Each release attaches the same build as `flux-macos-VERSION.zip`.
+The window on the computer shows an update notice only for the Android app.
+To find a newer Mac app, check `https://github.com/bjarneo/flux/releases`.
+Flux 0.10.1 and earlier use other ports, see [Pair a Mac](#pair-a-mac).
+A Mac app of 0.10.1 or earlier cannot connect to a newer `fluxd`, and a newer Mac app cannot connect to an earlier `fluxd`.
+Update the Mac app and `fluxd` together.
+For a build of a branch, download the `macos-app` artifact from the run to get `flux-macos.zip`.
+The app is signed ad hoc and not notarized, so Gatekeeper blocks the first start.
+To open it, remove the quarantine attribute:
+
+```sh
+xattr -dr com.apple.quarantine Flux.app
+```
+
+The app runs with the hardened runtime.
+macOS then loads no library that another program injects, so no other program can use the camera, microphone, and Photos access of Flux.
+`macos/project.yml` gives the entitlements for the camera, the microphone, and the Photos library, and XcodeGen writes them to `macos/App/Flux.entitlements`.
+When a feature starts to use another protected resource, add its entitlement there, or macOS refuses the access without a prompt.
+To check a build, run:
+
+```sh
+codesign -dv Flux.app 2>&1 | grep flags
+```
+
+The output shows `flags=0x10002(adhoc,runtime)`.
+
 Flux keeps running in the menu bar after the window closes.
-Quit it from the menu bar item.
+Quit it from the menu bar panel.
+
+To start Flux when you log in, turn on **Settings > General > Open at login**.
+Flux then opens its window at each login.
+When you close the window, Flux keeps running in the menu bar.
+macOS can ask you to allow Flux in **System Settings > General > Login Items**.
+While macOS waits for this, the setting shows **Open Login Items…**.
+When the setting shows an error, add Flux with **+** in **System Settings > General > Login Items**.
+Without this setting, the clipboard does not sync after a restart until you open Flux.
 
 The app icon uses the Flux mark from the desktop and Android icons.
-**Settings > General > Appearance** sets the windows and the Dock icon: Automatic follows macOS, or choose Light or Dark.
+The theme sets the light or dark mode of the windows and the Dock icon, see [Theme](#theme).
 Finder and Launchpad keep the dark bundle icon.
 To change the icons, edit and run `swift macos/tools/render-icon.swift`.
 
@@ -48,47 +87,239 @@ To change the icons, edit and run `swift macos/tools/render-icon.swift`.
 
 1. Connect the Mac and the computer to the same local network.
 2. Open Flux on the Mac and allow access to the local network.
-3. Select the computer in the sidebar, then **Pair…**, then **Send request**.
-4. Accept the request on the computer when it shows the same 8-character key.
+3. Open **Computers** in the sidebar, select the computer under **Available**, then **Pair…**, then **Send request**.
+4. Accept the request on the computer when it shows the same 16-character key, such as `5EE6 825F 974E D59A`.
+
+Compare all 16 characters.
+Earlier versions of Flux show only 8 characters, so update Flux on all devices before you pair.
 
 You can also start from the computer with `flux-cli pair` and accept on the Mac.
-The Mac announces itself with UDP broadcasts on port 1716 and as `_kdeconnect._udp` through Bonjour, like the phone.
+A request from the computer does not change the page that the window shows.
+**Chats** shows the request under **Needs you**, and a notification shows the key.
+To see the key, select **Compare the key** in **Chats**, or select the notification.
+Compare the key, then select **Accept**.
+Return does not accept a request.
+After the Mac accepts, the computer asks you to confirm the key.
+Select **Confirm** in the Flux window or in the notification, or type `y` at the `flux-cli pair` prompt.
+The computer pins the Mac only after this step, and each step waits at most 30 seconds.
+Flux shows 1 request at a time.
+When a request ends without a pairing, for example after a reject or a timeout, Flux ends new requests from the same computer or address for 30 seconds.
+To pair in that time, start the pairing on the Mac.
+A pairing is bound to its link.
+When the computer connects again while a pairing runs, the pairing stops, so pair again.
+A request from the computer that stops this way also starts the wait of 30 seconds.
+The Mac announces itself with UDP broadcasts on port 12100 and as `_flux._udp` through Bonjour, like the phone.
+It listens for links on 1 TCP port from 12100 to 12108, and **Settings > General** shows it as **Link port**.
+Transfers, tunnels, and streams use TCP ports 12070 to 12099 on the Mac.
+When another app holds UDP port 12100, **Settings > General** shows a warning.
+Flux then still announces itself, and computers can connect.
 It appears on the computer as `laptop` when it has a battery and `desktop` otherwise.
 
 The Mac is a remote for Omarchy computers.
 It connects and pairs only with a computer that runs `fluxd`.
-It ignores phones, tablets, other Macs, and other KDE Connect devices, and it removes old pairings with them when it starts.
+It ignores phones, tablets, and other Macs, and it removes old pairings with them when it starts.
 
 Flux searches the network for 10 seconds when it starts.
 It does not search all the time.
-If the sidebar shows **No computer found**, select **Search again**.
-A computer that runs `fluxd` still finds the Mac after the search ends, because the Mac keeps its Bonjour service and its UDP port open.
+If **Computers** shows **No computers found**, select **Search again**.
+After the search ends, the Mac still connects to a paired computer when that computer announces itself.
+A computer that is not paired finds the Mac through Bonjour, and `fluxd` then connects to the Mac.
 
 ## Features
 
 | Feature | Mac behavior |
 | --- | --- |
-| Files, text, and links | Send from the device page, a drop on the window or Dock icon, **Open With**, or **Services > Send to Flux**. Received files go to `~/Downloads` or the folder in Settings. |
-| Clipboard | Syncs text both ways while a paired computer is connected. Password manager entries are not synced automatically. Images do not sync to or from the Mac. |
-| Screenshots and photos | **Send new screenshots** watches the macOS screenshot folder. **Send new photos** sends new photos from the Photos library and needs full Photos access. |
-| Media | Controls the computer's players. The computer does not control the players on the Mac. |
+| Files, text, and links | Send from the chat of a computer in **Chats**, a drop on that chat or the Dock icon, **Open With**, or **Services > Send to Flux**. Received files go to `~/Downloads` or the folder in Settings, with the quarantine mark of a download, so Gatekeeper checks them when you open them. Flux refuses a file that leaves less than 256 MB free. A received file or link shows in a notification, and it opens only after a click. Flux never opens a received file by itself. |
+| Clipboard | Syncs text both ways by itself, also while the window is closed. A copy while no computer is connected goes out when a computer connects. Password manager entries are not synced automatically. Images do not sync to or from the Mac. See [Clipboard](#clipboard). |
+| Screenshots and photos | **Send new screenshots** watches the macOS screenshot folder. **Send new photos** sends new photos from the Photos library and needs full Photos access. 1 scan sends at most 50 images. The rest go with the next scan, for example after the next new image or the next connect. While **Send new screenshots** is on, the tray of a computer chat shows the 4 newest screenshots. |
+| Media | Controls the computer's players. The computer does not control the players on the Mac. The [audio outputs](features.md#audio-outputs) and the [phone as speaker](camera.md#phone-as-speaker) are only in Flux for Android. |
 | Commands | Lists and runs the commands configured on the computer. |
 | Browse | Opens the computer's shared folders read-only through SSH inside a `flux.tunnel`, and downloads files. |
-| Webcam | Streams a Mac camera, including Continuity Camera, to the computer as a virtual webcam in H.264. Zoom is digital, and exposure is a software gain, because macOS gives apps no camera zoom or exposure control. **Also send the microphone** starts the microphone with the webcam. |
+| Webcam | Streams a Mac camera, including Continuity Camera, to the computer as a virtual webcam in H.264. Zoom is digital, and exposure is a software gain, because macOS gives apps no camera zoom or exposure control. **Also send the microphone** starts the microphone with the webcam. `flux-cli webcam start` asks the Mac to start it. See [Start a stream from the computer](#start-a-stream-from-the-computer). |
 | Screen mirror | Streams a display to a window on the computer in H.264, with the long side at most 1080 pixels. |
-| Camera modes | Text, QR, Photo, Document, and Signature, like the phone. Text, QR, and Document also read an opened, pasted, or dropped image or a screen region. Signature also accepts a drawn signature. |
-| Microphone | Streams the Mac microphone as 48 kHz mono audio. |
-| Notifications | Shows notifications from `flux-cli notify`. |
-| Battery | A Mac with a battery reports it. The page shows the computer's battery. |
+| Camera modes | Text, QR, Photo, Document, and Signature, like the phone. Text, QR, Document, and Signature also read an opened, pasted, or dropped image or a screen region. To read an image, select **From Image**, then **Open Image…**, **Screen Region…**, or **Paste Image**. In Signature, **From Image** shows with the **Paper** source. Signature also accepts a drawn signature with the **Draw** source. |
+| Microphone | Streams the Mac microphone as 48 kHz mono audio. `flux-cli mic start` asks the Mac to start it. See [Start a stream from the computer](#start-a-stream-from-the-computer). |
+| Notifications | Shows notifications from `flux-cli notify`. Each computer can show 10 notifications at once, then 1 more each second. Only the first notification of a burst makes a sound. Each computer keeps at most 20 notifications in Notification Center, and a new one removes the oldest. Received links count toward these limits. |
+| Battery | A Mac with a battery reports it. The scope menu and **Computers** show the battery of each computer. |
 | Do Not Disturb | See [Focus](#focus). |
-| Fingerprint approval | Approves `sudo` and polkit with Touch ID. See [approval](#approval). |
+| Fingerprint approval | Approves `sudo` and polkit with Touch ID. **Chats** shows each request under **Needs you** with **Deny** and **Approve**, and the chat of the computer shows it too. **Approve** opens the prompt. The setup is on the page of each computer in **Computers**. See [approval](#approval). |
 | Touchpad and keyboard | The trackpad, the mouse, and the keyboard of the Mac control the pointer and the keys of the Omarchy computer. The computer does not control the Mac. The computer needs `remote_input = true`. The Mac asks for Touch ID or its password before the touchpad opens. Control and Option together give the pointer back to the Mac. See [Touchpad and keyboard](remote-input.md#use-a-mac). |
 | Remote desktop | Shows the screen of the Omarchy computer in a window. The mouse over the video, the keys, the Omarchy panel, and dictation control the computer. The computer does not control the Mac. The computer needs `remote_desktop = true`, and `remote_input = true` for control. The Mac asks for Touch ID or its password before the window opens. See [Remote desktop](remote-desktop.md#use-a-mac). |
-| herdr agents | Shows the coding agents that herdr runs on the computer, their output in color, and notifications. Answers them after Touch ID or the password when the computer allows replies, with dictation on the Mac. See [herdr agents](herdr.md#use-a-mac). |
+| herdr agents | Shows the coding agents that herdr runs on the computer, their output in color, and notifications. Answers them and starts new agents after Touch ID or the password when the computer allows replies, with dictation on the Mac. See [herdr agents](herdr.md#use-a-mac). |
 | Dictation | Each text field has a mic key: the agent replies, the touchpad and the remote desktop, **Text or link** in **Share**, the scanned text, the shortcut search, and the language search. Search fields get the words in place of the search. Other fields get them at the cursor or at the end of the text. All fields use the same language. See [Dictate on a Mac](herdr.md#dictate-on-a-mac). |
+| Clear and expand | The agent replies, **Text or link** in **Share**, the scanned text, the shortcut search, and the language search have a clear key while they have text. The agent replies and **Text or link** also have an expand key that opens a larger editor with **Send**. The type field of the touchpad and the remote desktop has a clear key and the draft editor, see [Type on the Mac](remote-input.md#type-on-the-mac). |
 
 The Mac cannot mirror notifications from other apps, report calls, or send SMS, because macOS gives apps no access to them.
 Flux does not advertise those capabilities.
+
+## Start a stream from the computer
+
+The computer can ask the Mac to start the webcam or the microphone.
+The Mac never turns on its camera or its microphone without a click on the Mac.
+The request only asks, also while Flux is the active app.
+
+```sh
+flux-cli webcam start
+flux-cli --device MacBook mic start
+```
+
+The computer sends `flux.stream.request` with `{"kind": "webcam"}` or `{"kind": "mic"}`.
+The Mac lists `flux.stream.request` in its incoming packet types, because it can stream both kinds.
+
+| Flux | What the Mac shows |
+| --- | --- |
+| The active app | A prompt window over the other windows. The prompt has the title `omarchy asks for the webcam` or `omarchy asks for the mic`. It has the buttons **Not now** and **Start webcam** or **Start the mic**. |
+| Not the active app | A notification with the text `Tap to start the webcam.` or `Tap to start the mic.` under the same title. The **Start webcam** or **Start the mic** action, or a click on the notification, starts the stream. |
+
+The prompt and the notification name the computer that asks.
+When a request waits and Flux becomes the active app, the prompt window shows the request.
+The prompt window shows the newest request first.
+
+- **Start webcam** and **Start the mic** are not the default button, so Return does not start a stream.
+- Escape and **Not now** end the request and start nothing.
+- The close button of the prompt window ends each open request and starts nothing.
+
+A click on start opens a window with the **Webcam and screen mirror** page or the **Microphone** page of that computer.
+The stream starts at once with the saved settings, the same as **Start** on that page.
+
+Each request follows these rules:
+
+- A request ends after 60 seconds, and its notification goes away.
+- When a stream of that kind already runs to that computer, the request does nothing.
+- The Mac ignores a request of the same kind from the same computer that comes less than 3 seconds after the last request. An ignored request also counts as the last request.
+- An unpair ends the requests of the computer. A link that only drops keeps them.
+
+## Chats and navigation
+
+The window shows the list of chats in the sidebar and the open chat in the detail column.
+The list holds 1 chat for each herdr agent and 1 chat for each paired computer, as in a messaging app.
+Under the list are the rows of **Control** and **Computers**, and this Mac is at the bottom.
+Press Command-1 for **Chats**, Command-2 for **Control**, and Command-3 for **Computers**. The **Go** menu has the same items.
+**Chats** shows the chat that was open last.
+
+The top of the sidebar shows **Chats**, the number of items that need you, and the number of computers online.
+The **+** key starts an agent on a computer that lets this Mac control herdr. When more than 1 computer can start one, Flux asks which one.
+The search field keeps only the chats that hold its text, for example the name of an agent, a project, a computer, or a received file. Escape empties the field.
+
+The list has 3 groups:
+
+- **Needs you**: the approval with **Deny** and **Approve**, a pair request with **Compare the key**, and each agent that waits for input. An agent that waits has a red border and shows how long it waits, such as `3m`.
+- **Agents**: the other agents. The agents that work come first and show how long they work, such as `2:14`. Then come the agents that are done and the idle agents. When the agents are on 1 computer, the heading names it. Otherwise each row names its computer.
+- **Computers**: each paired computer with the newest entry of its chat, such as `You: Dinner at 7`. The online computers come first. A computer that is not reachable shows dimmed with **Offline**.
+
+**Approve** opens the Touch ID prompt, and the card never approves by itself.
+**Compare the key** opens the pairing page, and the card never pairs by itself.
+When no computer is online, the list shows that Flux connects, or a notice with **Retry**.
+
+A click on a computer opens its chat. The chat shows what happens between this Mac and that computer, with the newest entry at the bottom:
+
+- The computer writes on the left: approvals, received files, the last clip from the computer, and your answers to approvals.
+- What this Mac sent shows on the right: links, text, clips, scans, and files.
+- The chat of a computer shows no agents. Each agent has its own chat.
+- The toolbar shows the picture of the computer with a green dot while it is online, its name, and its link and battery, such as `connected · 82%, charging`.
+- The menu of the toolbar has **Control**, **Agents Window**, **Start an Agent…**, and **Computer Page**. **Control** opens Control with the computer in scope.
+- The chat keeps the sent items and the transfers in memory only.
+
+A received file shows its progress, then **Open**.
+Its context menu has **Open**, **Show in Finder**, and **Clear Finished Transfers**.
+
+The dock under the chat shows the clipboard of this Mac in a row with **Send**. Under it are the **+** key, the field **Message COMPUTER**, the mic key, and the send key.
+A link that starts with `http://` or `https://` opens in the browser of the computer. Other text goes to the clipboard of the computer.
+To send files from Finder, drop them on the chat of the computer or on the Dock icon, or select **Services > Send to Flux**.
+A drop on the Dock icon goes to the computer of the open chat when it is online.
+
+The **+** key opens the tray under the composer and turns into an accent key with a cross.
+The tray holds the tools **Camera**, **File**, **Scan**, **Text**, **QR**, **Signature**, and **Get files**. **Agent** shows when the computer lets this Mac start agents.
+The camera tools open the camera window in that mode. **File** opens the file picker, and **Get files** opens the home folder of the computer.
+While **Send new screenshots** is on in **Settings > Features**, the tray also shows the 4 newest screenshots of this Mac, and **All screenshots**.
+Flux reads the screenshot folder only while that setting is on.
+To send screenshots, click them in the tray, then click the send key. The key shows the number of screenshots, and each screenshot shows its number in the order of the clicks.
+A click in the field closes the tray. Escape also closes it.
+
+A click on an agent opens its chat. The chat shows the output of the agent as a thread, with the dock for the question, the step, and your prompts.
+The toolbar shows the picture of the agent with a dot for its status, the task, and the agent, the project, and the computer.
+The toolbar also has **Changes**, Command-D, **Keys**, the copy button, and the refresh button, Command-R.
+See [Use a Mac](herdr.md#use-a-mac).
+
+**Control** holds the tools that act on the computer in scope: the remote desktop with the Omarchy panel, the touchpad and keyboard, the commands, the media, the microphone, the webcam and screen mirror, and the agents.
+The scope menu in the toolbar shows **All computers** or 1 paired computer, with a link dot and a battery dot for each computer.
+The scope filters **Control**, and it picks the theme of the **Computer** setting. **Chats** has no scope, because each chat belongs to 1 computer.
+A click on a paired computer in **Computers** also sets the scope, and a second click sets **All computers** again.
+A new pairing sets the scope to the new computer and opens its chat.
+Each start of Flux begins with **All computers**.
+When more than 1 computer can take a tool, Flux asks which one.
+A click on an agent in **Control** opens its chat. **Agents Window** opens the agents of a computer in their own window.
+While the agents window of a computer is open, an agent of that computer opens in that window, because the computer sends the output of 1 agent at a time.
+The cards of the features open on a page of their own from **Control**.
+The agents, browse, camera, remote desktop, and touchpad windows stay separate windows.
+
+**Computers** shows this Mac, the paired computers, and the computers to pair.
+The arrow on a paired computer opens its page, with the Touch ID approval and **Unpair**.
+
+The menu bar extra shows the Flux mark and the count of the items that need you.
+Its panel shows the 2 newest items that need you as chat cards, with the one-tap choices of an agent and **Deny** and **Approve** of an approval.
+A choice such as **No, and tell Codex what to do differently** opens the chat of the agent in the window. Select the choice there, then write what the agent must do.
+**Open chat** on the card of an agent opens its chat in the window.
+Then come the next 3 items, a menu for each online computer, **Open Flux**, **Settings…**, and **Quit Flux**.
+A click on a next item opens its chat in the window: the chat of an agent, or the chat of the computer of an approval.
+
+The card of an agent in the panel shows its command in mono and the numbered choices. The first choice has the accent fill.
+The card reads the output of the agent when it shows and when the panel opens.
+Choices show only for an output that came after that read.
+The question keeps the lines nearest the choices, because they hold the command that a choice approves, and the card never cuts them.
+Each answer asks for Touch ID or the password first, see [Touch ID lock](#touch-id-lock).
+After an answer, the choices stay off until a new output comes.
+When the computer does not allow replies, set `herdr_control = true` on it.
+
+## Theme
+
+Flux follows the active Omarchy theme of the computer, as Flux for Android does.
+`fluxd` sends the theme in a `flux.theme` packet when the Mac connects and when the theme changes.
+Flux saves the theme of each computer, so the next start draws it at once.
+
+To change the theme, open **Settings > General > Theme**. The choices are:
+
+- **Computer**, the default: the theme of the computer in scope. In the scope of all computers, Flux uses the theme that changed most recently. Without a theme from the computer in scope, Flux uses Tokyo Night when macOS is dark and Tokyo Night Day when macOS is light. The line under the choices names the theme and the computer that sent it.
+- **System**: Tokyo Night when macOS is dark and Tokyo Night Day when macOS is light.
+- **Light**: Tokyo Night Day.
+- **Dark**: Tokyo Night.
+
+The theme sets the light or dark mode of all Flux windows and the Dock icon.
+The old **Appearance** setting becomes **Computer** for Automatic, and stays **Light** or **Dark**.
+A contrast guard maps the theme to the colors of the app, see [Flux for Android](android.md#theme).
+The window, the menu bar panel, the Settings window, and the feature windows take the theme background and the theme accent.
+The cards of the features and the agent output keep their own colors.
+The pairing view keeps its layout. It shows on the theme background of the window, and takes the theme accent and the light or dark mode.
+The pair request sheet and the Touch ID prompt keep their layout and their own background, and take only the theme accent and the light or dark mode.
+The theme engine is in `macos/Sources/FluxKit/Theme`.
+
+## Clipboard
+
+Each copy on the Mac reaches the clipboard of the Omarchy computer without a click.
+Keep **Sync clipboard** on in **Settings > Features**, and keep `auto_clipboard = true` on the computer.
+Both are on by default.
+
+- While a paired computer is connected, Flux checks the clipboard every 0.5 seconds and sends each new copy.
+- While no computer is connected, Flux reads only the change count every 2 seconds. It keeps the time of a new copy and does not read the copy. A copy from the last 0.5 seconds before the last link drops also keeps its time.
+- When a computer connects, the Mac and the computer compare the times of their last copies. The newer copy goes on both clipboards.
+- Flux skips the copies that password managers mark as concealed, transient, or generated.
+- Text that a computer put on the clipboard does not go back to that computer. This is also true when the computer connects again.
+
+The time of a copy can be up to 2 seconds late, and both clocks must be correct.
+When the clock of the Mac differs from the clock of the computer, 2 copies close in time can win in the wrong order.
+
+On macOS 15.4 and later, macOS can ask before an app reads the clipboard, or deny the read.
+When macOS asks or denies, **Sync clipboard** shows a warning with **Open Privacy Settings**.
+To sync without a question, choose **Allow** for Flux in **System Settings > Privacy & Security > Paste from Other Apps**.
+
+## Touch ID lock
+
+The touchpad, the remote desktop, and the agent replies ask for Touch ID or the Mac password.
+The unlock stays valid for 5 minutes.
+It ends earlier when the Mac sleeps, its screens sleep, the screen locks, or another user takes the session.
+
+The remote desktop stops while the Mac sleeps or is locked and while its window is in the Dock.
+It does not start again in that time, also not when the link to the computer comes back.
 
 ## Focus
 
@@ -110,6 +341,20 @@ Only this Mac's Secure Enclave can use the blob, and only after Touch ID.
 The Mac shows requests only while it is unlocked.
 See the [approval design](approve.md) and [fingerprint approval](approvals.md) for the computer side.
 
+## Pairing data
+
+Flux keeps the identity of the Mac in `~/Library/Application Support/Flux/identity/`.
+The private key file has mode `0600`, but each program that runs as your user can read it.
+A program with the key and the certificate can act as this Mac from another host.
+To replace the identity after such a program ran, quit Flux, remove the `identity` folder, start Flux, and pair again.
+When the key or the certificate exists but does not read, Flux does not start, and it keeps the files.
+Flux makes a new identity only when a file is missing.
+
+The paired computers are in `~/Library/Application Support/Flux/trusted.json`.
+An entry that does not read is not paired, and Flux keeps a copy of the file in `trusted.json.bad`.
+A link that shows another certificate than the pinned one is refused, also while a pairing runs.
+Links of computers that are not paired read at most 64 KiB for each packet, close after 2 minutes without a pairing, and at most 8 of them stay open.
+
 ## Permissions
 
 macOS asks for each permission on first use:
@@ -121,9 +366,10 @@ macOS asks for each permission on first use:
 | Camera | Webcam and camera modes |
 | Microphone | Microphone, dictation in the text fields |
 | Speech Recognition | Dictation in the text fields |
-| Screen & System Audio Recording | Screen mirror |
+| Screen & System Audio Recording | Screen mirror, and **Screen Region…** in the camera modes, which runs `/usr/sbin/screencapture -i` |
 | Photos | Send new photos |
 | Downloads folder | Received files |
+| Paste from Other Apps | Clipboard sync, on macOS 15.4 and later when macOS asks before clipboard reads. See [Clipboard](#clipboard). |
 
 ## Test against a computer on the same Mac
 
@@ -138,9 +384,9 @@ FLUX_DATA_DIR=/tmp/flux-mac FLUX_UDP_PORT=28731 FLUX_PEER_UDP_PORT=28716 FLUX_LO
 
 | Variable | Effect |
 | --- | --- |
-| `FLUX_DATA_DIR` | Identity, trust store, and settings in a separate directory and defaults domain |
-| `FLUX_UDP_PORT` | UDP port that receives identity broadcasts |
-| `FLUX_PEER_UDP_PORT` | UDP port of the computer that the Mac announces itself to |
+| `FLUX_DATA_DIR` | Identity, trust store, and settings in a separate directory and defaults domain. Each launch with the same directory uses the same domain. |
+| `FLUX_UDP_PORT` | UDP port that receives identity broadcasts. The default is `12100`. |
+| `FLUX_PEER_UDP_PORT` | UDP port of the computer that the Mac announces itself to. The default is `12100`. |
 | `FLUX_LOOPBACK=1` | Announce only to 127.0.0.1 and skip Bonjour |
 
 Headless `fluxd` has no clipboard, notification, media, or stream backends.
@@ -160,7 +406,13 @@ log stream --predicate 'subsystem == "org.omarchy.flux"'
 | `macos/Sources/FluxKit/Net` | UDP discovery, Bonjour, TCP links, TLS, payload transfers, and tunnels |
 | `macos/Sources/FluxKit/Core` | Devices, pairing, trust store, the plugin protocol, and notifications |
 | `macos/Sources/FluxKit/Plugins` | One folder per feature |
+| `macos/Sources/FluxKit/Theme` | The theme packet, the contrast guard, and the palettes |
+| `macos/Sources/FluxKit/Inbox` | The items of the Inbox, the list of chats, the order of a chat, and their texts |
 | `macos/App` | The SwiftUI app; `App/Features/Features.swift` lists the plugins and their views |
+| `macos/App/Theme` | The colors of the theme in SwiftUI and the shared components |
+| `macos/App/Shell` | The destinations, the Go menu, the scope menu, and the pages of the features |
+| `macos/App/Chat` | Chats: the sidebar list, the chat of a computer with its dock and tray, the agent chat, the cards, the notices, and the pairing guide |
+| `macos/App/Destinations` | Control and Computers |
 | `macos/Tests/FluxKitTests` | Protocol and feature tests |
 | `macos/project.yml` | XcodeGen project with the Info.plist keys |
 
