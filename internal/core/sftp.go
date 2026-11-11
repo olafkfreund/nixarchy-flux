@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -438,17 +439,22 @@ var errBrowseDenied = sftp.ErrSSHFxPermissionDenied
 // that it cannot open, and it fails when it opens none.
 func openBrowseFS(roots [][2]string, hidden []string) (*browseFS, error) {
 	fsys := &browseFS{}
-	for _, r := range roots {
+	for i, r := range roots {
 		p := filepath.Clean(r[1])
-		if !filepath.IsAbs(p) {
-			continue
-		}
 		real, err := filepath.EvalSymlinks(p)
-		if err != nil {
-			continue
+		var root *os.Root
+		if err == nil && filepath.IsAbs(p) {
+			root, err = os.OpenRoot(p)
+		} else if err == nil {
+			err = errors.New("not an absolute path")
 		}
-		root, err := os.OpenRoot(p)
 		if err != nil {
+			// The first root is the home folder, and the dot-name rules of
+			// the other roots are relative to it, so without it nothing is
+			// served.
+			if i == 0 {
+				return nil, fmt.Errorf("cannot open the home folder %s: %w", p, err)
+			}
 			continue
 		}
 		fsys.roots = append(fsys.roots, browseRoot{name: r[0], path: p, real: real, root: root})

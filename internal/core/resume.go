@@ -194,6 +194,9 @@ func (d *Daemon) runResumeWorker(dev *Device, w *resumeWorker) {
 		case <-tick.C:
 			d.sweepResumeRuns(dev, w)
 		case <-d.ctx.Done():
+			// End every run, so a cancel that the sweep has not seen yet
+			// still writes its tombstone and deletes its data.
+			d.sweepResumeRuns(dev, w)
 			return
 		}
 		d.mu.Lock()

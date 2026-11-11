@@ -489,3 +489,19 @@ func TestBrowseStateAndStop(t *testing.T) {
 		t.Fatalf("browse state after the stop %+v, %v", state.Browse, err)
 	}
 }
+
+// TestBrowseNeedsTheHomeRoot checks that a home folder that cannot be opened
+// serves nothing: the other roots would lose the home rules, so a
+// download_dir in a dot-folder would be served as the first root.
+func TestBrowseNeedsTheHomeRoot(t *testing.T) {
+	base := t.TempDir()
+	private := filepath.Join(base, "u", ".ssh")
+	if err := os.MkdirAll(private, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fsys, err := openBrowseFS([][2]string{{"Home", filepath.Join(base, "missing")}, {"Downloads", private}}, nil)
+	if err == nil {
+		fsys.Close()
+		t.Fatal("a missing home folder must serve nothing")
+	}
+}
