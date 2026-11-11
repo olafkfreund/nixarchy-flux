@@ -59,59 +59,48 @@ func forward(ctx context.Context, conn net.Conn, target string, logf func(string
 	defer up.Close()
 	stopUp := context.AfterFunc(ctx, func() { _ = up.Close() })
 	defer stopUp()
-	var copied atomic.Int64
+	// After one direction ends, every write extends a drain deadline on both
+	// connections, so the other direction ends after drainIdle without
+	// data, and a reply that keeps sending is never cut. SetDeadline is safe
+	// to call from both copies at once.
+	var draining atomic.Bool
+	extend := func() {
+		if draining.Load() {
+			deadline := time.Now().Add(drainIdle)
+			_ = conn.SetDeadline(deadline)
+			_ = up.SetDeadline(deadline)
+		}
+	}
 	done := make(chan net.Conn, 2)
 	go func() {
-		_, _ = io.Copy(countWriter{up, &copied}, conn)
+		_, _ = io.Copy(drainWriter{up, extend}, conn)
 		done <- up
 	}()
 	go func() {
-		_, _ = io.Copy(countWriter{conn, &copied}, up)
+		_, _ = io.Copy(drainWriter{conn, extend}, up)
 		done <- conn
 	}()
 	first := <-done
 	if c, ok := first.(interface{ CloseWrite() error }); ok {
 		_ = c.CloseWrite()
 	}
-	watchStop := make(chan struct{})
-	watchDone := make(chan struct{})
-	go func() {
-		defer close(watchDone)
-		last := copied.Load()
-		deadline := time.Now().Add(drainIdle)
-		_ = conn.SetDeadline(deadline)
-		_ = up.SetDeadline(deadline)
-		ticker := time.NewTicker(drainIdle / 2)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-watchStop:
-				return
-			case <-ticker.C:
-				now := copied.Load()
-				if now == last {
-					return
-				}
-				last = now
-				deadline = time.Now().Add(drainIdle)
-				_ = conn.SetDeadline(deadline)
-				_ = up.SetDeadline(deadline)
-			}
-		}
-	}()
+	// The first deadline also ends a drain in which no byte ever moves.
+	draining.Store(true)
+	extend()
 	<-done
-	close(watchStop)
-	<-watchDone
 }
 
-type countWriter struct {
+// drainWriter calls extend after each write that moved data.
+type drainWriter struct {
 	io.Writer
-	copied *atomic.Int64
+	extend func()
 }
 
-func (w countWriter) Write(p []byte) (int, error) {
+func (w drainWriter) Write(p []byte) (int, error) {
 	n, err := w.Writer.Write(p)
-	w.copied.Add(int64(n))
+	if n > 0 {
+		w.extend()
+	}
 	return n, err
 }
 

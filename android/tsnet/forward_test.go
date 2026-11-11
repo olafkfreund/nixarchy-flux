@@ -93,6 +93,32 @@ func TestForwardDrain(t *testing.T) {
 		}
 		wait(t, done)
 	})
+	t.Run("reply resumes after a quiet sample", func(t *testing.T) {
+		// The first watchdog sample after the half-close sees no data; the
+		// reply then runs for longer than drainIdle and must still arrive.
+		client, server, _, done := testForward(t)
+		client.(*net.TCPConn).CloseWrite()
+		_ = server.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := server.Read(make([]byte, 1)); err != io.EOF {
+			t.Fatalf("server read: %v, want EOF", err)
+		}
+		time.Sleep(drainIdle * 7 / 10)
+		const chunks = 9
+		want := bytes.Repeat([]byte("chunk"), chunks)
+		for i := 0; i < chunks; i++ {
+			if _, err := server.Write([]byte("chunk")); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(drainIdle / 4)
+		}
+		server.(*net.TCPConn).CloseWrite()
+		got := make([]byte, len(want))
+		_ = client.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := io.ReadFull(client, got); err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("reply %q, error %v", got, err)
+		}
+		wait(t, done)
+	})
 	t.Run("peer stops reading", func(t *testing.T) {
 		client, server, _, done := testForward(t)
 		_ = client.(*net.TCPConn).SetReadBuffer(1024)
