@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 29
 intent: intent/2026-11-11-29-browser-send.md
 ---
