@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 42
 intent: intent/2026-11-11-42-browse-resume-hardening.md
 ---
