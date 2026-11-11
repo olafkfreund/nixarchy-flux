@@ -88,6 +88,8 @@ To run a check from the repository without installing it first:
 nix run .#flux-cli -- doctor
 ```
 
+The short name `flux` is not on `PATH` on Nix, because `fluxcd` owns it; use `flux-cli`.
+
 ## CLI commands on a Nix build
 
 | Command | Behavior on Nix |

@@ -118,14 +118,10 @@ in
           wantedBy = [ "graphical-session.target" ];
           unitConfig.ConditionUser = map (u: "|" + u) cfg.users;
           restartIfChanged = false;
-          # NixOS writes an explicit PATH into the unit, which hides the user
-          # manager's PATH, so the tools and the desktop's own programs
-          # (hyprctl, omarchy-shell) are named here.
-          path = cfg.runtimePackages ++ [
-            "/run/wrappers"
-            "/etc/profiles/per-user/%u"
-            "/run/current-system/sw"
-          ];
+          # Without this, NixOS writes an explicit PATH into the unit that
+          # hides the user manager's PATH, and with it runtimePackages and the
+          # desktop's programs (hyprctl, omarchy-shell).
+          enableDefaultPath = false;
           serviceConfig = {
             Type = "exec";
             ExecStart = "/run/current-system/sw/bin/fluxd";

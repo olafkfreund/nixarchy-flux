@@ -72,9 +72,17 @@ let
       "the flux-approve PAM line must come before the pam_unix.so auth line";
     assert lib.assertMsg (fluxFirst keyring)
       "with unix-early, the flux-approve PAM line must come before the first pam_unix.so auth line";
-    assert lib.assertMsg (lib.hasInfix "/run/current-system/sw/bin" unit)
-      "unit PATH must reach the system profile, since NixOS sets PATH explicitly";
-    assert lib.assertMsg (lib.hasInfix "-ffmpeg-" unit) "unit PATH must include the runtime packages";
+    assert lib.assertMsg (
+      !lib.hasInfix "PATH=" unit
+    ) "the unit must not set PATH, so fluxd gets the user manager's PATH";
+    assert lib.assertMsg (lib.any (
+      p: lib.getName p == "ffmpeg"
+    ) good.environment.systemPackages) "runtimePackages must be on the system path";
+    assert lib.assertMsg (lib.any (
+      l:
+      lib.hasPrefix "auth sufficient" l
+      && lib.hasInfix (builtins.unsafeDiscardStringContext "quiet stdout ${core}/lib/flux/flux-approve") l
+    ) (pamLines good)) "the PAM rule must be sufficient and use the helper path baked into flux-cli";
     assert lib.assertMsg (lib.hasInfix "ConditionUser=|alice" unit) "unit lacks ConditionUser=|alice";
     assert lib.assertMsg (lib.hasInfix "ConditionUser=|bob" unit) "unit lacks ConditionUser=|bob";
     assert lib.assertMsg (lib.hasInfix "ExecStart=/run/current-system/sw/bin/fluxd" unit)

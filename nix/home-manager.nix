@@ -74,7 +74,7 @@ in
     # fluxd writes into the folder.
     home.activation.fluxPlugin = lib.mkIf cfg.plugin.enable (
       lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-        dir=${config.xdg.configHome}/omarchy/plugins/flux
+        dir=${lib.escapeShellArg "${config.xdg.configHome}/omarchy/plugins/flux"}
         if [ ! -e "$dir" ]; then
           $DRY_RUN_CMD mkdir -p "$(dirname "$dir")"
           $DRY_RUN_CMD cp -rLT --no-preserve=mode ${core}/share/flux/omarchy-plugin "$dir"
