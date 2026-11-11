@@ -19,9 +19,13 @@ cannot be merged as it is:
   conflicts in `Makefile`, `README.md`, `dist/arch/PKGBUILD`,
   `docs/README.md` and `skills/omarchy-flux/SKILL.md`.
 - **It does not work on Nix.** The flake does not build `flux-native` or
-  ship the extension files, and `hostPath` (`cmd/flux/browser.go:296`) writes
-  the resolved `/nix/store/...` path of the binary into each browser's host
-  manifest, which breaks after the next update and garbage collection.
+  ship the extension files (`origin/master:nix/package.nix:22-40`).
+  `extensionDir` (`cmd/flux/browser.go:260`) never looks in a package's
+  `share/flux/browser-extension`, so even shipped files would show "The Flux
+  extension is missing". `hostPath` (`browser.go:296`) writes the resolved
+  `/nix/store/...` path of the binary into each host manifest, and Chromium
+  remembers the folder of an unpacked extension, so both break once that
+  store path is no longer kept alive by a profile and is garbage-collected.
 - **`flux-cli browser remove --dry-run` deletes the manifests:**
   `browserRemove` takes no arguments (`browser.go:93-99, 177`).
 - **The host trusts the extension for validation.** Only the extension
@@ -29,21 +33,32 @@ cannot be merged as it is:
   `flux-native` sends any string up to 8 KiB to the phone
   (`cmd/flux-native/main.go:124-136`). The host is the security boundary, so
   it must check.
-- **`flux-cli setup` installs host manifests for every browser by
-  default** (`cmd/flux/setup.go:64-75`), which writes into browser config
-  folders the user did not ask about.
+- **`flux-cli setup` installs host manifests by default** for every browser
+  it detects (`cmd/flux/setup.go:24, 64-75`; opt-out with `--no-browser`),
+  which writes into browser config folders the user did not ask about.
+- **Firefox and Zen are assumptions.** Install is gated on exactly
+  `~/.mozilla/firefox` or `~/.zen` and writes to two fixed host folders
+  (`browser.go:75, 144`); other layouts are skipped without a word. An
+  unpacked add-on in Firefox is temporary and is gone after a restart unless
+  it is signed.
 
 ## Proposed outcome
 
 - PR #29's feature is on master, rebased on current code, building and
-  passing tests, with the conflicts resolved in favor of master's text.
+  passing tests. Conflicts keep master's current behavior and text **and**
+  add the PR's `flux-native`, extension, install and docs additions.
 - `flux-cli browser install` and `remove` work, and `remove --dry-run`
   changes nothing.
 - `flux-native` refuses any link that is not `http` or `https` with a host,
   whatever the extension sends.
 - On Nix: the flake builds and installs `flux-native` and the extension
-  files, and host manifests point to a stable path that survives updates.
-- Setting up host manifests is the user's choice.
+  files, `flux-cli` finds the installed extension, and the host manifests and
+  the folder the user loads the extension from keep working across upgrades
+  and garbage collection. How the paths are chosen is for the spec.
+- Host manifests are **opt-in**: `flux-cli setup` no longer writes them
+  unless asked.
+- Firefox and Zen host lookup is checked against what those browsers read,
+  and the docs say that an unpacked Firefox add-on lasts until restart.
 - The Arch package and `make install` install `flux-native` and the
   extension as the PR intended.
 
@@ -70,15 +85,18 @@ cannot be merged as it is:
    `setup --browser`)? Recommended: yes, opt-in, since it writes into
    browser config folders.
 2. **Nix configuration.** Should the Home Manager module get a
-   `services.flux.browser.enable` option that writes the host manifests
-   declaratively? Recommended: yes, small, and it gives the stable path for
-   free; NixOS users without Home Manager use `flux-cli browser install`,
-   which on a Nix build writes the profile path instead of the store path.
+   `services.flux.browser.enable` option (default off) that writes the host
+   manifests and a stable copy of the extension? Recommended: yes. Without
+   Home Manager, `flux-cli browser install` on a Nix build writes paths that
+   outlive the store path; the spec picks how.
 3. **Extension key.** The PR's `manifest.json` carries a public `key` that
-   fixes the Chromium extension ID. It is public by design, not a secret, and
-   anyone could reuse it for another unpacked extension with the same ID;
-   the host only answers `devices` and `send`. Keep it? Recommended: keep it,
-   and document that the host trusts any extension with that ID.
+   fixes the Chromium extension ID (`jgfibbdalckcbmdcngbalobbhcbepamm`). It is
+   public by design, not a secret, so another unpacked extension can reuse it
+   and get the same ID. The host would then let that extension list the
+   paired devices (IDs, names, online state) and send links to them without a
+   prompt. Keep it? Recommended: keep it, keep the two fixed commands and the
+   size bounds, and document exactly what the host allows any extension with
+   that ID to do.
 4. **Credit and upstream.** Land it as a new PR on our fork that supersedes
    #29, with the author credited (`Co-authored-by`), and close #29 pointing
    to it? Recommended: yes.
