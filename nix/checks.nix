@@ -10,7 +10,7 @@ let
   core = packages.flux-core;
 
   nixos =
-    approve:
+    approve: extra:
     nixpkgs.lib.nixosSystem {
       modules = [
         self.nixosModules.default
@@ -32,18 +32,21 @@ let
           };
           system.stateVersion = "25.11";
         }
+        extra
       ];
     };
 
-  good = (nixos [ "sudo" ]).config;
-  bad = (nixos [ "sshd" ]).config;
+  good = (nixos [ "sudo" ] { }).config;
+  bad = (nixos [ "sshd" ] { }).config;
+  # enableGnomeKeyring adds unix-early, a password prompt before unix.
+  keyring = (nixos [ "sudo" ] { security.pam.services.sudo.enableGnomeKeyring = true; }).config;
 
   # Reads only text and options. It never forces system.build.toplevel,
   # which would build v4l2loopback and a whole system.
-  lines = lib.splitString "\n" good.security.pam.services.sudo.text;
+  pamLines = config: lib.splitString "\n" config.security.pam.services.sudo.text;
   # the index of the first match, or the length when nothing matches
   indexOf =
-    p:
+    lines: p:
     (lib.foldl'
       (acc: l: if acc.found || p l then acc // { found = true; } else acc // { n = acc.n + 1; })
       {
@@ -52,15 +55,26 @@ let
       }
       lines
     ).n;
-  fluxAt = indexOf (l: lib.hasInfix "flux-approve" l);
-  unixAt = indexOf (l: lib.hasPrefix "auth" l && lib.hasInfix "pam_unix.so" l);
+  # flux must come before the first pam_unix auth line, and that line must exist
+  fluxFirst =
+    config:
+    let
+      lines = pamLines config;
+      fluxAt = indexOf lines (l: lib.hasInfix "flux-approve" l);
+      unixAt = indexOf lines (l: lib.hasPrefix "auth" l && lib.hasInfix "pam_unix.so" l);
+    in
+    fluxAt < unixAt && unixAt < lib.length lines;
   unit = good.systemd.user.units."fluxd.service".text;
   failing = config: lib.filter (a: !a.assertion) config.assertions;
 
   nixosChecked =
-    assert lib.assertMsg (
-      fluxAt < unixAt && unixAt < lib.length lines
-    ) "the flux-approve PAM line must come before the pam_unix.so auth line";
+    assert lib.assertMsg (fluxFirst good)
+      "the flux-approve PAM line must come before the pam_unix.so auth line";
+    assert lib.assertMsg (fluxFirst keyring)
+      "with unix-early, the flux-approve PAM line must come before the first pam_unix.so auth line";
+    assert lib.assertMsg (lib.hasInfix "/run/current-system/sw/bin" unit)
+      "unit PATH must reach the system profile, since NixOS sets PATH explicitly";
+    assert lib.assertMsg (lib.hasInfix "-ffmpeg-" unit) "unit PATH must include the runtime packages";
     assert lib.assertMsg (lib.hasInfix "ConditionUser=|alice" unit) "unit lacks ConditionUser=|alice";
     assert lib.assertMsg (lib.hasInfix "ConditionUser=|bob" unit) "unit lacks ConditionUser=|bob";
     assert lib.assertMsg (lib.hasInfix "ExecStart=/run/current-system/sw/bin/fluxd" unit)

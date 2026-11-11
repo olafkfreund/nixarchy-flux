@@ -118,6 +118,14 @@ in
           wantedBy = [ "graphical-session.target" ];
           unitConfig.ConditionUser = map (u: "|" + u) cfg.users;
           restartIfChanged = false;
+          # NixOS writes an explicit PATH into the unit, which hides the user
+          # manager's PATH, so the tools and the desktop's own programs
+          # (hyprctl, omarchy-shell) are named here.
+          path = cfg.runtimePackages ++ [
+            "/run/wrappers"
+            "/etc/profiles/per-user/%u"
+            "/run/current-system/sw"
+          ];
           serviceConfig = {
             Type = "exec";
             ExecStart = "/run/current-system/sw/bin/fluxd";
@@ -138,7 +146,14 @@ in
               "stdout"
               helper
             ];
-            order = config.security.pam.services.${s}.rules.auth.unix.order - 10;
+            # Before the first password prompt: unix-early when an option
+            # such as enableGnomeKeyring turns it on, else unix.
+            order =
+              let
+                auth = config.security.pam.services.${s}.rules.auth;
+              in
+              (if auth ? unix-early && auth.unix-early.enable then auth.unix-early.order else auth.unix.order)
+              - 10;
           };
         });
       }
