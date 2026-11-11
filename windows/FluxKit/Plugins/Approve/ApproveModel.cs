@@ -72,7 +72,7 @@ public enum ApproveAvailabilityKind
 {
     Ready,
 
-    // The computer has no TPM, or the app has no signer. Nothing fixes it.
+    // The user did not set up Windows Hello, or the app has no signer.
     NoSecureHardware,
 
     // Windows Hello is not set up, locked, or not available now.
@@ -90,7 +90,7 @@ public enum ApprovePhaseKind
     // The prompt asks the user.
     Ask,
 
-    // Windows Hello and the TPM run.
+    // Windows Hello runs.
     Working,
 
     // The enrollment is done. The prompt shows the key code in Text.

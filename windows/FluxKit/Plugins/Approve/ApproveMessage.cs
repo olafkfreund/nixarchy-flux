@@ -256,6 +256,26 @@ public static class ApproveMessage
         }
     }
 
+    // Names the scheme of a signature that failed the check, for the log:
+    // a valid RSA-PSS signature means that Windows Hello signs with PSS and
+    // not with PKCS#1 v1.5, which the helper needs. It returns "" for other
+    // failures.
+    public static string Scheme(byte[] spki, byte[] message, byte[] signature)
+    {
+        try
+        {
+            using var key = RSA.Create();
+            key.ImportSubjectPublicKeyInfo(spki, out _);
+            return key.VerifyData(message, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pss)
+                ? ": the platform signs with RSA-PSS, and the helper takes only RSASSA-PKCS1-v1_5"
+                : "";
+        }
+        catch (CryptographicException)
+        {
+            return "";
+        }
+    }
+
     static bool VerifyRsa(byte[] spki, byte[] message, byte[] signature)
     {
         try

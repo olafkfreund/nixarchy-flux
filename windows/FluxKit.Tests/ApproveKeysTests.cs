@@ -4,8 +4,8 @@ namespace FluxKit.Tests;
 
 // ApproveKeysBackupTests.swift of the Mac app. The backup rules of the iPhone
 // do not apply to Windows. Windows adds the rule that each key that the store
-// drops goes in the platform too, because a TPM key stays until something
-// deletes it.
+// drops goes in the platform too, because a Windows Hello key stays until
+// something deletes it.
 public sealed class ApproveKeysTests : IDisposable
 {
     const string Computer = "computer_0123456789abcdef0123456789ab";

@@ -92,7 +92,7 @@ public sealed record ApproveAsk(string Host, string User, string Service, string
 }
 
 // A headless fluxd, a paired Windows core with the approve plugin, and a
-// software key in place of the TPM.
+// software key in place of Windows Hello.
 public sealed class ApproveFluxdRig : IAsyncDisposable
 {
     public required Fluxd Fluxd { get; init; }
@@ -202,6 +202,28 @@ public class ApproveEndToEndTests
         Assert.False(ApproveExpect.Verify(spki, (ask with { Nonce = new string('a', 64) }).Approval, signature));
         await Wait.UntilAsync(() => rig.Outcome(id) == ApproveOutcome.Approved, "the approved outcome", rig.Fluxd);
         Assert.Equal(2, rig.Signer.Checks);
+    }
+
+    // The same flow with an RSA 2048 key of Windows Hello. The test checks
+    // each signature with RSASSA-PKCS1-v1_5, as rsa.VerifyPKCS1v15 of the Go
+    // helper does.
+    [FluxdFact]
+    public async Task EnrollsAndApprovesWithAWindowsHelloKeyThroughFluxd()
+    {
+        await using var rig = await ApproveFluxdRig.StartAsync(37000);
+        rig.Signer.Rsa = true;
+        using var ipc = await ApproveIpc.ConnectAsync(rig.Fluxd);
+        var spki = await rig.EnrollAsync(ipc);
+        Assert.True(ApproveExpect.IsRsa(spki));
+
+        var ask = ApproveAsk.New();
+        var id = await rig.RequestAsync(ipc, ask);
+        rig.Ui(rig.Plugin.Approve);
+        var result = await ipc.CallAsync("approve.wait", new JsonObject { ["id"] = id }, 30);
+        Assert.Equal("approved", Json.String(result["state"]));
+        var signature = Convert.FromBase64String(Json.String(result["signature"])!);
+        Assert.True(ApproveExpect.Verify(spki, ask.Approval, signature));
+        Assert.False(ApproveExpect.Verify(spki, (ask with { Tty = "/dev/pts/1" }).Approval, signature));
     }
 
     // A denial, a failure with its reason, a second request while one is

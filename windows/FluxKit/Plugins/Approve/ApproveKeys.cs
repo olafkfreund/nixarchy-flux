@@ -29,9 +29,9 @@ internal sealed record ApproveKeyRecord(string Name, byte[] PublicKey, string Ho
 // the file.
 //
 // An enrollment replaces the key only after the computer got the new key:
-// the new key waits in <computer ID>.pending until Commit. A TPM key stays in
-// the platform until something deletes it, so each replace, discard, and
-// delete also deletes the key in the platform. ApproveKeys.swift of the Mac
+// the new key waits in <computer ID>.pending until Commit. A Windows Hello
+// key stays in the platform until something deletes it, so each replace,
+// discard, and delete also deletes the key in the platform. ApproveKeys.swift of the Mac
 // app has the same rules. docs/approve.md is the design.
 internal sealed class ApproveKeys(string folder, Action<string> deleteKey)
 {

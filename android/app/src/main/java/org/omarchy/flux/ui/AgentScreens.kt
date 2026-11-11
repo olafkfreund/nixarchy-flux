@@ -45,7 +45,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -55,8 +54,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -343,15 +343,14 @@ internal const val SENT_ANSWER_MS = 10 * 60_000L
  * changes, with the newest at the bottom, and the dock under it. The dock
  * shows the question of a blocked agent with its choices, the step of a
  * working agent with Interrupt, or the end of a finished turn, and the
- * composer. The top bar names the task, and a strip of pills opens the
- * other agents of the computer. The screen reads the output again when the
+ * composer. The top bar shows the agent with its status, the task, and
+ * the Changes key. The screen reads the output again when the
  * status changes, and every few seconds while the agent works and the
  * screen is visible. When the computer also allows terminal control, the
  * Live key shows the live terminal of the pane in the place of the thread.
- * [onSwitch] opens the agent of another pane in the place of this screen.
  */
 @Composable
-fun TiledAgentScreen(d: DeviceUi, pane: String, onBack: () -> Unit, onSwitch: (String) -> Unit = {}) {
+fun TiledAgentScreen(d: DeviceUi, pane: String, onBack: () -> Unit) {
     // True while the sheet of the changes shows. The output then holds the diff.
     var review by rememberSaveable(d.id, pane) { mutableStateOf(false) }
     // True while the live terminal shows in the place of the thread.
@@ -428,7 +427,7 @@ fun TiledAgentScreen(d: DeviceUi, pane: String, onBack: () -> Unit, onSwitch: (S
 
     val closer = rememberPaneCloser(d, pane, onBack)
     val task = agent?.let { it.title.ifEmpty { it.project.ifEmpty { pane } } } ?: pane
-    val context = listOfNotNull(agent?.agent, pane, d.name).joinToString(" · ")
+    val context = listOfNotNull(agent?.agent, agent?.project?.ifEmpty { null } ?: pane, d.name).joinToString(" · ")
     // A demo computer shows the debug sample screen in Live, with no unlock and no input.
     val sample = if (demo) terminalDebugSample() else null
     val offered = liveOffered(d.online, agent != null, d.herdr, demo, sample != null)
@@ -485,7 +484,7 @@ fun TiledAgentScreen(d: DeviceUi, pane: String, onBack: () -> Unit, onSwitch: (S
     }
     val wide = rememberWideWindow()
     Column(Modifier.fillMaxSize().imePadding()) {
-        AgentTopBar(task, context, onBack) {
+        ChatTopBar(task, context, onBack, avatar = { AgentAvatar(status) }) {
             // The key stays while Live is on, so that Live can always stop.
             if (live || offered) {
                 LivePill(live) {
@@ -498,17 +497,21 @@ fun TiledAgentScreen(d: DeviceUi, pane: String, onBack: () -> Unit, onSwitch: (S
                     }
                 }
             }
+            if (canReview && d.online) {
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).clickable(onClickLabel = "Show the changes", role = Role.Button, onClick = openReview)
+                        .semantics { contentDescription = "Changes" },
+                    contentAlignment = Alignment.Center,
+                ) { Sym(Ic.diff, tint = Tn.text, size = 22.dp) }
+            }
             AgentMenu(
                 refresh = if (d.online && agent != null && !demo && !liveShown) ({ HerdrSync.read(FluxCore, d.id, pane) }) else null,
-                review = if (canReview && d.online) openReview else null,
+                review = null,
                 keys = if (control && !direct) keysOpen else null,
                 onKeys = { keysOpen = !keysOpen },
                 close = if (control && d.online) ({ closer.ask() }) else null,
             )
         }
-        // The strip shows the other agents of the session of this agent.
-        val agents = d.herdr?.scoped(agent?.session)?.sorted.orEmpty()
-        if (agents.size >= 2 && agent != null) AgentStrip(agents, pane, thread?.elapsed.orEmpty(), onSwitch)
         // The progress line: it moves while the agent works.
         Box(Modifier.fillMaxWidth().height(2.dp).background(Tn.line)) {
             if (status == AgentStatus.Working && d.online) SlideBar(Tn.blue, Modifier.fillMaxSize())
@@ -596,6 +599,30 @@ fun TiledAgentScreen(d: DeviceUi, pane: String, onBack: () -> Unit, onSwitch: (S
 
 /** The most lines of a question that the dock shows above the choices. */
 private const val ASK_LINES = 6
+
+/**
+ * The picture of an agent in its top bar: the agent icon on `accent-tile`,
+ * with a dot of its status: red while it waits, green when it is done, and
+ * `dim` while it is idle. While it works, a ring turns in the place of the
+ * dot.
+ */
+@Composable
+private fun AgentAvatar(s: AgentStatus?) {
+    ChatAvatar(
+        Ic.agent,
+        tint = if (s == AgentStatus.Working || s == AgentStatus.Blocked || s == AgentStatus.Done) Tn.blue else Tn.sub,
+        size = 36.dp,
+        fill = Tn.accentTile,
+        edge = null,
+        badge = when (s) {
+            AgentStatus.Blocked -> Tn.red
+            AgentStatus.Done -> Tn.green
+            AgentStatus.Working -> null
+            else -> Tn.dim
+        },
+        spinner = s == AgentStatus.Working,
+    )
+}
 
 /**
  * The menu of the agent screen. Each action shows only when it is set:

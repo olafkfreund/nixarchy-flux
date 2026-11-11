@@ -1,7 +1,7 @@
 {
   "version": 1,
   "dependencies": {
-    "net10.0-windows10.0.22621": {
+    "net10.0-windows10.0.26100": {
       "BouncyCastle.Cryptography": {
         "type": "Transitive",
         "resolved": "2.7.0",
@@ -92,6 +92,11 @@
         "resolved": "0.2.0",
         "contentHash": "+RvLuNHOLW7cxzgDe9yHLoayBgjsuH2/gJtJnuVMxweKrxxYT6TwQNAmt06SFWpjwk68aRcwwD4FfMMA6tZvVA=="
       },
+      "ZXing.Net": {
+        "type": "Transitive",
+        "resolved": "0.16.11",
+        "contentHash": "OZfAVu88hl87BffQ+rlWCj/vLvAhhCK4QnFaoveeF/MY8SjHNSYBQ3qyUEWlPKNgBQGh1syXhCDg10vUnCsqkg=="
+      },
       "flux": {
         "type": "Project",
         "dependencies": {
@@ -102,7 +107,8 @@
         "type": "Project",
         "dependencies": {
           "Makaretu.Dns.Multicast": "[0.27.0, )",
-          "SSH.NET": "[2026.0.0, )"
+          "SSH.NET": "[2026.0.0, )",
+          "ZXing.Net": "[0.16.11, )"
         }
       }
     }

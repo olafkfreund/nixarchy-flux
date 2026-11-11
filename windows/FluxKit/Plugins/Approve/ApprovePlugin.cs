@@ -5,8 +5,8 @@ namespace FluxKit;
 
 // flux.approve in both directions. A paired computer asks this computer to
 // approve sudo, polkit, or a lock screen, or to make the key for approvals.
-// This computer signs with its TPM key only after Windows Hello, and the root
-// helper on the computer checks the signature. This computer shows 1 request
+// This computer signs with its Windows Hello key only after Windows Hello,
+// and the root helper on the computer checks the signature. This computer shows 1 request
 // at a time. ApprovePlugin.swift of the Mac app has the same rules.
 // docs/approve.md is the security design.
 //
@@ -168,8 +168,8 @@ public sealed class ApprovePlugin : IFluxPlugin
     }
 
     // Why this computer refuses the request without asking the user, or
-    // null. r is null for a request that is not valid. Without a TPM, each
-    // request fails at once, because Flux never makes a key outside it.
+    // null. r is null for a request that is not valid. Without Windows Hello,
+    // each request fails at once, because Flux never makes a key outside it.
     internal static string? Refusal(ApproveRequest? r, long now, bool hasKey, bool busy, bool secureHardware)
     {
         if (r is null)
@@ -320,16 +320,14 @@ public sealed class ApprovePlugin : IFluxPlugin
             Fail(r, ApproveTexts.NoSecureHardware);
             return;
         }
-        ApproveKeyRecord? key = null;
-        if (r.Kind == ApproveKind.Approve)
+        // An approval signs with the current key. An enrollment makes its new
+        // key under the other name, so that the current key stays.
+        var key = keys.Current(r.ComputerId);
+        // The user can remove the key while the request is open.
+        if (r.Kind == ApproveKind.Approve && key is null)
         {
-            // The user can remove the key while the request is open.
-            key = keys.Current(r.ComputerId);
-            if (key is null)
-            {
-                Fail(r, ApproveTexts.NoKey);
-                return;
-            }
+            Fail(r, ApproveTexts.NoKey);
+            return;
         }
         Model.Phase = ApprovePhase.Working;
         var cts = new CancellationTokenSource();
@@ -385,8 +383,8 @@ public sealed class ApprovePlugin : IFluxPlugin
         RemoveKey(computerId);
     }
 
-    // Whether this computer can approve: it needs a TPM and Windows Hello. It
-    // never falls back to a key outside the TPM.
+    // Whether this computer can approve: it needs Windows Hello. It never
+    // falls back to a key outside Windows Hello.
     public async Task<ApproveAvailability> AvailabilityAsync(CancellationToken cancel = default)
     {
         if (signer is null || !signer.HasSecureHardware)
@@ -397,7 +395,7 @@ public sealed class ApprovePlugin : IFluxPlugin
         return Availability(true, ApproveTexts.Problem(check));
     }
 
-    // No setting fixes a missing TPM, so it comes first.
+    // Without Windows Hello, no other check matters, so it comes first.
     internal static ApproveAvailability Availability(bool secureHardware, string? problem)
     {
         if (!secureHardware)
@@ -431,9 +429,10 @@ public sealed class ApprovePlugin : IFluxPlugin
     // The result of 1 signature. NewKey is the key that an enrollment made.
     sealed record SignResult(byte[] Signature, ApproveNewKey? NewKey);
 
-    // Checks the user, then signs. It runs on a thread of the pool. An
-    // enrollment deletes its new key when a step fails. Each signature must
-    // verify with its public key before it goes out.
+    // Checks the user, then signs. It runs on a thread of the pool. key is
+    // the current key of the computer. An enrollment deletes its new key when
+    // a step fails. Each signature must verify with its public key before it
+    // goes out.
     static async Task<SignResult> SignAsync(IApproveSigner signer, ApproveRequest r, ApproveKeyRecord? key, CancellationToken cancel)
     {
         var check = await signer.CheckUserAsync(cancel).ConfigureAwait(false);
@@ -452,11 +451,11 @@ public sealed class ApprovePlugin : IFluxPlugin
             var signature = await signer.SignAsync(key!.Name, message, ApproveTexts.ApproveReason(r), cancel).ConfigureAwait(false);
             if (!ApproveMessage.Verify(key.PublicKey, message, signature))
             {
-                throw new ApproveKeyException(ApproveKeyError.Failed, "the signature does not verify with the stored public key");
+                throw new ApproveKeyException(ApproveKeyError.Failed, "the signature does not verify with the stored public key" + ApproveMessage.Scheme(key.PublicKey, message, signature));
             }
             return new SignResult(signature, null);
         }
-        var created = await signer.CreateKeyAsync(r.ComputerId, cancel).ConfigureAwait(false);
+        var created = await signer.CreateKeyAsync(r.ComputerId, key?.Name, cancel).ConfigureAwait(false);
         var kept = false;
         try
         {
@@ -464,7 +463,7 @@ public sealed class ApprovePlugin : IFluxPlugin
             var signature = await signer.SignAsync(created.Name, message, ApproveTexts.EnrollReason(r.User, r.Host), cancel).ConfigureAwait(false);
             if (!ApproveMessage.Verify(created.PublicKey, message, signature))
             {
-                throw new ApproveKeyException(ApproveKeyError.Failed, "the signature does not verify with the new public key");
+                throw new ApproveKeyException(ApproveKeyError.Failed, "the signature does not verify with the new public key" + ApproveMessage.Scheme(created.PublicKey, message, signature));
             }
             kept = true;
             return new SignResult(signature, created);

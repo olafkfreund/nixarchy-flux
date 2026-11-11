@@ -4,41 +4,41 @@ using FluxKit;
 
 namespace Flux;
 
-// The share feature in the chat: what this computer sent, the files in both
-// directions, file drops, Send files, and the received files folder.
-// ChatCards.swift and ShareActions.swift of the Mac app have the same parts.
+// The share feature in the chat of a computer: what this computer sent, the
+// files in both directions, file drops, File in the tray, and the received
+// files folder. ChatCards.swift and ShareActions.swift of the Mac app have
+// the same parts.
 public static class ShareViews
 {
-    // The entries of the chat from the share feature in the scope.
-    public static IEnumerable<ChatEntryView> Entries(AppModel model)
+    // The entries of the chat of the computer from the share feature.
+    public static IEnumerable<ChatEntryView> Entries(AppModel model, string deviceId)
     {
         if (model.Core.Plugin<SharePlugin>() is not { } share)
         {
             yield break;
         }
-        var scope = model.Scope;
-        var many = scope is null && model.Paired.Count > 1;
-        foreach (var s in share.Model.Sent.Where(s => scope is null || s.DeviceId == scope))
+        foreach (var s in share.Model.Sent.Where(s => s.DeviceId == deviceId))
         {
             var text = s.Text.Length == 0 ? "A private clip" : s.Text;
-            yield return new ChatEntryView("sent|" + s.Id, s.At, Cards.OutBubble(Ui.Text(text, 12.5, mono: true, wrap: true), SentMeta(model, s, many)), true);
+            // Text is in the body face. A link, a scan, or a clip is in mono.
+            var mono = s.Kind != SentKind.Text;
+            yield return new ChatEntryView("sent|" + s.Id, s.At, Cards.OutBubble(Ui.Text(text, mono ? 12.5 : 13, mono: mono, wrap: true), SentMeta(s)), true);
         }
-        foreach (var t in share.Model.Transfers.Where(t => scope is null || t.DeviceId == scope))
+        foreach (var t in share.Model.Transfers.Where(t => t.DeviceId == deviceId))
         {
-            var view = t.Incoming ? ReceivedFile(model, share, t) : SentFile(model, share, t, many);
+            var view = t.Incoming ? ReceivedFile(model, share, t) : SentFile(share, t);
             yield return new ChatEntryView("file|" + t.Id, t.Started, view, !t.Incoming);
         }
     }
 
-    // The progress of the files that come in or go out in the scope, or null.
-    public static double? Progress(AppModel model)
+    // The progress of the files that come in or go out on the computer, or null.
+    public static double? Progress(AppModel model, string deviceId)
     {
         if (model.Core.Plugin<SharePlugin>() is not { } share)
         {
             return null;
         }
-        var running = share.Model.Transfers.Where(t => t.State == TransferState.Running && t.Size > 0 &&
-            (model.Scope is null || t.DeviceId == model.Scope)).ToArray();
+        var running = share.Model.Transfers.Where(t => t.State == TransferState.Running && t.Size > 0 && t.DeviceId == deviceId).ToArray();
         if (running.Length == 0)
         {
             return null;
@@ -51,17 +51,16 @@ public static class ShareViews
     static string Name(AppModel model, string id) => model.DeviceOf(id)?.Name ?? "the computer";
 
     // The line under a link, a text, or a clip, such as "Link · opened in the
-    // browser · 13:20". With more computers in scope, it names the computer.
-    static string SentMeta(AppModel model, SentItem s, bool many)
+    // browser · 13:20".
+    static string SentMeta(SentItem s)
     {
         var time = Texts.ClockTime(s.At);
-        var to = Name(model, s.DeviceId);
         return s.Kind switch
         {
-            SentKind.Link => many ? $"Link · opened on {to} · {time}" : $"Link · opened in the browser · {time}",
-            SentKind.Text => many ? $"Text · on the clipboard of {to} · {time}" : $"Text · on the clipboard · {time}",
-            SentKind.Scan => many ? $"Scan · saved on {to} · {time}" : $"Scan · saved as a text file · {time}",
-            _ => many ? $"Clipboard · to {to} · {time}" : $"Clipboard · {time}",
+            SentKind.Link => $"Link · opened in the browser · {time}",
+            SentKind.Text => $"Text · on the clipboard · {time}",
+            SentKind.Scan => $"Scan · saved as a text file · {time}",
+            _ => $"Clipboard · {time}",
         };
     }
 
@@ -87,16 +86,15 @@ public static class ShareViews
         return card;
     }
 
-    static UIElement SentFile(AppModel model, SharePlugin share, FileTransfer t, bool many)
+    static UIElement SentFile(SharePlugin share, FileTransfer t)
     {
         var tn = Tn.Current;
-        var to = Name(model, t.DeviceId);
         var pct = t.Fraction is { } p ? $"{(int)(p * 100)}% of {Texts.Bytes(t.Size)}" : $"{Texts.Bytes(t.Bytes)} so far";
         var time = Texts.ClockTime(t.Ended ?? t.Started);
         var meta = t.State switch
         {
-            TransferState.Running => (many ? $"Sending to {to}" : "Sending") + " · " + pct,
-            TransferState.Done => (many ? $"Sent to {to}" : "Sent") + " · " + time,
+            TransferState.Running => "Sending · " + pct,
+            TransferState.Done => "Sent · " + time,
             TransferState.Canceled => "Canceled · " + time,
             _ => "Not sent · " + time,
         };
@@ -178,27 +176,41 @@ public static class ShareViews
         }
     }
 
-    // Asks for files and sends them.
-    public static void PickAndSend(AppModel model)
+    // Asks for files and sends them to the computer.
+    public static void PickAndSend(AppModel model, string deviceId)
     {
-        var dialog = new Microsoft.Win32.OpenFileDialog { Multiselect = true, Title = "Send files" };
+        var name = model.DeviceOf(deviceId)?.Name ?? "the computer";
+        var dialog = new Microsoft.Win32.OpenFileDialog { Multiselect = true, Title = $"Send to {name}" };
         if (dialog.ShowDialog(Application.Current?.MainWindow) == true)
         {
-            SendFiles(model, dialog.FileNames);
+            model.Core.Plugin<SharePlugin>()?.SendFiles(dialog.FileNames, deviceId);
         }
     }
 
-    // Takes files or text that the user drops on the chat.
-    public static void Drop(AppModel model, DragEventArgs e)
+    // Takes files or text that the user drops on the chat of the computer. A
+    // folder is not sent.
+    public static void Drop(AppModel model, DragEventArgs e, string deviceId)
     {
+        if (model.Core.Plugin<SharePlugin>() is not { } share)
+        {
+            return;
+        }
+        if (model.PairedDevice(deviceId) is not { Online: true } d || !d.Accepts(PacketType.Share))
+        {
+            model.Show($"{model.DeviceOf(deviceId)?.Name ?? "The computer"} is not reachable");
+            return;
+        }
         if (e.Data.GetData(DataFormats.FileDrop) is string[] files)
         {
-            SendFiles(model, files.Where(File.Exists).ToArray());
+            var found = files.Where(File.Exists).ToArray();
+            if (found.Length > 0)
+            {
+                share.SendFiles(found, d.Id);
+            }
         }
-        else if (e.Data.GetData(DataFormats.UnicodeText) is string text && text.Trim().Length > 0 &&
-                 model.Core.Plugin<SharePlugin>() is { } share && Targets.Pick(model, PacketType.Share) is { } id)
+        else if (e.Data.GetData(DataFormats.UnicodeText) is string text && text.Trim().Length > 0)
         {
-            share.SendText(text.Trim(), id);
+            share.SendText(text.Trim(), d.Id);
         }
     }
 
@@ -219,6 +231,13 @@ public static class ShareViews
         });
         return ("Files", SettingsView.Group(
             SettingsView.Field("Received files", Ui.H(8, Ui.Text(share.DownloadFolder, 12, mono: true).Fill(), choose)),
+            SettingsView.Toggle("Show Flux in the Send to menu", SendToMenu.Enabled, on =>
+            {
+                if (!SendToMenu.Set(on))
+                {
+                    model.Show("Windows did not change the Send to menu");
+                }
+            }),
             SettingsView.Note("Received files never open by themselves. Windows checks them before they open, as files from the internet.")));
     }
 }

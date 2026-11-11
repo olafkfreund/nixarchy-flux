@@ -44,6 +44,14 @@ class SendLogTest {
     }
 
     @Test
+    fun aFileThatWentOutKeepsItsSource() {
+        val list = listOf(file(1, TransferState.Running).copy(uri = "content://media/1"), file(2, TransferState.Running).copy(uri = "content://media/2"))
+        val done = endSend(endSend(list, 1, ok = true), 2, ok = false)
+        assertEquals("content://media/1", done[0].uri)
+        assertEquals("a failed photo still shows", "content://media/2", done[1].uri)
+    }
+
+    @Test
     fun aClipFromAComputerTakesThePlaceOfTheLastOne() {
         val sent = SendEntry(1, "pc", "omarchy-xps", SendKind.Clip, "out")
         val first = SendEntry(2, "pc", "omarchy-xps", SendKind.Clip, "a", incoming = true)

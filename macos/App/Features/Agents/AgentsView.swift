@@ -171,11 +171,14 @@ struct SentAnswer: Equatable {
 /// the question of a blocked agent with its choices, the step of a working
 /// agent with Interrupt, or the end of a turn, and the composer. The view
 /// reads the output again when the status changes, and every 5 seconds
-/// while the agent works and the window shows.
-private struct AgentDetail: View {
+/// while the agent works and the window shows. The agents window shows the
+/// header above the thread. The agent chat of the main window (`chat`)
+/// puts the same parts in the window toolbar, see `AgentChatBar`.
+struct AgentDetail: View {
     let model: AgentsWindowModel
     let pane: String
     let name: String
+    var chat = false
     @Environment(\.tn) private var tn
     /// True while the changes show. The output then holds the diff.
     @State private var review = false
@@ -203,14 +206,17 @@ private struct AgentDetail: View {
         let ask = texts.flatMap { AgentAsk.find($0, maxLines: 6) }
         let control = agent != nil && model.herdr?.control == true
         let canReview = agent != nil && model.herdr?.review == true && model.device?.online == true
+        let loading = out?.loading == true && !(out?.lines.isEmpty ?? true)
         VStack(spacing: 0) {
             if let agent {
-                AgentHeader(agent: agent, loading: out?.loading == true && !(out?.lines.isEmpty ?? true), text: out?.text ?? "",
-                            review: canReview ? { review = true } : nil, keysOpen: control ? $keysOpen : nil) {
-                    model.plugin.read(model.deviceId, pane: pane)
+                if !chat {
+                    AgentHeader(agent: agent, loading: loading, text: out?.text ?? "",
+                                review: canReview ? { review = true } : nil, keysOpen: control ? $keysOpen : nil) {
+                        model.plugin.read(model.deviceId, pane: pane)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
                 // The progress line: it moves while the agent works.
                 ZStack {
                     Rectangle().fill(tn.line)
@@ -236,6 +242,10 @@ private struct AgentDetail: View {
             }
         }
         .background(tn.bg)
+        .modifier(AgentChatBar(on: chat, agent: agent, pane: pane, computer: name, loading: loading, text: out?.text ?? "",
+                               review: canReview ? { review = true } : nil, keysOpen: control ? $keysOpen : nil) {
+            model.plugin.read(model.deviceId, pane: pane)
+        })
         .sheet(isPresented: $review) {
             ChangesSheet(files: diff.flatMap { !$0.loading || !$0.lines.isEmpty ? DiffFile.parse($0.lines.map(\.text)) : nil },
                          problem: diff?.error ?? diff?.lines.first?.text, truncated: diff?.truncated == true)
@@ -259,8 +269,9 @@ private struct AgentDetail: View {
     }
 }
 
-/// The header of an agent: its status, task, agent, and pane, then
-/// Changes, Keys, Copy, and Refresh.
+/// The header of an agent in the agents window: its picture with the
+/// status dot, its task, agent, and pane, then Changes, Keys, Copy, and
+/// Refresh.
 private struct AgentHeader: View {
     let agent: HerdrAgent
     let loading: Bool
@@ -274,7 +285,7 @@ private struct AgentHeader: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            StatusMark(status: agent.status)
+            AgentAvatar(status: agent.status, size: 32, ground: tn.bg)
             VStack(alignment: .leading, spacing: 2) {
                 Text(agent.title.isEmpty ? (agent.project.isEmpty ? agent.pane : agent.project) : agent.title)
                     .font(.system(size: 15, weight: .semibold))
@@ -314,6 +325,69 @@ private struct AgentHeader: View {
             }
         }
         .controlSize(.small)
+    }
+}
+
+/// The chat top bar of an agent in the window toolbar, while `on`: the
+/// picture of the agent with its status dot, the task as the title, the
+/// agent, the project, and the computer as the subtitle, then Changes,
+/// Command-D, Keys, Copy, and Refresh, Command-R. The agents window shows
+/// `AgentHeader` in its place.
+private struct AgentChatBar: ViewModifier {
+    let on: Bool
+    let agent: HerdrAgent?
+    let pane: String
+    let computer: String
+    let loading: Bool
+    /// The output as plain text, for Copy.
+    let text: String
+    let review: (() -> Void)?
+    let keysOpen: Binding<Bool>?
+    let refresh: () -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if on {
+            let project = agent.map { $0.project.isEmpty ? pane : $0.project } ?? pane
+            let task = agent.map { $0.title.isEmpty ? project : $0.title } ?? pane
+            content
+                .navigationTitle(task)
+                .navigationSubtitle(contextLine([agent?.agent ?? "", project, computer]))
+                .toolbar {
+                    ToolbarItem(placement: .navigation) {
+                        AgentAvatar(status: agent?.status)
+                    }
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        if let review {
+                            Button(action: review) { Label("Changes", systemImage: "plusminus") }
+                                .help("Show the changes of the repository")
+                                .keyboardShortcut("d", modifiers: .command)
+                        }
+                        if let keysOpen {
+                            Toggle(isOn: keysOpen) { Label("Keys", systemImage: "keyboard") }
+                                .toggleStyle(.button)
+                                .help("Show the keys Esc, Tab, Up, Down, and Enter")
+                        }
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(text, forType: .string)
+                        } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                        }
+                        .disabled(text.isEmpty)
+                        .help("Copy the output")
+                        if loading {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button(action: refresh) { Label("Refresh", systemImage: "arrow.clockwise") }
+                                .help("Read the output again")
+                                .keyboardShortcut("r", modifiers: .command)
+                        }
+                    }
+                }
+        } else {
+            content
+        }
     }
 }
 

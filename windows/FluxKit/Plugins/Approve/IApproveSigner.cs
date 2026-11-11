@@ -38,14 +38,14 @@ public enum ApproveKeyError
     // Windows Hello is not available now.
     Unavailable,
 
-    // The key is not valid any more, for example after a change of Windows
-    // Hello. Flux deletes the key, and the user enrolls again.
+    // The key is not valid any more, for example after a reset of the
+    // Windows Hello PIN. Flux deletes the key, and the user enrolls again.
     KeyInvalid,
 
     // The computer is locked, so the key does not work.
     DeviceLocked,
 
-    // Any other failure of the key or of the secure hardware.
+    // Any other failure of the key or of Windows Hello.
     Failed,
 }
 
@@ -57,20 +57,45 @@ public sealed class ApproveKeyException(ApproveKeyError error, string? detail = 
     public ApproveKeyError Error { get; } = error;
 }
 
+// The names of the Windows Hello keys of 1 computer. A computer has 2 names,
+// as the aliases of Flux for Android: flux-approve-<computer ID> and
+// flux-approve-<computer ID>.b. An enrollment makes its new key under the
+// name that the current key does not use, so that the current key stays
+// until the computer got the new key. docs/approve.md is the design.
+public static class ApproveKeyNames
+{
+    public const string Prefix = "flux-approve-";
+
+    // The first name of the key of the computer.
+    public static string First(string computerId) => Prefix + computerId;
+
+    // The second name of the key of the computer.
+    public static string Second(string computerId) => Prefix + computerId + ".b";
+
+    // The name of the new key of an enrollment. current is the name of the
+    // current key of the computer, or null.
+    public static string Next(string computerId, string? current) =>
+        current == First(computerId) ? Second(computerId) : First(computerId);
+}
+
 // The approval keys of the platform and the user check before each
-// signature. The Windows app implements it. Each key is an EC P-256 key of
-// the Microsoft Platform Crypto Provider, so the TPM holds the private key.
-// Each signature needs Windows Hello first. The tests use a software key.
+// signature. The Windows app implements it with Windows Hello: each key is an
+// RSA 2048 key of KeyCredentialManager, in the TPM when the computer has one.
+// Each signature needs Windows Hello first: a fingerprint, a face, or the
+// Windows Hello PIN. The tests use a software key.
 //
 // The rules of docs/approve.md apply to each implementation:
-// - Make each key in the secure hardware. Never make a key outside it. A
-//   computer without a TPM reports false for HasSecureHardware.
+// - Make each key in Windows Hello. Never make a key outside it. A computer
+//   without Windows Hello reports false for HasSecureHardware.
 // - Keep the private key in the platform. FluxKit gets only the name of the
 //   key and its public key.
 // - Each call of SignAsync asks the user check of the platform for that 1
 //   signature. A check never signs 2 messages, and nothing signs without it.
 //   No other member signs.
-// - A signature is ECDSA with SHA-256 over the message, in ASN.1 DER.
+// - A signature of an RSA 2048 key is RSASSA-PKCS1-v1_5 with SHA-256 over
+//   the message, the scheme of Windows Hello. A signature of an EC P-256 key
+//   is ECDSA with SHA-256 in ASN.1 DER. ApproveMessage.Verify checks each
+//   signature before it goes out.
 //
 // FluxKit calls CheckUserAsync, CreateKeyAsync, and SignAsync from a thread
 // of the pool, 1 call at a time. An implementation that needs the UI thread
@@ -80,31 +105,35 @@ public sealed class ApproveKeyException(ApproveKeyError error, string? detail = 
 // and safe on each thread.
 public interface IApproveSigner
 {
-    // True when this computer has the secure hardware for approval keys,
-    // such as a TPM 2.0. The value does not change while the app runs.
-    // FluxKit reads it for each request, so it must be fast.
+    // True when this computer can make approval keys: Windows Hello is set
+    // up for the user. The value can change while the app runs, for example
+    // after the user sets up a PIN. FluxKit reads it for each request, so it
+    // must be fast.
     bool HasSecureHardware { get; }
 
     // Whether the user check works now. It does not ask the user.
     Task<ApproveUserCheck> CheckUserAsync(CancellationToken cancel);
 
-    // Makes a new EC P-256 signing key in the secure hardware and stores it
-    // in the platform under a new name. It returns the name and the public
-    // key as SubjectPublicKeyInfo DER. computerId names the computer that
-    // the key is for. The current key of that computer stays. FluxKit calls
+    // Makes a new signing key in Windows Hello for the computer computerId.
+    // It returns the name and the public key as SubjectPublicKeyInfo DER.
+    // currentKey is the name of the current key of that computer, or null.
+    // The new key never takes that name, so that the current key stays.
+    // Windows Hello can ask the user before it makes the key. FluxKit calls
     // DeleteKey for each key that it does not keep.
-    Task<ApproveNewKey> CreateKeyAsync(string computerId, CancellationToken cancel);
+    Task<ApproveNewKey> CreateKeyAsync(string computerId, string? currentKey, CancellationToken cancel);
 
     // Asks the user check of the platform, then signs the message with the
     // key. reason tells the user what the signature approves. It returns the
-    // ASN.1 DER signature over the SHA-256 of message. When cancel ends, the
+    // signature over the SHA-256 of message, see above. When cancel ends, the
     // implementation closes the prompt and throws an OperationCanceledException
     // or an ApproveKeyException with ApproveKeyError.Cancelled. It throws an
     // ApproveKeyException for the other failures that it knows.
     Task<byte[]> SignAsync(string keyName, byte[] message, string reason, CancellationToken cancel);
 
     // Deletes the key from the platform. A key that does not exist is not an
-    // error. It throws an ApproveKeyException when the platform cannot
-    // delete the key.
+    // error. An implementation can delete in the background. It then deletes
+    // in the order of the calls, and before its next CreateKeyAsync starts.
+    // It throws an ApproveKeyException when it knows at once that the
+    // platform cannot delete the key.
     void DeleteKey(string keyName);
 }

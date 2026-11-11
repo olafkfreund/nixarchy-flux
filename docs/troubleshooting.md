@@ -60,6 +60,7 @@ It waits while 1 of these runs:
 - A Browse PC session
 - The send of the Android app
 - A fingerprint approval
+- An SSH signature that waits for the phone
 
 The journal then shows a line such as `the restart waits for Browse PC`.
 To end a Browse PC session, select **Stop** in its desktop notification.
@@ -145,7 +146,27 @@ See [check a release](install.md#check-a-release) to check the files by hand.
    flux-cli status
    ```
 
+   `flux-cli discover` asks Avahi for the address of each Flux device again, and `fluxd` connects to each one.
+   Avahi reports a device only when it appears on the network.
+   So a phone that stayed on the network after its link closed, for example after an unpair, connects again only after `flux-cli discover` or after **+ Pair new device** in the Flux window.
+
+5. Read the mDNS lines in the log:
+
+   ```sh
+   journalctl --user -u fluxd -e | grep mDNS
+   ```
+
+   | Line | Meaning |
+   | --- | --- |
+   | `mDNS: publishing this computer and looking for _flux._udp devices through Avahi` | mDNS runs. |
+   | `mDNS: resolving the N devices that Avahi reports` | `flux-cli discover` ran. With 0, Avahi reports no Flux device to `fluxd`. Compare with `avahi-browse -r -t _flux._udp`. |
+   | `mDNS: found "NAME" at IP:PORT` | `fluxd` has the address of the device and connects to it. A failed connection logs a `connect to` line. |
+   | `mDNS: cannot resolve ID: ERROR` | Avahi has the device but cannot get its address. |
+   | `mDNS: ID has no IPv4 address that Flux can use` | The device has only an IPv6 or loopback address. Flux finds devices over IPv4 only. |
+   | `mDNS: the Avahi browser failed, starting it again` | Avahi stopped the search. `fluxd` starts a new one. |
+
 Guest Wi-Fi and client isolation can block devices on the same access point.
+When discovery finds no device, pair by the IP address of the phone with `flux-cli pair --address`. See [pair by address](cli.md#pair-by-address).
 `fluxd` listens on 1 TCP port from 12100 to 12108 and on UDP port 12100, but it does not need inbound traffic.
 It finds the devices through mDNS and opens the connections itself.
 So a new inbound desktop firewall rule is not the default fix.
@@ -266,7 +287,23 @@ Then turn on **Text messages** again.
 
 If a sent message shows **Not sent**, the phone could not send it, or the phone did not report it in 60 seconds.
 Check the signal and the SMS app on the phone.
+When the phone reports the message later, **Not sent** goes away.
 Flux does not send messages to a group. Reply to a group on the phone.
+
+If a message is on the phone but not on the desktop, check these causes:
+
+- The app on the phone keeps the message in its own database, for example an RCS chat. Flux reads only the SMS and MMS database of the phone.
+- The message is older than the last 100 messages of the conversation. The desktop shows only these 100 messages.
+
+## Conversations show numbers
+
+Flux shows the numbers of the conversations when it cannot read the contacts of the phone.
+
+1. Open **Computers > Sync** in Flux for Android.
+2. Under **Text messages**, select **Allow contacts**, and allow the access.
+3. Open the **Messages** page on the desktop again.
+
+If Android does not ask, select **Open app settings** and allow **Contacts**.
 
 ## A phone copy does not reach the computer
 
@@ -306,6 +343,27 @@ Restart it with `systemctl --user restart fluxd`.
 A player that does not accept a new volume shows no volume control.
 Chromium is an example.
 
+## Audio outputs do not show on the phone
+
+**Audio outputs** in **Media** needs `pactl` on the computer.
+When the phone shows an error in the place of the outputs, check `pactl` and the log of the daemon:
+
+```sh
+pactl --format=json list sinks
+journalctl --user -u fluxd --no-pager | grep "audio output"
+```
+
+If `pactl` is not installed, install it:
+
+```sh
+sudo pacman -S libpulse
+```
+
+The list leaves out an output whose ports are all not available, such as headphones that are not plugged in.
+Plug in the device, then wait up to 10 seconds, or open **Media** again.
+An earlier `fluxd` does not send the outputs, and the dock of **Media** then shows no output key.
+Update Flux on the computer.
+
 ## Camera, microphone, or screen fails
 
 ```sh
@@ -319,6 +377,34 @@ The webcam needs `ffmpeg`, `v4l2loopback-dkms`, and headers for the active kerne
 The microphone needs PipeWire and phone microphone permission.
 The screen mirror needs `mpv` or `ffplay` and the Android capture prompt.
 See [camera and streams](camera.md) for setup commands.
+
+## The phone plays no audio of the computer
+
+```sh
+flux-cli speaker
+pw-record --version
+journalctl --user -u fluxd --no-pager | grep speaker
+```
+
+The phone speaker needs `pw-record` from PipeWire.
+If the phone shows `pw-record is not installed on the computer`, install it:
+
+```sh
+sudo pacman -S pipewire
+```
+
+The phone plays what the default output of the computer plays.
+If you hear nothing, play a sound on the computer, and check its default output with `pactl get-default-sink`.
+If the computer stays loud while the phone plays, check **Mute omarchy while this phone plays** in the audio sheet of **Media**.
+`flux-cli speaker` then shows the output that `fluxd` muted, or why it could not mute it.
+If an output stays muted after a crash, turn its sound on again:
+
+```sh
+pactl set-sink-mute @DEFAULT_SINK@ 0
+```
+
+A gap in the audio comes from a stall of the network.
+`fluxd` and the phone then drop the old audio, so the delay stays short.
 
 ## herdr agents do not show
 

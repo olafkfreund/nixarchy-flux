@@ -4,6 +4,7 @@
 
 Flux for Android and Flux for macOS show the coding agents that [herdr](https://herdr.dev) runs on your Omarchy computer.
 You can see the status of each agent, read its recent output in color, and get a notification when an agent needs input or finishes.
+On Android, a [home screen widget](#home-screen-widget) shows the agents that need you.
 When you turn on control, you can also answer an agent with taps, send it text, start new agents, and close agents.
 When you also turn on terminals, Flux for Android opens herdr terminals and types commands in them.
 With control on, Flux for Android can also show the live terminal of an agent, and you can scroll and tap in it.
@@ -57,15 +58,14 @@ Each app also shows the Git changes of the agent.
 See [Agent diff review](workflows.md#agent-diff-review).
 
 1. Start herdr on the computer.
-2. Open Flux for Android. An agent that waits for input shows in **Chat**, with its question and its choices.
-3. To see all agents, open **Control** and select **Agents and terminals**.
-4. Select an agent to read its recent output.
+2. Open Flux for Android or Flux for iOS. Each agent has a chat in **Chats**. An agent that waits for input is on top, under **Needs you**.
+3. Select an agent to open its chat.
+4. To see the agents and the terminals of 1 computer, open **Control** and select **Agents and terminals**.
 
 The agent screen of Flux for Android and Flux for iOS has these parts:
 
-- The top bar shows the task, the agent, the pane, and the computer. Its menu has **Refresh**, **Changes**, **Show keys**, and **Close the agent**.
-- A row of pills shows the agents of the computer. Select a pill to open that agent.
-- A thin bar moves under the pills while the agent works.
+- The top bar shows the agent with a dot for its status, the task, and the agent, the project, and the computer. The **Changes** key opens the changes. The menu has **Refresh**, **Show keys**, and **Close the agent**.
+- A thin bar moves under the top bar while the agent works.
 - The thread shows the messages of the agent, its tool calls, the files that it changed, and your prompts. Select a tool call to show its result. Flux reads the transcripts of Claude Code, Codex, and opencode. Lines that it cannot read show as terminal lines.
 - The dock at the bottom shows the question and the choices of a blocked agent, the step of a working agent with **Interrupt**, or the end of a finished turn. The text field and the mic key are under it.
 
@@ -77,7 +77,7 @@ Each app also reads these parts of the transcripts:
 - The task list of opencode shows as **Todos** with the count of done tasks. A file that opencode creates or deletes counts in the changed files.
 - When the read starts inside a long block, the start of the thread shows that block as **Earlier output**. Select it to show its lines.
 
-The agents window of Flux for macOS keeps its agent list in the place of the pills. Its header has **Changes**, **Keys**, the copy button, and the refresh button. See [Use a Mac](#use-a-mac).
+Flux for macOS opens the chat of an agent in the detail column of its window, next to the list of chats. The window toolbar shows the agent with a dot for its status, the task, the agent, the project, and the computer. It also has **Changes**, **Keys**, the copy button, and the refresh button. See [Use a Mac](#use-a-mac).
 
 The list puts blocked agents first, then done, working, idle, and unknown agents.
 A blocked agent waits for an approval or for the answer to a question.
@@ -271,6 +271,67 @@ To turn off a notification type, use the **Agent needs input** or **Agent finish
 The switches apply to all computers.
 Android also lists the two types as the **Agents that need input** and **Agents that finish** channels.
 
+## Home screen widget
+
+Flux for Android has an **Agents** widget for the home screen.
+It shows what needs you on all paired computers, so you see it without opening Flux.
+
+To add the widget:
+
+1. Touch and hold an empty part of the home screen.
+2. Select **Widgets**.
+3. Find **Flux**.
+4. Touch and hold **Agents**, then drag it to the home screen.
+
+The widget shows the same items as **Chats**, in the same order:
+
+1. A fingerprint approval that waits and a pair request. These rows have a 2 dp red border.
+2. The agents that wait for input, the newest first. These rows have a 1 dp red border.
+3. The agents that work, then the agents that are done, then the idle agents.
+
+Each row shows a dot, the task of the agent, the state word, the agent and the project, and the computer.
+The dot is red for an agent that needs input, green for an agent that is done, and dim for an idle agent.
+An agent that works has a ring in the accent color.
+The state word tells the status in words, so the color is never the only sign.
+
+The header shows the Flux mark, **Agents**, the number of items that need you in red, and the number of computers online.
+
+- Select an agent to open its chat. The widget opens the same screen as the notification of the agent. Back goes to **Chats**.
+- Select an approval to open the approval screen. The screen asks for the fingerprint before it signs.
+- Select a pair request, the header, or the line under the rows to open **Chats**.
+
+The widget is 4 by 2 cells when you add it.
+To resize it, touch and hold it, then drag its edges.
+It shrinks to 2 by 1 cells and grows in both directions:
+
+- At 2 by 1 cells, the widget shows the header and the first row. When the first row does not fit, it shows only the header.
+- A larger widget shows more rows. When not all rows fit, a line under the rows tells how many more rows are in **Chats**, for example `3 more in Chats`. When that line has no room, the header shows the number in the place of the computers online, for example `3 more`.
+- A widget narrower than 240 dp hides **Agents** in the header, and it shows the computer after the agent and the project.
+- A widget narrower than 180 dp, for example at 2 by 1 cells, shows only the state word under the task.
+- With a large font size, the rows are higher, so fewer rows fit. The widget also takes the narrow form at a larger width.
+
+When the widget has no rows, it shows a quiet state with no red:
+
+| State | The widget shows |
+| --- | --- |
+| No computer is connected | `No computer is connected` and the time that Flux last saw the computer. The mark is dim. |
+| The computers still connect after a start | `Connecting to COMPUTER` |
+| No agent runs on a connected computer | `Nothing needs you` and `No agents run on COMPUTER.` |
+| No computer is paired | `No computer is paired` |
+| Flux is off | `Flux is off` |
+
+The widget uses the theme of the app.
+With the **Computer** theme, it uses the theme that changed most recently, as the scope **All computers** does.
+Without a theme from a computer, it follows the light or dark mode of the phone.
+The widget uses only the color pairs that the contrast guard checks, so its text reaches 4.5:1 and its dots and borders reach 3:1.
+See [Theme](android.md#theme).
+
+The widget updates when the agent list of a computer changes, when a computer connects or disconnects, and when an approval or a pair request comes or goes.
+A burst of changes gives 1 update, and the widget updates at most once each second.
+The widget has no timer and no periodic update, so it never wakes the phone.
+When Android stops Flux, the widget keeps its last state until Flux runs again.
+Open Flux to update it.
+
 ## Answer an agent
 
 Replies are off by default, because an agent runs commands on the computer.
@@ -446,20 +507,22 @@ Flux for macOS shows the same agents and sends the same replies as the phone.
 It shows up to 1000 lines of output.
 It starts agents, but it does not close them, open terminals, or show the live terminal.
 
-- **Control** has the **Agents and terminals** tool. Its line counts the agents and the terminals. Its badge shows the number of blocked agents.
-- **Chat** shows each agent that waits for input, works, or is done. An agent that waits shows its choices there. See [Chat and navigation](macos.md#chat-and-navigation).
-- **Agents and terminals** opens a window with the agent list on the left and the thread of the selected agent on the right. When more than 1 computer has agents, Flux asks which one.
-- To start an agent, select **Start Agent** in **Control**, the add button under the agent list, or **Start an agent** when the computer has no agents yet. The sheet works as [Start an agent](#start-an-agent) describes, with agents only, and asks for Touch ID or the Mac password before the start. The window then selects the new agent. A line above the reply field shows the state of the first task.
+- Each agent has a chat in **Chats** in the sidebar of the window. An agent that waits for input is on top, under **Needs you**. See [Chats and navigation](macos.md#chats-and-navigation).
+- A click on an agent opens its chat in the detail column. The chat shows the thread and the dock, as the agent screen of the phone does. The toolbar shows the agent with a dot for its status, the task, the agent, the project, and the computer.
+- **Control** shows the agents of the computers in scope. A click on an agent opens its chat.
+- **Agents Window** in **Control** opens a window with the agent list on the left and the thread of the selected agent on the right. When more than 1 computer has agents, Flux asks which one. The **Agents…** item of a computer in the menu bar panel and **Open Agents…** on the page of a computer open the same window.
+- To start an agent, select the **+** key at the top of **Chats**, **Start Agent** in **Control**, **Agent** in the tray of a computer chat, or **Start an Agent…** in the menu of a computer chat. The sheet works as [Start an agent](#start-an-agent) describes, with agents only, and asks for Touch ID or the Mac password before the start. The chat of the new agent then opens. A line above the reply field shows the state of the first task.
+- The agents window also starts agents, with the add button under the agent list, or **Start an agent** when the computer has no agents yet. The window then selects the new agent.
 - **Browse…** next to the folder search shows the folders of the computer, and opens at the chosen folder. It uses [Get files](features.md#browse-pc), so it shows the same folders, without hidden ones, and the computer shows that Get files is open. The picker and the Get files window share 1 session, so a folder that opens in one also opens in the other.
-- **Open thread** on the card of an agent in **Chat** opens the agent in that window. The menu of each computer in the menu bar panel has **Agents…** too.
+- The menu bar panel shows the agents that need you as cards with their choices. **Open chat** on a card opens the chat of the agent in the window.
 - The output uses the colors of Tokyo Night in dark mode and Tokyo Night Day in light mode.
 - The Mac fits the output to the width of the window, as the phone does. See [See your agents](#see-your-agents).
 - When you scroll up to read older lines, the output stays there when new output comes. To go back to the newest lines, select the arrow at the bottom of the output. On Android, the arrow is a round key at the bottom right of the thread.
-- Each message and each output line selects its own text. To copy all the output, select the copy button above the thread.
+- Each message and each output line selects its own text. To copy all the output, select the copy button in the toolbar of the chat or above the thread in the agents window.
 - Press Command-R to read the output again. Press Command-D to show the changes.
 - Return sends the text. Shift-Return adds a line break.
 - Before the first reply, the Mac asks for Touch ID or the Mac password. The unlock stays valid for 5 minutes, until the Mac sleeps or locks.
-- The **Agent needs input** and **Agent finished** switches are in **Settings > Features**. They apply to all computers. A click on a notification opens the agent in the agents window.
+- The **Agent needs input** and **Agent finished** switches are in **Settings > Features**. They apply to all computers. A click on a notification opens the agent in the agents window, also while the main window is closed.
 
 ### Dictate on a Mac
 
@@ -535,6 +598,39 @@ An app with session support shows no picker when the computer has an older `flux
 The live terminal works in each session.
 `fluxd` checks the herdr version of the live terminal with the default session, so the default session must run.
 
+## Use the herdr app
+
+The herdr app runs its agents in herdr-core, not in the herdr server, so the app and the terminal app do not share agents.
+`fluxd` follows herdr-core as one more session, named `herdr-app`, next to the herdr sessions.
+Pick `herdr-app` in the session picker to see the agents and terminals of the app.
+The agents of the machines that the app added, such as a server over SSH, are there too, with the machine name before the space.
+
+A terminal is an agent when its program reports its status to herdr-core, as Claude Code, Codex, and opencode do.
+The other terminals are terminals.
+
+In the herdr app, you can read an agent, answer it with text and keys, get its notifications, review its changes, and close it.
+Flux cannot start agents or open terminals in the app yet, and the live terminal does not work there.
+The output of an agent in the app has colors with a herdr-core that has the `ansi` option of `terminal.read`.
+With an older herdr-core, the output is plain text, and the choices of an opencode permission dialog take Keys instead of buttons.
+A terminal of the app takes text only with Enter after it.
+
+`fluxd` finds herdr-core at the first path that applies:
+
+1. `$HC_SOCKET`
+2. `$XDG_RUNTIME_DIR/herdr-core/default.sock`
+3. `/run/user/UID/herdr-core/default.sock`
+4. `~/.local/state/herdr-core/default/default.sock`
+
+`fluxd` checks that the socket belongs to the same user.
+herdr = true in config.toml turns the herdr app on and off with herdr.
+`flux-cli doctor` prints a line about herdr-core when it is installed:
+
+```text
+✓ herdr-core 0.1.15 runs, so the phone can show the agents of the herdr app
+```
+
+A herdr session named `herdr-app` is not followed, because the herdr app uses the name.
+
 ## Access and privacy
 
 The phone can read the agent list and the recent output of an agent pane.
@@ -575,6 +671,11 @@ When the input to a live terminal fails, it logs only the first error of the str
 Terminal output can contain secrets.
 The output and the live terminal go only to paired devices over the Flux TLS link.
 `fluxd` does not write the output or the frames of a live terminal to its log.
+
+The [home screen widget](#home-screen-widget) shows the task of each agent, and an agent can make its task from the conversation.
+The widget shows no output.
+It does not show on the lock screen, but each person who sees the home screen of the unlocked phone can read the tasks.
+When that is a problem, remove the widget.
 
 ## How it works
 
@@ -891,6 +992,7 @@ It also has `cli` with the `path`, the `version`, and the `error` of the version
 | Problem | Next step |
 | --- | --- |
 | The **Agents and terminals** tile is missing | Update `fluxd` and Flux for Android. The tile shows in **Control** only when the computer sends `flux.herdr`. |
+| The home screen widget shows old agents | Android stopped Flux, so the widget keeps its last state. Open Flux. The widget updates when the computer connects. |
 | The phone says that herdr is not running | Run `herdr status` and `flux-cli doctor` on the computer. |
 | The list is empty | Run `herdr agent list`. herdr must detect the agent in its pane. |
 | The phone says that the feature is off | Set `herdr = true` and reload `fluxd`. |

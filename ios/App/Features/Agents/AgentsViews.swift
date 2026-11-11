@@ -3,7 +3,7 @@ import SwiftUI
 
 @MainActor
 enum AgentsFeature {
-    /// A tap on an agent notification opens the agent in the Chat tab.
+    /// A tap on an agent notification opens the chat of the agent above Chats.
     static func didLaunch(model: AppModel) {
         model.core.plugin(HerdrPlugin.self)?.model.open = { [weak model] id, pane in
             model?.tab = .chat

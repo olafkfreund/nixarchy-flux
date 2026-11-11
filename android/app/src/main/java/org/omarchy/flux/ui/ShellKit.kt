@@ -2,8 +2,6 @@ package org.omarchy.flux.ui
 
 import android.content.Context
 import android.provider.Settings
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.FiniteAnimationSpec
@@ -14,7 +12,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -33,11 +30,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,18 +45,13 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.heading
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import org.omarchy.flux.core.DeviceUi
 import org.omarchy.flux.core.FluxCore
-import org.omarchy.flux.core.Plugins
-import org.omarchy.flux.core.Share
 import org.omarchy.flux.core.Target
-import org.omarchy.flux.core.target
 
 // ───────────────────────── Motion ─────────────────────────
 
@@ -329,36 +319,6 @@ fun TargetPickerDialog(picker: TargetPicker) {
         confirmButton = {},
         dismissButton = { FluxButton("Cancel", picker::dismiss, kind = ButtonKind.Text) },
     )
-}
-
-/** The most used actions on the computer in scope: send the clipboard, and send files. */
-class SendTools(
-    val sendClipboard: () -> Unit,
-    val sendFiles: () -> Unit,
-)
-
-@Composable
-fun rememberSendTools(devices: List<DeviceUi>, scope: String?, picker: TargetPicker): SendTools {
-    // The file picker is another activity, so the computer waits in the saved state.
-    var filesFor by rememberSaveable { mutableStateOf<String?>(null) }
-    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        val id = filesFor
-        filesFor = null
-        if (id != null && uris.isNotEmpty()) Share.sendFiles(FluxCore, id, uris)
-    }
-    val all by rememberUpdatedState(devices)
-    val inScope by rememberUpdatedState(scope)
-    return remember(picker, pick) {
-        SendTools(
-            sendClipboard = { picker.run(target(inScope, all), "Send the clipboard to") { Plugins.sendClipboard(FluxCore, it.id) } },
-            sendFiles = {
-                picker.run(target(inScope, all), "Send files to") {
-                    filesFor = it.id
-                    pick.launch(arrayOf("*/*"))
-                }
-            },
-        )
-    }
 }
 
 /**

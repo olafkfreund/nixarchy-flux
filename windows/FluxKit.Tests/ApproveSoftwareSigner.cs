@@ -4,12 +4,14 @@ using FluxKit;
 
 namespace FluxKit.Tests;
 
-// FOR TESTS ONLY. A signer with software P-256 keys in memory, in place of
-// the TPM and Windows Hello of the app. It is in the test project, so the app
-// never links it. The test sets what the user check answers.
+// FOR TESTS ONLY. A signer with software keys in memory, in place of Windows
+// Hello. It is in the test project, so the app never links it. The test sets
+// what the user check answers. It names the keys as the Windows app does, and
+// a new key with a name that exists takes the place of the old key, as with
+// KeyCredentialCreationOption.ReplaceExisting.
 public sealed class ApproveSoftwareSigner : IApproveSigner, IDisposable
 {
-    readonly ConcurrentDictionary<string, ECDsa> keys = new();
+    readonly ConcurrentDictionary<string, AsymmetricAlgorithm> keys = new();
     readonly ConcurrentQueue<string> deleted = new();
     int checks;
     int signatures;
@@ -28,7 +30,12 @@ public sealed class ApproveSoftwareSigner : IApproveSigner, IDisposable
     public TaskCompletionSource? Hold { get; set; }
 
     // Signs in the IEEE P1363 format, as a CNG key does without a conversion.
+    // An RSA key signs with PSS.
     public bool WrongFormat { get; set; }
+
+    // Makes RSA 2048 keys that sign with RSASSA-PKCS1-v1_5, as Windows Hello
+    // does, in place of P-256 keys.
+    public bool Rsa { get; set; }
 
     // The number of user checks that SignAsync asked.
     public int Checks => Volatile.Read(ref checks);
@@ -47,11 +54,15 @@ public sealed class ApproveSoftwareSigner : IApproveSigner, IDisposable
 
     public Task<ApproveUserCheck> CheckUserAsync(CancellationToken cancel) => Task.FromResult(UserCheck);
 
-    public Task<ApproveNewKey> CreateKeyAsync(string computerId, CancellationToken cancel)
+    public Task<ApproveNewKey> CreateKeyAsync(string computerId, string? currentKey, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
-        var name = $"flux-approve-{computerId}-{Guid.NewGuid():N}";
-        var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var name = ApproveKeyNames.Next(computerId, currentKey);
+        AsymmetricAlgorithm key = Rsa ? RSA.Create(2048) : ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        if (keys.TryRemove(name, out var old))
+        {
+            old.Dispose();
+        }
         keys[name] = key;
         return Task.FromResult(new ApproveNewKey(name, key.ExportSubjectPublicKeyInfo()));
     }
@@ -74,8 +85,13 @@ public sealed class ApproveSoftwareSigner : IApproveSigner, IDisposable
             throw new ApproveKeyException(ApproveKeyError.KeyInvalid, "the key does not exist");
         }
         Interlocked.Increment(ref signatures);
-        return key.SignData(message, HashAlgorithmName.SHA256,
-            WrongFormat ? DSASignatureFormat.IeeeP1363FixedFieldConcatenation : DSASignatureFormat.Rfc3279DerSequence);
+        return key switch
+        {
+            RSA rsa => rsa.SignData(message, HashAlgorithmName.SHA256, WrongFormat ? RSASignaturePadding.Pss : RSASignaturePadding.Pkcs1),
+            ECDsa ec => ec.SignData(message, HashAlgorithmName.SHA256,
+                WrongFormat ? DSASignatureFormat.IeeeP1363FixedFieldConcatenation : DSASignatureFormat.Rfc3279DerSequence),
+            _ => throw new ApproveKeyException(ApproveKeyError.Failed, "the key has no known type"),
+        };
     }
 
     public void DeleteKey(string keyName)
@@ -87,7 +103,7 @@ public sealed class ApproveSoftwareSigner : IApproveSigner, IDisposable
         }
     }
 
-    // Forgets a key without FluxKit, as a TPM that the user cleared.
+    // Forgets a key without FluxKit, as Windows Hello after a reset of the PIN.
     public void Lose(string keyName)
     {
         if (keys.TryRemove(keyName, out var key))

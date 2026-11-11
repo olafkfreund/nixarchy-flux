@@ -158,6 +158,16 @@ object DebugDemo {
                 remoteInput = true,
                 desktopSupported = true,
                 remoteDesktop = true,
+                extendSupported = true,
+                outputsSupported = true,
+                speakerSupported = true,
+                outputs = AudioOutputs(
+                    listOf(
+                        AudioOutput("alsa_output.speakers", "Laptop Speakers", 72, muted = false, isDefault = true),
+                        AudioOutput("alsa_output.hdmi", "HDMI Monitor", 100, muted = false, isDefault = false),
+                        AudioOutput("bluez_output.headphones", "Bluetooth Headphones", 45, muted = true, isDefault = false),
+                    ),
+                ),
                 herdr = withSessions(HerdrState(
                     enabled = true,
                     running = true,
@@ -188,7 +198,8 @@ object DebugDemo {
                     lines = termLines(agentOutput ?: demoOutput),
                 ),
             ),
-            device(OFFLINE, "omarchy-desk", "desktop", "192.168.2.40", paired = true, online = false),
+            // The sample desk computer was last seen at the last 09:12, today or yesterday.
+            device(OFFLINE, "omarchy-desk", "desktop", "192.168.2.40", paired = true, online = false).copy(lastSeen = lastAt(9, 12)),
             device(NEW, "framework-13", "laptop", "192.168.2.77", paired = false, online = true),
         )
     }
@@ -228,6 +239,18 @@ object DebugDemo {
             .filter { Browse.matches(it.name, query) }
             .sortedBy { it.path.count { c -> c == '/' } }
         return BrowseSearch(0, query.trim(), path, loading = false, results = results)
+    }
+
+    /** The last time [hour]:[minute], today or yesterday, in milliseconds since the epoch. */
+    private fun lastAt(hour: Int, minute: Int): Long {
+        val c = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, hour)
+            set(java.util.Calendar.MINUTE, minute)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        if (c.timeInMillis > System.currentTimeMillis()) c.add(java.util.Calendar.DAY_OF_YEAR, -1)
+        return c.timeInMillis
     }
 
     private fun device(id: String, name: String, type: String, ip: String, paired: Boolean, online: Boolean) = DeviceUi(

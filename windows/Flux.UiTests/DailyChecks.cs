@@ -28,13 +28,16 @@ public static class DailyChecks
         share.Model.Start(new FileTransfer { DeviceId = paired.Id, Name = "report.pdf", Incoming = true, Size = 2000, Bytes = 500 });
         share.Model.Start(new FileTransfer { DeviceId = paired.Id, Name = "photo.png", Incoming = false, Size = 1000, Bytes = 1000, State = TransferState.Done, Ended = DateTimeOffset.Now });
         Pump();
-        model.Go(Destination.Chat);
+        model.OpenChat(new ChatKey.Computer(paired.Id));
         Pump();
         h.Check(Shows(window, "copied text"), "the chat shows the clip from the computer");
-        // With 2 paired computers and no scope, the lines name the computer.
-        h.Check(Shows(window, "https://omarchy.org") && Shows(window, "Link · opened on omarchy-xps"), "the chat shows the sent link");
+        h.Check(Shows(window, "https://omarchy.org") && Shows(window, "Link · opened in the browser"), "the chat shows the sent link");
         h.Check(Shows(window, "report.pdf") && Shows(window, "Receiving"), "the chat shows the file that comes in");
-        h.Check(Shows(window, "photo.png") && Shows(window, "Sent to omarchy-xps"), "the chat shows the sent file");
+        h.Check(Shows(window, "photo.png") && Shows(window, "Sent · "), "the chat shows the sent file");
+        h.Check(Shows(window, "connected · 80%, charging"), "the top bar of the chat shows the battery");
+        h.Check(Texts(window.Chats).Any(t => t.StartsWith("You: ", StringComparison.Ordinal) || t.StartsWith("Receiving ", StringComparison.Ordinal) ||
+                                         t.StartsWith("Clipboard: ", StringComparison.Ordinal)),
+            "the list shows the newest entry of the computer");
 
         model.Go(Destination.Control);
         Pump();

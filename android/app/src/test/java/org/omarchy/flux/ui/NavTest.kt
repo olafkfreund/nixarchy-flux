@@ -54,6 +54,13 @@ class NavTest {
     }
 
     @Test
+    fun theChatOfAComputerOpensAboveTheListOfChats() {
+        val nav = Nav.chat("pc")
+        assertEquals(Dest.Detail(Route("pc", CHAT_PAGE), 1, Tab.Chat), nav.dest)
+        assertEquals(Nav(Tab.Chat), nav.back())
+    }
+
+    @Test
     fun aNotificationOpensTheAgentAboveTheChat() {
         val nav = Nav.agent("pc", "w2:p1")
         assertEquals(Dest.Detail(Route("pc", "${AGENT_PAGE}w2:p1"), 1, Tab.Chat), nav.dest)
@@ -76,9 +83,12 @@ class NavTest {
         assertEquals(Nav(Tab.Chat, listOf(Route("pc", "browse"))) to null, Nav.debug("browse", "pc"))
         assertEquals(Nav(Tab.Control, listOf(Route("pc", "media"))) to null, Nav.debug("media", "pc"))
         assertEquals(
-            Nav(Tab.Control, listOf(Route("pc", AGENTS_PAGE), Route("pc", "${AGENT_PAGE}w2:p1"))) to null,
+            "an agent is a chat, so Back goes to the list of chats",
+            Nav(Tab.Chat, listOf(Route("pc", "${AGENT_PAGE}w2:p1"))) to null,
             Nav.debug("${AGENT_PAGE}w2:p1", "pc"),
         )
+        assertEquals(Nav.chat("pc") to null, Nav.debug("thread", "pc"))
+        assertEquals(Nav(Tab.Chat, listOf(Route("pc", CHAT_TRAY_PAGE))) to null, Nav.debug("tray", "pc"))
         assertEquals(
             Nav(Tab.Control, listOf(Route("pc", AGENTS_PAGE), Route("pc", NEW_PANE_PAGE))) to null,
             Nav.debug(NEW_PANE_PAGE, "pc"),

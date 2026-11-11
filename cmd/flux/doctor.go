@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"flux/internal/config"
+	"flux/internal/hc"
 	"flux/internal/herdr"
 	"golang.org/x/sys/unix"
 )
@@ -65,7 +66,10 @@ func doctor() {
 	check(active("avahi-daemon"), "avahi-daemon runs, so fluxd can find phones with mDNS",
 		"avahi-daemon is not running, so fluxd cannot find phones. Run: sudo systemctl enable --now avahi-daemon")
 
-	conf, _ := os.ReadFile(avahiConf)
+	conf, cerr := os.ReadFile(avahiConf)
+	if cerr != nil && !errors.Is(cerr, fs.ErrNotExist) {
+		fmt.Printf("? Cannot read %s, so the ZeroTier check below assumes that Avahi uses every interface\n", avahiConf)
+	}
 	checkZeroTier(active("zerotier-one"), zerotierIfaces(), string(conf), os.Stdout, check)
 
 	// Extra addresses reach a paired device outside the local network, for
@@ -117,6 +121,14 @@ func doctor() {
 	_, pwErr := exec.LookPath("pw-cat")
 	check(pwErr == nil, "pw-cat is installed, so the phone can be a microphone",
 		"The phone as microphone needs pw-cat. Install it with: sudo pacman -S pipewire")
+	// The phone as speaker needs pw-record. The audio outputs on the phone
+	// and the mute of the phone speaker need pactl.
+	_, recErr := exec.LookPath("pw-record")
+	check(recErr == nil, "pw-record is installed, so the phone can play the audio of this computer",
+		"The phone as speaker needs pw-record. Install it with: sudo pacman -S pipewire")
+	_, pactlErr := exec.LookPath("pactl")
+	check(pactlErr == nil, "pactl is installed, so the phone can select the audio output of this computer",
+		"The audio outputs on the phone need pactl. Install it with: sudo pacman -S libpulse")
 	_, mpvErr := exec.LookPath("mpv")
 	_, ffplayErr := exec.LookPath("ffplay")
 	check(mpvErr == nil || ffplayErr == nil, "mpv or ffplay is installed, so the phone screen can show here",
@@ -132,7 +144,9 @@ func doctor() {
 	check(gsrErr == nil || wfErr == nil, "gpu-screen-recorder is installed, so the phone can show this screen",
 		"The remote desktop needs gpu-screen-recorder. Install it with: sudo pacman -S gpu-screen-recorder")
 	if wfErr == nil {
-		fmt.Println("✓ wf-recorder is installed, so the remote desktop also works on a GPU that gpu-screen-recorder does not support")
+		fmt.Println("✓ wf-recorder is installed, so a phone or a tablet can extend this screen, and the remote desktop also works on a GPU that gpu-screen-recorder does not support")
+	} else {
+		fmt.Println("- To extend this screen to a phone or a tablet, install wf-recorder: sudo pacman -S wf-recorder")
 	}
 	if gsrErr == nil {
 		kms := filepath.Join(filepath.Dir(gsr), "gsr-kms-server")
@@ -165,6 +179,22 @@ func doctor() {
 				}
 				checkLiveTerminal(pong.Version, fluxd, os.Stdout, check)
 			}
+		}
+	}
+
+	// The herdr app runs its agents in herdr-core, beside herdr. It is
+	// optional too.
+	if _, herr := exec.LookPath("herdr-core"); herr == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		path := hc.SocketPath()
+		h, perr := hc.Hi(ctx, path)
+		cancel()
+		switch {
+		case herdrDown(perr):
+			fmt.Println("- The herdr app does not run. Start it to show its agents on the phone")
+		default:
+			check(perr == nil, fmt.Sprintf("herdr-core %s runs, so the phone can show the agents of the herdr app", h.Version),
+				safe(fmt.Sprintf("The herdr-core socket %s does not work: %v", path, perr)))
 		}
 	}
 

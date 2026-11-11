@@ -9,7 +9,7 @@ So Flux can find and pair a Mac or a Windows computer through ZeroTier.
 
 On a phone, ZeroTier One runs as a VPN, and the VPN carries no mDNS.
 So Flux does not find a phone through ZeroTier.
-Pair the phone on the local network, and add its ZeroTier address as an extra address.
+Pair the phone on the local network, or by its ZeroTier address with `flux-cli pair --address 10.147.17.30` ([pair by address](cli.md#pair-by-address)), and add its ZeroTier address as an extra address.
 
 ```text
 fluxd ─┬─ last address, 192.168.1.20 ─────────────── phone on the home Wi-Fi
@@ -23,7 +23,7 @@ The link still uses the pinned TLS certificates from pairing.
 
 - ZeroTier runs on the desktop and on the device, and both joined the same network.
 - The network gives each member an IPv4 address. Flux finds devices over IPv4 only.
-- A phone is paired with the desktop. Pair it on the local network first.
+- A phone is paired with the desktop, on the local network or with `flux-cli pair --address`.
 - For discovery of a computer, the network allows broadcasts, and Avahi uses the ZeroTier interface. Both are the defaults.
 
 ## Set up the desktop

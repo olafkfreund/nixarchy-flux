@@ -27,13 +27,13 @@ public class ApprovePluginLogicTests
         Assert.Equal(ApproveTexts.AnotherOpen, Refusal(Request(), busy: true));
     }
 
-    // Without a TPM, no request opens the prompt, and the computer learns why
-    // at once. Flux never makes a key outside the TPM.
+    // Without Windows Hello, no request opens the prompt, and the computer
+    // learns why at once. Flux never makes a key outside Windows Hello.
     [Fact]
     public void NoSecureHardwareRefusesEveryRequest()
     {
         Assert.Equal(ApproveTexts.NoSecureHardware, Refusal(Request(ApproveKind.Enroll), hasKey: false, secureHardware: false));
-        Assert.Equal(ApproveTexts.NoSecureHardware, Refusal(Request(), hasKey: false, secureHardware: false)); // the missing TPM explains the missing key
+        Assert.Equal(ApproveTexts.NoSecureHardware, Refusal(Request(), hasKey: false, secureHardware: false)); // the missing Windows Hello explains the missing key
         Assert.Equal("The request is not valid", Refusal(null, secureHardware: false));
     }
 
@@ -121,7 +121,7 @@ public class ApprovePluginLogicTests
     {
         Assert.Equal(ApproveAvailability.Ready, ApprovePlugin.Availability(true, null));
         Assert.Equal(new ApproveAvailability(ApproveAvailabilityKind.NoSecureHardware, ApproveTexts.NoSecureHardware), ApprovePlugin.Availability(false, null));
-        // No setting fixes a missing TPM, so it comes first.
+        // Without Windows Hello, no other check matters, so it comes first.
         Assert.Equal(ApproveAvailabilityKind.NoSecureHardware, ApprovePlugin.Availability(false, ApproveTexts.NotSetUp).Kind);
         Assert.Equal(new ApproveAvailability(ApproveAvailabilityKind.UserCheck, ApproveTexts.NotSetUp), ApprovePlugin.Availability(true, ApproveTexts.NotSetUp));
     }

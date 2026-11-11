@@ -177,11 +177,17 @@
           "xunit.extensibility.core": "[2.9.3]"
         }
       },
+      "ZXing.Net": {
+        "type": "Transitive",
+        "resolved": "0.16.11",
+        "contentHash": "OZfAVu88hl87BffQ+rlWCj/vLvAhhCK4QnFaoveeF/MY8SjHNSYBQ3qyUEWlPKNgBQGh1syXhCDg10vUnCsqkg=="
+      },
       "fluxkit": {
         "type": "Project",
         "dependencies": {
           "Makaretu.Dns.Multicast": "[0.27.0, )",
-          "SSH.NET": "[2026.0.0, )"
+          "SSH.NET": "[2026.0.0, )",
+          "ZXing.Net": "[0.16.11, )"
         }
       }
     }

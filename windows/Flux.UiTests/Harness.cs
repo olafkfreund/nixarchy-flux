@@ -10,7 +10,7 @@ using FluxKit;
 // main window, and 4 sample computers. A feature adds a file with a static
 // class whose name ends in "Checks" and that has a method
 // "public static void Run(Harness h)". Program runs each such class. A check
-// class leaves the scope empty and the window on Chat when it ends.
+// class leaves the scope empty and the window on Chats when it ends.
 public sealed class Harness : IDisposable
 {
     readonly string data = Path.Combine(Path.GetTempPath(), "flux-ui-" + Guid.NewGuid().ToString("N"));
@@ -43,6 +43,14 @@ public sealed class Harness : IDisposable
 
     public Harness()
     {
+        // The errors of the app show in the log of the runner.
+        FluxLog.Sink = (level, category, message) =>
+        {
+            if (level == LogLevel.Error)
+            {
+                Console.WriteLine($"LOG {category}: {message}");
+            }
+        };
         var host = new FluxHost
         {
             DeviceName = () => "Test PC",
@@ -141,6 +149,16 @@ public sealed class Harness : IDisposable
     public static void Click(DependencyObject root, string name)
     {
         foreach (var b in Buttons(root).Where(b => System.Windows.Automation.AutomationProperties.GetName(b) == name))
+        {
+            b.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        }
+        Pump();
+    }
+
+    // Clicks the buttons whose name for a screen reader starts with the text.
+    public static void ClickStarting(DependencyObject root, string start)
+    {
+        foreach (var b in Buttons(root).Where(b => System.Windows.Automation.AutomationProperties.GetName(b).StartsWith(start, StringComparison.Ordinal)))
         {
             b.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
         }

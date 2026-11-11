@@ -25,12 +25,12 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,6 +58,7 @@ import org.omarchy.flux.core.StreamKind
 import org.omarchy.flux.core.StreamRequest
 import org.omarchy.flux.core.StreamRequests
 import org.omarchy.flux.mic.MicSession
+import org.omarchy.flux.speaker.SpeakerSession
 import org.omarchy.flux.service.FluxService
 import org.omarchy.flux.webcam.WebcamSession
 
@@ -65,8 +66,11 @@ class MainActivity : ComponentActivity() {
     /** Debug builds only: the page that the `flux.debug.page` extra asks for. */
     val debugPage = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
 
-    /** The device ID and the pane of the agent that a notification opens. */
+    /** The device ID and the pane of the agent that a notification or the agents widget opens. */
     val openAgent = kotlinx.coroutines.flow.MutableStateFlow<Pair<String, String>?>(null)
+
+    /** True after a tap on the header of the agents widget, until the root opens Chats. */
+    val openChats = kotlinx.coroutines.flow.MutableStateFlow(false)
 
     /** The page of a stream that the Start action of a stream request notification opens. */
     val openStream = kotlinx.coroutines.flow.MutableStateFlow<StreamOpen?>(null)
@@ -101,6 +105,8 @@ class MainActivity : ComponentActivity() {
         debugShowWhenLocked(intent)
         takeOpenAgent(intent)
         takeOpenStream(intent)
+        // A recreation keeps the screen that the user opened after the tap.
+        if (savedInstanceState == null) takeOpenChats(intent)
         // The system splash screen shows the Flux mark until the first frame. The app plays no start animation.
         setContent { TiledTheme { FluxRoot(this) } }
     }
@@ -155,6 +161,14 @@ class MainActivity : ComponentActivity() {
         debugShowWhenLocked(intent)
         takeOpenAgent(intent)
         takeOpenStream(intent)
+        takeOpenChats(intent)
+    }
+
+    /** Reads a tap on the header of the agents widget. The action goes, so that a new activity does not use it again. */
+    private fun takeOpenChats(intent: android.content.Intent?) {
+        if (intent?.action != ACTION_OPEN_CHATS) return
+        intent.action = null
+        openChats.value = true
     }
 
     /**
@@ -209,8 +223,11 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        /** The intent action of an agent notification. */
+        /** The intent action of an agent notification and of an agent in the agents widget. */
         const val ACTION_OPEN_AGENT = "org.omarchy.flux.OPEN_AGENT"
+
+        /** The intent action of the header of the agents widget: it opens Chats. */
+        const val ACTION_OPEN_CHATS = "org.omarchy.flux.OPEN_CHATS"
 
         /** The device ID of the agent that a notification opens. */
         const val EXTRA_DEVICE = "flux.open.device"
@@ -329,8 +346,8 @@ private val NavSaver = listSaver<Nav, String>(save = { it.save() }, restore = { 
 /** A pairing that this phone starts. The dialog shows the key before the request goes out. */
 private data class Outgoing(val deviceId: String, val timestamp: Long, val key: String, val sent: Boolean = false)
 
-/** The debug pages that need no computer: the destinations, the sync switches, and About Flux. */
-private val DestinationPages = setOf("chat", "inbox", "send", "control", "computers", "devices", SYNC_PAGE, ABOUT_PAGE)
+/** The debug pages that need no computer: the destinations, the sync switches, the SSH key, and About Flux. */
+private val DestinationPages = setOf("chat", "inbox", "send", "control", "computers", "devices", SYNC_PAGE, ABOUT_PAGE, SSH_PAGE)
 
 /** How long the chat shows that a new computer is paired, in milliseconds while the app is in the front. */
 private const val WELCOME_MS = 6_000L
@@ -368,7 +385,7 @@ fun FluxRoot(activity: MainActivity) {
     val notify by activity.notifyAsk.collectAsStateWithLifecycle()
     val wide = rememberWideWindow()
 
-    // A new pairing opens the chat of the new computer, with a short success state on top.
+    // A new pairing opens the chat of the new computer, with a short success state in it.
     // The state of the computer can come after the event, so the effect waits for it.
     val newPairing by FluxCore.newPairing.collectAsStateWithLifecycle()
     var welcome by rememberSaveable { mutableStateOf<String?>(null) }
@@ -378,7 +395,7 @@ fun FluxRoot(activity: MainActivity) {
         FluxCore.takeNewPairing(id)
         welcome = id
         scope = id
-        nav = Nav()
+        nav = Nav.chat(id)
     }
     // After the first pairing, the success state tells why Flux needs notifications.
     // Android asks 1 second later, so that the user reads the reason before the dialog covers the screen.
@@ -433,6 +450,12 @@ fun FluxRoot(activity: MainActivity) {
             activity.debugPage.value = null
             return@LaunchedEffect
         }
+        // "widget" asks the launcher to add the agents widget to the home screen.
+        if (request == "widget") {
+            if (!org.omarchy.flux.widget.AgentsWidgets.requestPin(activity)) FluxCore.toast("This launcher cannot add the widget from the app")
+            activity.debugPage.value = null
+            return@LaunchedEffect
+        }
         if (request == "empty") {
             org.omarchy.flux.core.DebugDemo.on = false
             FluxCore.publish()
@@ -476,13 +499,21 @@ fun FluxRoot(activity: MainActivity) {
         activity.debugPage.value = null
     }
 
-    // A tap on an agent notification opens the screen of the agent. Back goes to the chat.
+    // A tap on an agent notification or on an agent in the widget opens the screen of the agent. Back goes to the chat.
     val openAgent by activity.openAgent.collectAsStateWithLifecycle()
     LaunchedEffect(openAgent, state.devices.size) {
         val (id, pane) = openAgent ?: return@LaunchedEffect
         if (state.devices.none { it.id == id && it.paired }) return@LaunchedEffect
         nav = Nav.agent(id, pane)
         activity.openAgent.value = null
+    }
+
+    // A tap on the header of the agents widget opens Chats.
+    val openChats by activity.openChats.collectAsStateWithLifecycle()
+    LaunchedEffect(openChats) {
+        if (!openChats) return@LaunchedEffect
+        nav = Nav()
+        activity.openChats.value = false
     }
 
     // A tap on the Start action of a stream request notification opens the page of the stream above the current screen.
@@ -590,7 +621,8 @@ private fun StreamPrompt(r: StreamRequest, paired: Boolean, onOpen: () -> Unit) 
     val context = LocalContext.current
     val webcam by WebcamSession.status.collectAsStateWithLifecycle()
     val mic by MicSession.status.collectAsStateWithLifecycle()
-    val running = remember(r, webcam, mic) { StreamRequests.running(r.deviceId, r.kind) }
+    val speaker by SpeakerSession.status.collectAsStateWithLifecycle()
+    val running = remember(r, webcam, mic, speaker) { StreamRequests.running(r.deviceId, r.kind) }
     LaunchedEffect(running, paired) {
         if (running || !paired) StreamRequests.dismiss(context, r.deviceId, r.kind)
     }

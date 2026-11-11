@@ -15,13 +15,37 @@ public static class ApproveExpect
     public static byte[] Enrollment(string host, string user, byte[] spki, long time, string nonce) =>
         Encoding.UTF8.GetBytes($"flux-approve-enroll-v1\nhost={host}\nuser={user}\nkey={Convert.ToHexStringLower(SHA256.HashData(spki))}\ntime={time}\nnonce={nonce}\n");
 
-    // ecdsa.VerifyASN1 over the SHA-256 of the message, with a P-256 key.
+    // ecdsa.VerifyASN1 over the SHA-256 of the message with a P-256 key, or
+    // rsa.VerifyPKCS1v15 with an RSA 2048 key of Windows Hello.
     public static bool Verify(byte[] spki, byte[] message, byte[] signature)
     {
+        if (IsRsa(spki))
+        {
+            using var rsa = RSA.Create();
+            rsa.ImportSubjectPublicKeyInfo(spki, out _);
+            Assert.Equal(2048, rsa.KeySize);
+            Assert.Equal(new byte[] { 1, 0, 1 }, rsa.ExportParameters(false).Exponent);
+            return rsa.VerifyData(message, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        }
         using var key = ECDsa.Create();
         key.ImportSubjectPublicKeyInfo(spki, out _);
         Assert.Equal(256, key.KeySize);
         return key.VerifyData(message, signature, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
+    }
+
+    // True for a SubjectPublicKeyInfo of an RSA key.
+    public static bool IsRsa(byte[] spki)
+    {
+        using var rsa = RSA.Create();
+        try
+        {
+            rsa.ImportSubjectPublicKeyInfo(spki, out _);
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
     }
 }
 
@@ -111,7 +135,7 @@ public sealed class ApproveRig : IDisposable
 }
 
 // The approve plugin against a computer on loopback, with a software key in
-// place of the TPM. Each test has its own block of 40 ports from 36000.
+// place of Windows Hello. Each test has its own block of 40 ports from 36000.
 public class ApprovePluginTests
 {
     // An enrollment makes a key, proves it with the enrollment message, and
@@ -204,7 +228,7 @@ public class ApprovePluginTests
         Assert.Empty(rig.Answers("e1"));
     }
 
-    // Without a TPM, Flux makes no key and refuses each request.
+    // Without Windows Hello, Flux makes no key and refuses each request.
     [Fact]
     public async Task NoSecureHardwareRefusesEachRequest()
     {
@@ -452,6 +476,42 @@ public class ApprovePluginTests
         rig.T.Core.Host.Notifier.Activate(note.Category, "approve", note.UserInfo);
         Assert.NotNull((await rig.AnswerAsync("r2")).String("signature"));
         Assert.Equal(2, rig.Signer.Checks);
+    }
+
+    // Windows Hello makes RSA 2048 keys that sign with RSASSA-PKCS1-v1_5.
+    // The keys take the 2 names of the computer in turn, and the commit of a
+    // new key deletes the old key. A signature with PSS does not go out.
+    [Fact]
+    public async Task EnrollsAndApprovesWithAWindowsHelloKey()
+    {
+        using var rig = await ApproveRig.StartAsync(36710);
+        rig.Signer.Rsa = true;
+        var id = rig.Computer.Id;
+        var first = await rig.EnrollAsync("e1");
+        Assert.True(ApproveExpect.IsRsa(first));
+        Assert.Equal([ApproveKeyNames.First(id)], rig.Signer.Names);
+
+        var request = await rig.AskAsync("r1");
+        rig.Ui(rig.Plugin.Approve);
+        var signature = Convert.FromBase64String((await rig.AnswerAsync("r1")).String("signature")!);
+        Assert.Equal(256, signature.Length);
+        Assert.True(ApproveExpect.Verify(first, ApproveExpect.Approval("omarchy-xps", "alice", "sudo", "/dev/pts/3", "", request.Time, ApproveMessageTests.Nonce), signature));
+        await Wait.UntilAsync(() => rig.Outcome("r1") == ApproveOutcome.Approved, "the approved outcome");
+
+        var second = await rig.EnrollAsync("e2");
+        Assert.NotEqual(first, second);
+        await Wait.UntilAsync(() => rig.Signer.Deleted.Contains(ApproveKeyNames.First(id)), "the deleted first key");
+        Assert.Equal([ApproveKeyNames.Second(id)], rig.Signer.Names);
+        await rig.EnrollAsync("e3");
+        await Wait.UntilAsync(() => rig.Signer.Deleted.Contains(ApproveKeyNames.Second(id)), "the deleted second key");
+        Assert.Equal([ApproveKeyNames.First(id)], rig.Signer.Names);
+
+        rig.Signer.WrongFormat = true;
+        await rig.AskAsync("r2");
+        rig.Ui(rig.Plugin.Approve);
+        var answer = await rig.AnswerAsync("r2");
+        Assert.Equal(ApproveTexts.UseFailed, answer.String("error"));
+        Assert.Null(answer.String("signature"));
     }
 
     // A link that only drops leaves the request open, because the computer
