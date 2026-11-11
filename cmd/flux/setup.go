@@ -22,15 +22,19 @@ import (
 // system part that is missing and prints the command that adds it. It
 // returns an error when a step fails, so that the exit code is 1.
 func setup(args []string) error {
-	dry, noPlugin := false, false
+	dry, noPlugin, browser := false, false, false
 	for _, a := range args {
 		switch a {
 		case "--dry-run", "-n":
 			dry = true
 		case "--no-plugin":
 			noPlugin = true
+		case "--no-browser":
+			browser = false
+		case "--browser":
+			browser = true
 		default:
-			return fmt.Errorf("unknown option %q. Use --dry-run or --no-plugin", a)
+			return fmt.Errorf("unknown option %q. Use --dry-run, --no-plugin, --browser, or --no-browser", a)
 		}
 	}
 	run := func(what string, name string, args ...string) error {
@@ -63,7 +67,24 @@ func setup(args []string) error {
 		}
 	}
 
-	fmt.Println("3. System parts")
+	fmt.Println("3. The browser extension")
+	switch {
+	case !browser:
+		fmt.Println("  To send links from a browser, run: flux-cli browser install")
+	default:
+		// The browser step takes its own flags, so it gets only what it
+		// understands.
+		var browserArgs []string
+		if dry {
+			browserArgs = []string{"--dry-run"}
+		}
+		if err := browserInstall(browserArgs); err != nil {
+			fmt.Println("  ✗", err)
+			failed++
+		}
+	}
+
+	fmt.Println("4. System parts")
 	setupSystemReport()
 	switch failed {
 	case 0:
@@ -180,6 +201,10 @@ func removeUserUnit(path string, dry bool, run func(string, string, ...string) e
 }
 
 func setupService(dry bool, run func(string, string, ...string) error) error {
+	if nixBuild() {
+		fmt.Println("  - fluxd.service is managed by the NixOS or Home Manager module (services.flux)")
+		return nil
+	}
 	path := userUnit()
 	restart := false
 	if _, err := os.Stat(systemUnit); err == nil {
@@ -363,6 +388,11 @@ func setupPlugin(dry bool, run func(string, string, ...string) error) error {
 // setupSystemReport checks the parts that need root and prints the command
 // that adds them.
 func setupSystemReport() {
+	if nixBuild() {
+		fmt.Println("  - To use the phone as a webcam, set services.flux.webcam.enable in NixOS")
+		fmt.Println("  - To use phone approval, set services.flux.approve.services in NixOS")
+		return
+	}
 	script := "/usr/share/flux/post-install.sh"
 	if _, err := os.Stat(script); err != nil {
 		script = "dist/post-install.sh (from the checkout, after sudo make install)"

@@ -54,11 +54,18 @@ controls, as in [access and security](#access-and-security).
 
 - Tailscale runs on the desktop and on the phone, in the same tailnet.
   The built-in node above needs Tailscale only on the desktop.
-- The phone is paired with the desktop. Pair it on the local network first.
+- The phone is paired with the desktop. Pair it on the local network, or pair it by its Tailscale address with `flux-cli pair --address`.
 - Flux for Android runs on the phone.
 
 Tailscale does not carry the mDNS and UDP broadcasts that Flux uses for discovery.
-So Flux cannot find or pair a device through Tailscale.
+So Flux cannot find a device through Tailscale.
+To pair through Tailscale, open Flux on the phone, then give the Tailscale address of the phone:
+
+```sh
+flux-cli pair --address 100.101.102.103
+```
+
+See [pair by address](cli.md#pair-by-address).
 
 ## Add the phone
 
@@ -151,6 +158,7 @@ Scripts can change the list with the `addresses.add` and `addresses.remove` [IPC
 
 An extra address can be any host name or IP address that routes to the phone.
 Use the same command for another VPN, such as WireGuard.
+For ZeroTier, see [Connect through ZeroTier](zerotier.md).
 The desktop must be able to open TCP connections to the phone on ports 12070 to 12108.
 
 ## Access and security

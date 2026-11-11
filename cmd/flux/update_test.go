@@ -12,6 +12,26 @@ import (
 	"flux/internal/release"
 )
 
+func TestNixUpdate(t *testing.T) {
+	packager = "nix"
+	t.Cleanup(func() { packager = "" })
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"install", nil, "installed by Nix"},
+		{"unknown option", []string{"--unknown"}, "unknown option"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := update(tc.args, "")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("update(%v): %v, want %q", tc.args, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestPackageAsset(t *testing.T) {
 	r := release.Release{Tag: "v0.7.0", Assets: []release.Asset{
 		{Name: "omarchy-flux-debug-0.7.0-1-x86_64.pkg.tar.zst", URL: "debug"},

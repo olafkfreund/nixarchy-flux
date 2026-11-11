@@ -56,16 +56,23 @@ const val AGENTS_PAGE = "agents"
 /** The Omarchy panel: workspaces, windows, and key bindings. */
 const val OMARCHY_PAGE = "omarchy"
 
+/** The extended screen: the computer adds a monitor that this phone shows. */
+const val EXTEND_PAGE = "extend"
+
 /** The webcam of 1 computer, in the Stream band of Control. */
 const val WEBCAM_PAGE = "webcam"
 
 /** The mic of 1 computer, in the Stream band of Control. */
 const val MIC_PAGE = "mic"
 
+/** The media of 1 computer, with its audio outputs and Play on phone. */
+const val MEDIA_PAGE = "media"
+
 /** The page of a stream of [kind]. A stream request opens it. */
 fun streamPage(kind: StreamKind): String = when (kind) {
     StreamKind.Webcam -> WEBCAM_PAGE
     StreamKind.Mic -> MIC_PAGE
+    StreamKind.Speaker -> MEDIA_PAGE
 }
 
 /** Debug builds only: the page prefix that shows the prompt of a stream request, such as ask:webcam. */
@@ -79,6 +86,9 @@ const val SYNC_PAGE = "sync"
 
 /** The version and the project links. They belong to the app, so the page has no computer. */
 const val ABOUT_PAGE = "about"
+
+/** The SSH key of this phone. It applies to every computer, so the page has no computer. */
+const val SSH_PAGE = "ssh"
 
 /**
  * The navigation state: the destination [tab] and the screens above it.
@@ -147,7 +157,7 @@ data class Nav(val tab: Tab = Tab.Chat, val stack: List<Route> = emptyList()) {
             "tray" -> Nav(Tab.Chat, listOf(Route(deviceId, CHAT_TRAY_PAGE))) to null
             "control" -> Nav(Tab.Control) to null
             "computers", "devices", "pair", "unpair" -> Nav(Tab.Computers) to null
-            SYNC_PAGE, ABOUT_PAGE -> Nav(Tab.Computers, listOf(Route(null, page))) to null
+            SYNC_PAGE, ABOUT_PAGE, SSH_PAGE -> Nav(Tab.Computers, listOf(Route(null, page))) to null
             // The old computer page is now the Control destination of 1 computer.
             "home" -> Nav(Tab.Control) to deviceId
             // The prompt of a stream request shows over the chat. The notification shows in the shade.

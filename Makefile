@@ -11,6 +11,10 @@ GUI_BUILD  := gui/app/build
 PLUGIN_DIR ?= $(HOME)/.config/omarchy/plugins/flux
 PLUGIN_FILES := manifest.json Service.qml Backend.qml BarWidget.qml Panel.qml
 
+# EXT_VERSION is the Flux version in the form that a browser wants for the
+# version of an extension: numbers and nothing else.
+EXT_VERSION := $(shell echo '$(VERSION)' | sed -E 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/; t; s/.*/0.0.0/')
+
 # copy-plugin DEST copies the plugin in the layout that `omarchy plugin
 # validate` accepts: real files, the shared views in Flux/, and no tools/.
 define copy-plugin
@@ -20,13 +24,24 @@ define copy-plugin
 		while read -r f; do install -Dm644 "$$f" "$(1)/Flux/$$f"; done
 endef
 
-.PHONY: build build-go build-gui test test-gui vet install install-user install-plugin uninstall uninstall-user uninstall-plugin dev open snapshot android macos test-macos install-macos ios ios-release test-ios clean
+# install-extension DEST copies the unpacked extension that a browser loads
+# from a folder. The manifests carry the version of the build, so the
+# extension shows the same version as the binaries.
+define install-extension
+	cd browser/extension && find . -type f ! -name 'manifest*.json' -exec install -Dm644 {} $(1)/{} \;
+	sed 's/"version": *"[^"]*"/"version": "$(EXT_VERSION)"/' browser/extension/manifest.json > $(1)/manifest.json
+	sed 's/"version": *"[^"]*"/"version": "$(EXT_VERSION)"/' browser/extension/manifest.firefox.json > $(1)/manifest.firefox.json
+endef
+
+.PHONY: build build-go build-gui test test-gui vet install install-user install-plugin uninstall uninstall-user uninstall-plugin dev open snapshot android macos test-macos install-macos ios ios-release test-ios browser clean
 
 build: build-go build-gui
 
 build-go:
 	$(GO) build -trimpath -ldflags "$(GO_LDFLAGS)" -o bin/fluxd ./cmd/fluxd
 	$(GO) build -trimpath -ldflags "$(GO_LDFLAGS)" -o bin/flux-cli ./cmd/flux
+	@# The host that a browser starts for the Flux extension.
+	$(GO) build -trimpath -ldflags "$(GO_LDFLAGS)" -o bin/flux-native ./cmd/flux-native
 	@# The PAM helper is static, so that it depends on no shared library.
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(GO_LDFLAGS)" -o bin/flux-approve ./cmd/flux-approve
 
@@ -47,7 +62,7 @@ vet:
 # `sudo make install` works without Go on the PATH of root. On a real
 # install (no DESTDIR), it also runs the system setup in post-install.sh.
 install:
-	@test -x bin/fluxd -a -x bin/flux-cli -a -x bin/flux-approve -a -x $(GUI_BUILD)/flux-gui || { echo "Run make first, then sudo make install"; exit 1; }
+	@test -x bin/fluxd -a -x bin/flux-cli -a -x bin/flux-approve -a -x bin/flux-native -a -x $(GUI_BUILD)/flux-gui || { echo "Run make first, then sudo make install"; exit 1; }
 	install -Dm755 bin/fluxd $(DESTDIR)$(PREFIX)/bin/fluxd
 	install -Dm755 bin/flux-cli $(DESTDIR)$(PREFIX)/bin/flux-cli
 	@# The short name flux. The fluxcd package owns /usr/bin/flux, so the
@@ -59,10 +74,13 @@ install:
 	sed 's|@BINDIR@|$(PREFIX)/lib/flux/bin|' dist/flux-path.sh >$(DESTDIR)/etc/profile.d/flux-path.sh
 	chmod 644 $(DESTDIR)/etc/profile.d/flux-path.sh
 	install -Dm755 $(GUI_BUILD)/flux-gui $(DESTDIR)$(PREFIX)/bin/flux-gui
+	@# The native messaging host that a browser starts for the extension.
+	install -Dm755 bin/flux-native $(DESTDIR)$(PREFIX)/bin/flux-native
 	@# The PAM helper for approval with a fingerprint. PAM uses it only
 	@# after the user adds it to a PAM file.
 	install -Dm755 bin/flux-approve $(DESTDIR)$(PREFIX)/lib/flux/flux-approve
 	$(call copy-plugin,$(DESTDIR)$(PREFIX)/share/flux/omarchy-plugin)
+	$(call install-extension,$(DESTDIR)$(PREFIX)/share/flux/browser-extension)
 	@# The service runs the fluxd of this PREFIX.
 	install -dm755 $(DESTDIR)$(PREFIX)/lib/systemd/user
 	sed 's|@BINDIR@|$(PREFIX)/bin|' dist/fluxd.service >$(DESTDIR)$(PREFIX)/lib/systemd/user/fluxd.service
@@ -80,6 +98,7 @@ install:
 uninstall:
 	@if [ -z "$(DESTDIR)" ]; then FLUX_PREFIX=$(PREFIX) sh dist/pre-remove.sh; fi
 	rm -f $(DESTDIR)$(PREFIX)/bin/fluxd $(DESTDIR)$(PREFIX)/bin/flux-cli $(DESTDIR)$(PREFIX)/bin/flux-gui
+	rm -f $(DESTDIR)$(PREFIX)/bin/flux-native
 	rm -rf $(DESTDIR)$(PREFIX)/share/flux
 	rm -rf $(DESTDIR)$(PREFIX)/lib/flux
 	rm -f $(DESTDIR)/etc/profile.d/flux-path.sh
@@ -108,7 +127,7 @@ uninstall-plugin:
 # added plugin.
 USER_PREFIX ?= $(HOME)/.local
 install-user:
-	@test -x bin/fluxd -a -x bin/flux-cli -a -x $(GUI_BUILD)/flux-gui || { echo "Run make first"; exit 1; }
+	@test -x bin/fluxd -a -x bin/flux-cli -a -x bin/flux-native -a -x $(GUI_BUILD)/flux-gui || { echo "Run make first"; exit 1; }
 	install -Dm755 bin/fluxd $(USER_PREFIX)/bin/fluxd
 	install -Dm755 bin/flux-cli $(USER_PREFIX)/bin/flux-cli
 	@# The short name flux, only when no other flux command exists. A link
@@ -118,9 +137,11 @@ install-user:
 	elif [ -e "$$link" ] || [ -L "$$link" ]; then echo "$$link exists. If it is an earlier Flux, remove it, then run make install-user again."; \
 	elif other=$$(command -v flux); then echo "$$other is another flux command, so use flux-cli."; \
 	else ln -s flux-cli "$$link"; fi
+	install -Dm755 bin/flux-native $(USER_PREFIX)/bin/flux-native
 	install -Dm755 $(GUI_BUILD)/flux-gui $(USER_PREFIX)/bin/flux-gui
 	rm -rf $(USER_PREFIX)/share/flux/omarchy-plugin
 	$(call copy-plugin,$(USER_PREFIX)/share/flux/omarchy-plugin)
+	$(call install-extension,$(USER_PREFIX)/share/flux/browser-extension)
 	install -Dm644 dist/flux.desktop $(USER_PREFIX)/share/applications/flux.desktop
 	install -Dm644 dist/flux.svg $(USER_PREFIX)/share/icons/hicolor/scalable/apps/flux.svg
 	install -Dm644 dist/flux-symbolic.svg $(USER_PREFIX)/share/icons/hicolor/symbolic/apps/flux-symbolic.svg
@@ -136,6 +157,8 @@ uninstall-user:
 		systemctl --user daemon-reload 2>/dev/null; echo "Removed $$unit"; \
 	fi; true
 	rm -f $(USER_PREFIX)/bin/fluxd $(USER_PREFIX)/bin/flux-cli $(USER_PREFIX)/bin/flux-gui
+	rm -f $(USER_PREFIX)/bin/flux-native
+	rm -rf $(USER_PREFIX)/share/flux/browser-extension
 	@# Remove the flux link only when it points to flux-cli.
 	@link=$(USER_PREFIX)/bin/flux; if [ "$$(readlink "$$link")" = flux-cli ]; then rm -f "$$link"; fi
 	rm -rf $(USER_PREFIX)/share/flux/omarchy-plugin
@@ -155,6 +178,11 @@ open: build
 snapshot: build-gui
 	mkdir -p snapshots
 	QT_QPA_PLATFORM=offscreen $(GUI_BUILD)/flux-gui --snapshot $(CURDIR)/snapshots
+
+# browser builds the extension as 2 zip files, for the Chromium browsers
+# and for Firefox and Zen. The package installs it unpacked instead.
+browser:
+	./browser/build.sh
 
 # Run the QML view tests in gui/tests with the mock backend. They need no
 # display and no fluxd.
@@ -208,4 +236,4 @@ test-ios:
 			$(XCODEBUILD_PINNED) MARKETING_VERSION=$(APP_VERSION)
 
 clean:
-	rm -rf bin $(GUI_BUILD) snapshots macos/build ios/build
+	rm -rf bin $(GUI_BUILD) snapshots browser/dist macos/build ios/build

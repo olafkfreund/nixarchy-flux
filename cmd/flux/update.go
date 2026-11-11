@@ -30,6 +30,9 @@ func update(args []string, device string) error {
 			return fmt.Errorf("unknown option %q. Use --check or --phone", a)
 		}
 	}
+	if nixBuild() && !checkOnly {
+		return errors.New("this Flux is installed by Nix: update the flake input and rebuild")
+	}
 	r, err := release.Latest(context.Background(), release.URL(), version)
 	if err != nil {
 		return fmt.Errorf("cannot reach GitHub: %v\nFlux works without the internet. To update, connect to a network and run flux-cli update again", err)

@@ -26,6 +26,7 @@ herdr_control = false
 herdr_terminals = false
 remote_input = false
 remote_desktop = false
+pair_requests = true
 check_updates = true
 gui = ""
 approve_timeout = 20
@@ -42,7 +43,7 @@ command = "omarchy-system-lock"
 | `download_dir` | Destination for received files. Defaults to the XDG Downloads directory, then `~/Downloads`. |
 | `scan_dir` | Destination for scanned text and documents. Defaults to `flux/scanned` inside the XDG Documents directory. |
 | `photo_dir` | Destination for camera photos. Defaults to `flux` inside the XDG Pictures directory. Screenshots and signatures use its `screenshots` and `signatures` folders. |
-| `auto_clipboard` | Sync clipboard text and images in both directions. Defaults to `true`. A clip that you send by hand from the phone goes on the clipboard also while it is `false`. |
+| `auto_clipboard` | Sync clipboard text and images in both directions, and copy received screenshots to the clipboard. Defaults to `true`. A clip that you send by hand from the phone goes on the clipboard also while it is `false`. |
 | `notifications` | Show phone notifications on the desktop. Defaults to `true`. |
 | `share_home` | Let each paired device read the home folder, `download_dir`, and the Documents, Pictures, Music, and Videos folders. Names that start with a dot, such as `~/.ssh`, and the Flux folders stay hidden. Defaults to `true`. Turning it off ends each session at once. See [Browse PC](features.md#browse-pc). |
 | `pause_media_on_call` | Pause desktop media during calls. Defaults to `true`. |
@@ -52,7 +53,9 @@ command = "omarchy-system-lock"
 | `herdr_terminals` | Let each paired device open herdr terminals, read them, and type commands in them. The terminals include the herdr panes that you opened, for example a `sudo -i` shell. Needs `herdr_control`. Defaults to `false`. See [Use terminals](herdr.md#use-terminals). |
 | `remote_input` | Let the phone or the Mac move the pointer and type on this computer. Defaults to `false`. `flux-cli input on` and `flux-cli input off` change it. Turning it off drops the input that waits and releases a held button. See [Touchpad and keyboard](remote-input.md). |
 | `remote_desktop` | Let the phone or the Mac show the screen of this computer. Defaults to `false`. The touches and the mouse on the screen also need `remote_input`. `flux-cli desktop on` and `flux-cli desktop off` change it. Turning it off stops each stream, also a stream that still starts. See [Remote desktop](remote-desktop.md). |
+| `pair_requests` | Let a device on the network ask this computer to pair. Defaults to `true`. With `false`, `fluxd` refuses each pair request and shows nothing, and you pair from this computer with `flux-cli pair` or the Flux window. See [security](security.md#pair-only-with-your-own-device). |
 | `check_updates` | Ask GitHub once a day for the latest release. Defaults to `true`. See [release check](#release-check). |
+| `remote_desktop_encoder` | Select the video encoder of the remote desktop: `auto`, `gpu`, or `cpu`. An omitted value is `auto`. Use `cpu` when the GPU encoder hangs the computer. See [choose the encoder](remote-desktop.md#choose-the-encoder). |
 | `gui` | Use `app`, `plugin`, or an empty value for automatic host selection. |
 | `approve_timeout` | Wait 5 to 120 seconds for approval. Zero or an omitted value uses 20 seconds. |
 | `commands` | Desktop commands available to the phone. A new configuration has no commands. |
@@ -93,6 +96,7 @@ The [workflow controls](workflows.md) describe `[devices]`, `[[notification_rule
 | `~/.cache/flux/update/` | The package that `flux-cli update` downloads, until pacman installs it |
 | `~/.cache/flux/icons/` | The app icons of the phone notifications |
 | `$XDG_RUNTIME_DIR/flux/fluxd.sock` | Local IPC socket. Without `XDG_RUNTIME_DIR`, `/run/user/<uid>/flux/fluxd.sock` |
+| `$XDG_RUNTIME_DIR/flux/ssh-agent.sock` | The ssh-agent socket of the [phone SSH keys](ssh.md). `FLUX_SOCKET` does not move it. |
 | `/etc/flux/approve/<user>.pub` | Root-owned phone approval public key |
 | `/etc/flux/approve/pam-backup/` | Original PAM files from approval setup |
 
