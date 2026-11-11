@@ -82,6 +82,9 @@ details; approving this plan approves them.
 | C13 | tests use `t.Setenv` | the path lookups take their candidate list and executable path from package vars that tests replace, so tests build a fake package layout in `t.TempDir()` and never read `/run/current-system` or `/etc/profiles` | a test must not depend on what the host has installed |
 | C14 | "host-only failures of master" | the allowed failures are exactly: `TestDesktopEndsAfterAnUnpair`, `TestDesktopEndsWhenThePhoneClosesTheStream`, `TestDesktopOverlappingStartsWaitForTheOldRecorder`, `TestDesktopStartFloodRunsOneRecorder`, `TestDesktopStartWaitsForTheOldRecorder`, `TestEnableDisable`, `TestExtendedScreen`, `TestKeyboardReleasesMods`, `TestRootInstall`, `TestSpeakerSession`; the docs check greps each required item separately | a gate that "leaves success to interpretation" is not a gate |
 | C15 | step 4 names the files | `nix/checks.nix` HM stub (lines 113–137 on master) gains `home.file`, `xdg.configFile`, `xdg.dataHome`; the HM check runs twice, option on and off; edits anchored at `nix/home-manager.nix:13-50` and `nix/package.nix:22-40, 68-90` | the stub does not declare the new options |
+| C16 | (agy plan review) step 1 fixes the test with `net.Listen` | use master's `ipc.Listen(path)` (`internal/ipc/ipc.go:59`) and pass its listener to `ipc.Serve`; step 1's check runs `go test ./cmd/flux-native/ ./internal/nativemsg/ -count=1` without a `-run` filter | the draft's `-run` pattern matched no test in `cmd/flux-native`, and `net.Listen` skips master's socket setup |
+| C17 | (agy plan review) step order | steps 2 and 3 both edit `cmd/flux/browser.go`, so they run one after the other on the same Codex member; step 4 starts after step 3; step 5 may run beside steps 2–4 | parallel edits of one file conflict |
+| C18 | (agy plan review) step 4 constants | the HM manifests use these literals: `name = "org.omarchy.flux"`, `description = "Flux host for the Flux browser extension"`, Chromium origin `chrome-extension://jgfibbdalckcbmdcngbalobbhcbepamm/`, Gecko ID `flux@omarchy.org` | the coder must not guess them; key order in JSON does not matter to browsers or to `browserRemove` |
 
 ## Steps
 
@@ -90,7 +93,7 @@ details; approving this plan approves them.
    `cmd/flux-native/main_test.go:71` (`ln, _ := net.Listen("unix", path)`,
    pass `ln`); keep the PR's `setup.go` browser step and master's Nix branch
    together (D4 applies in step 3).
-   → verify `go build ./... && go vet ./cmd/... ./internal/... && go test ./cmd/flux-native/ ./internal/nativemsg/ ./cmd/flux/ -run 'Browser|Extension|Gecko|Native|Setup' -count=1`.
+   → verify `go build ./... && go vet ./cmd/... ./internal/... && go test ./cmd/flux-native/ ./internal/nativemsg/ -count=1 && go test ./cmd/flux/ -run 'Browser|Extension|Gecko|Setup' -count=1` (C16).
    Traps: do not drop master's `nixBuild()` guards in `setup.go`, or the
    flake, `nix/` and docs/nix.md from master.
 
