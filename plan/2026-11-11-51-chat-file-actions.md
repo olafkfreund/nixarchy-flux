@@ -43,6 +43,17 @@ PR) is the session model's.
   "Show in folder" becomes `visible: root.finished && !root.mine`.
 - D7 No change to the mock backend, the fixture, Go, or other platforms.
 
+## Review corrections (Codex and agy plan review — approve or strike)
+
+| # | Draft said | Plan does | Why |
+| --- | --- | --- | --- |
+| R1 | (agy) switch `meta`/`actions` between `verticalCenter` and `top`/`bottom` with conditional anchors | no vertical anchors on either row; `y` bindings: `meta` `y: root.crowded ? 0 : (parent.height - height) / 2`, `actions` `y: root.crowded ? parent.height - height : (parent.height - height) / 2`; `actions` keeps `anchors.right` | swapping two vertical anchors at runtime can briefly hold both, which sets an explicit height that is not reset, so a resize would leave the icons over the state word. Not reproduced here; `y` bindings avoid it outright |
+| R2 | (Codex, agy) Open's top below the state word's top | the actions row's mapped top is at least the meta row's mapped bottom; check after layout settles (`tryCompare`/`tryVerify`), then set `width` back to 500 and check `crowded` is false and both rows share one line again | a 1 px offset would pass the weaker check; a resize in both directions exercises the switch |
+| R3 | (Codex) create both, set `entry` | create the entry with `createTemporaryObject(entryComponent, top, { view: standIn, entry: … })`; a fresh entry per case | `view` defaults to `null`, and a fresh entry avoids reading stale `Row` widths before polish |
+| R4 | (agy) the error test in "Chat" | in "Errors" (`tst_views.qml:605`), as the spec says; `t3` is found with `mock.state.transfers.filter(…)[0]` and wrapped as `{ key: "t3", at: Date.now(), file: t3 }` | carry the spec's placement over; `transfers` is an array |
+| R5 | (agy) check "Copied to the clipboard" is absent after the error shows | also check it right after the click | the error arrives later (`Qt.callLater`); a wrong synchronous toast could be overwritten before the late check |
+| R6 | (agy) header height `meta + 6 + actions` | kept: 6 is `col.spacing` (line 125), the gap between the two lines; bindings inside `card` use `root.crowded` | consistent spacing; every existing binding there is `root.`-qualified |
+
 ## Steps
 
 1. **`gui/qml/components/ChatEntry.qml`** — D1–D6.
@@ -50,19 +61,16 @@ PR) is the session model's.
      `meta`, `actions` and `col`, which are ids in the same file.
    - `copyFile()` after `copy()` (lines 94-97).
    - Header item (lines 128-216): its `height` (line 130) becomes
-     `crowded ? meta.implicitHeight + 6 + actions.implicitHeight : Math.max(meta.implicitHeight, actions.implicitHeight)`
-     (6 = `col.spacing`). `meta` (line 133): `anchors.verticalCenter` only
-     when not crowded, else `anchors.top: parent.top`; `actions` (lines
-     158-160): `anchors.right: parent.right` always,
-     `anchors.verticalCenter` when not crowded, `anchors.bottom:
-     parent.bottom` when crowded. Use QML's conditional anchor form
-     (`anchors.verticalCenter: root.crowded ? undefined : parent.verticalCenter`).
+     `root.crowded ? meta.implicitHeight + 6 + actions.implicitHeight : Math.max(meta.implicitHeight, actions.implicitHeight)`
+     (6 = `col.spacing`). `meta` (line 133) and `actions` (lines 158-160)
+     lose `anchors.verticalCenter` and get the `y` bindings of R1;
+     `actions` keeps `anchors.right: parent.right`.
    - The two `IconAction`s (D2) after the clip trash action (lines 185-191) and
      before the word `Row` (line 195); the comment (D6); "Show in folder"
      `visible` (line 210).
    → verify: the QML view tests (command under Tests) still pass, 85 of 85,
    before step 2 adds new ones.
-   Traps: `crowded` must not depend on `card.width` through `natural`
+   Traps: no vertical anchors on `meta` or `actions` (R1). `crowded` must not depend on `card.width` through `natural`
    (`natural` reads `actions.implicitWidth`, not the header height, so no
    binding loop; do not make `natural` read `crowded`). Shared QML: both
    the Qt app and the Omarchy shell load it (AGENTS.md), so no host-only
@@ -75,8 +83,8 @@ PR) is the session model's.
      `Component` with a stand-in `QtObject { property string devName: "Pixel";
      property var requests: []; property var toasts: [];
      function call(method, params, cb) { requests.push({ method: method, params: params }); if (cb) cb() }
-     function toast(text) { toasts.push(text) } }`. Create both with
-     `createTemporaryObject(…, top)`, set `entry: { key: "t3", at: Date.now(), file: f }`.
+     function toast(text) { toasts.push(text) } }`. Create a fresh entry per case with
+     `createTemporaryObject(entryComponent, top, { view: standIn, entry: { key: "t3", at: Date.now(), file: f } })` (R3).
      Find the icons with `findBy(entry, "objectName", "fileOpen")`/`"fileCopy"`
      and call `.clicked()`.
      Cases:
@@ -89,20 +97,22 @@ PR) is the session model's.
        and `done` with `path: ""`: neither visible;
      - a clip entry `{ key: "c", at: Date.now(), clip: { id: "c", dir: "in", text: "x" } }`:
        neither visible;
-     - received `done` card: `width: 500` → `crowded === false`;
-       `width: 280` → `crowded === true` and
-       `findBy(entry, "objectName", "fileOpen")` maps below the state word
-       (its `mapToItem(entry, 0, 0).y` is greater than that of the state
-       word `Txt`, found by `text === "Received"`).
-   - In `TestCase` "Chat" (line 1007, it resets `mock.failures` in `init`
-     and `cleanup`): a test that creates a real `FluxView`
-     (`viewComponent`), creates a `ChatEntry` with `view:` that view and the
-     fixture's `t3` from `mock.state.transfers`, sets
-     `mock.failures = { "transfer.copy": { code: "not_found", message: "a.png no longer exists" } }`,
-     clicks `fileCopy`, then `tryVerify` a visible item with
-     `message === "a.png no longer exists"` (as
-     `test_clipboardErrorShowsInToast`, line 673, does) and checks that no
-     visible item has `message === "Copied to the clipboard"`.
+     - received `done` card at `width: 280`: `tryCompare(entry, "crowded", true)`,
+       then the actions row's top (`fileOpen.parent.mapToItem(entry, 0, 0).y`)
+       is at least the bottom of the meta row (the `Txt` with
+       `text === "Received"`: `.parent.mapToItem(entry, 0, 0).y + .parent.height`);
+       then `width = 500`: `tryCompare(entry, "crowded", false)` and the
+       two rows' vertical centres are equal (R2).
+   - In `TestCase` "Errors" (line 605; it resets `mock.failures` in `init`
+     and `cleanup`) (R4): create a real `FluxView` (`viewComponent`), find
+     `t3` with `mock.state.transfers.filter(function (t) { return t.id === "t3" })[0]`,
+     create a `ChatEntry` with `{ view: view, entry: { key: "t3", at: Date.now(), file: t3 }, width: 500 }`,
+     set `mock.failures = { "transfer.copy": { code: "not_found", message: "a.png no longer exists" } }`,
+     emit `fileCopy`'s `clicked`, check at once that no visible item has
+     `message === "Copied to the clipboard"` (R5), then `tryVerify` a visible
+     item with `message === "a.png no longer exists"` (as
+     `test_clipboardErrorShowsInToast`, line 673) and check the success text
+     is still absent.
    → verify: the QML view tests pass, 85 + the new ones, 0 failed.
    Traps: `findBy` ignores visibility; check `visible` on the found item.
    `ChatEntry` has no implicit width, so always set `width`. Do not change
