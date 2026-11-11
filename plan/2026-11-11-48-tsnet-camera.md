@@ -59,6 +59,8 @@ after the other on the same Codex member.
 | R2 | a failed first request goes to `fail` and so to the retry | a per-attempt failure route `attemptFailed(attempt, reason)` on the handler: with a `physicalId` and the current attempt it starts the one logical retry, else it calls the caller's `fail`. Session callbacks and the first `setRepeatingRequest` use it; once a `setRepeatingRequest` has succeeded for an attempt, later request errors (a controls update) keep today's logging only | `fail` reports to the caller and does not retry; a controls update must not trigger a retry |
 | R3 | CI runs after push | `build.yml` runs on pushes to `master` only, so step 3 runs `gh workflow run build.yml --ref fix/48-tsnet-camera` and checks that the run's commit is the branch HEAD | otherwise the Kotlin is not compiled before merge |
 | R4 | `drainIdle` restored in `t.Cleanup`; a hook "when `forward` returns" | every forwarding test, including the existing round trip, waits for its listener, copies and watchdog to finish before it restores globals; the hook fires after the slot is released and the watchdog has exited | goroutines of one test could overlap the next test's changes to package vars |
+| R6 | (agy spec review) `isSessionConfigurationSupported` says no **or throws** → retry | it says no, or throws anything **other than** `UnsupportedOperationException` → retry; `UnsupportedOperationException` means the HAL cannot answer the query, so the lens is tried as today | many HALs throw it for the query itself, which would push them off a lens that works |
+| R7 | (agy spec review) the request keeps `createCaptureRequest(TEMPLATE_RECORD, setOf(physicalId))` | that 2-argument form only when `choice.physicalCrop`; otherwise the plain `createCaptureRequest(TEMPLATE_RECORD)`, which works with a session whose output is bound to a physical lens | the physical form is only needed to set physical keys, and it may be what fails on such a HAL |
 | R5 | "tests per the spec's list" | the cases below are the acceptance criteria | a coder must not have to open the spec |
 
 Step 1 cases (TCP loopback, short `drainIdle`): local side closes first while the tailnet peer stays silent, and the inner copy was already blocked in a read; tailnet side closes first and a multi-chunk reply with pauses shorter than `drainIdle` arrives in full; a peer that stops reading while the other side writes; a silent drain with no byte ever moving ends (R1); 2 listeners share 64 slots, the 65th on either is closed, and a slot is reused after one ends; `Accept` failing before cancel ends `serve` with no watcher left; cancel closes open connections; the existing round trip still passes.
@@ -86,7 +88,7 @@ Step 2 cases (`CameraLensesTest.kt`): `physicalCropSupported(null)` is false; a 
    148; `repeat` at 199–228; `startSession` at 286–320; the companion helpers
    near `cropFor` at 366. Unit test of `physicalCropSupported` in
    `CameraLensesTest.kt` (plain JUnit, as its existing tests).
-   Apply R2.
+   Apply R2, R6, R7.
    → verify: this host has no Android SDK; check the Kotlin by reading, then
    R3: `gh workflow run build.yml --ref fix/48-tsnet-camera` and its
    `android` job (`:app:testDebugUnitTest :app:lintDebug :app:assembleDebug`).
