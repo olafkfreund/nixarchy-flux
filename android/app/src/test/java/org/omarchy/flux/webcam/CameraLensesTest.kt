@@ -1,9 +1,17 @@
 package org.omarchy.flux.webcam
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CameraLensesTest {
+    @Test fun physicalCropRequiresItsRequestKey() {
+        assertFalse(CameraSource.physicalCropSupported(null))
+        assertFalse(CameraSource.physicalCropSupported(listOf("android.control.zoomRatio")))
+        assertTrue(CameraSource.physicalCropSupported(listOf("android.scaler.cropRegion")))
+    }
+
     // A phone like the Xiaomi 17 Pro Max: 1 logical back camera with a
     // wide, an ultra wide, and a periscope tele lens, and 1 front camera.
     private val xiaomi = listOf(

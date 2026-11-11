@@ -37,6 +37,7 @@ class CameraSource(context: Context) {
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var active: Pair<Choice, Surface>? = null
+    @Volatile private var sessionAttempt = 0
 
     // Each open and close takes a new number, so that callbacks of an
     // earlier open do nothing. The GL thread opens and the main thread
@@ -67,6 +68,7 @@ class CameraSource(context: Context) {
         val sensorOrientation: Int,
         val fps: Range<Int>?,
         val zoomMax: Float,
+        val physicalCrop: Boolean,
         val exposureRange: Range<Int>,
         val exposureStep: Float,
         val whiteBalance: List<String>,
@@ -153,6 +155,7 @@ class CameraSource(context: Context) {
         // zooms by its crop, see repeat().
         val c = manager.getCameraCharacteristics(id)
         val p = lens.physicalId?.let { manager.getCameraCharacteristics(it) } ?: c
+        val physicalCrop = lens.physicalId != null && physicalCropSupported(c.availablePhysicalCameraRequestKeys?.map { it.name })
         val pmap = p.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         var sizes = pmap?.getOutputSizes(SurfaceTexture::class.java).orEmpty().toList()
         if (lens.physicalId != null) {
@@ -163,7 +166,9 @@ class CameraSource(context: Context) {
         // A size that the lens cannot stream at 30 fps is left out, when another size can.
         val fast = sizes.filter { size -> pmap?.let { it.getOutputMinFrameDuration(SurfaceTexture::class.java, size) <= FRAME_NS } ?: true }
         sizes = fast.ifEmpty { sizes }
-        val zoomMax = (if (lens.physicalId != null) {
+        val zoomMax = (if (lens.physicalId != null && !physicalCrop) {
+            1f
+        } else if (lens.physicalId != null) {
             p.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.upper
@@ -181,6 +186,7 @@ class CameraSource(context: Context) {
             fps = pickFps(c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)),
             // More than 10x zoom only shows noise on a webcam.
             zoomMax = zoomMax.coerceIn(1f, 10f),
+            physicalCrop = physicalCrop,
             exposureRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: Range(0, 0),
             exposureStep = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0f,
             whiteBalance = WHITE_BALANCE_MODES.filter { AWB_MODES[it] in awb }.ifEmpty { listOf("auto") },
@@ -192,16 +198,18 @@ class CameraSource(context: Context) {
     fun setControls(next: Controls) {
         if (next == controls) return
         controls = next
-        handler.post { repeat() }
+        val attempt = sessionAttempt
+        handler.post { repeat(attempt) }
     }
 
     /** Sends the repeating request again with the current controls. */
-    private fun repeat() {
+    private fun repeat(attempt: Int, firstFailure: ((String) -> Unit)? = null) {
+        if (attempt != sessionAttempt) return
         val s = session ?: return
         val (choice, target) = active ?: return
         try {
             // A request that sets keys of a lens must name that lens when it is made.
-            val builder = choice.physicalId?.let { s.device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD, setOf(it)) }
+            val builder = choice.physicalId?.takeIf { choice.physicalCrop }?.let { s.device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD, setOf(it)) }
                 ?: s.device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
             val request = builder.apply {
                 addTarget(target)
@@ -215,7 +223,7 @@ class CameraSource(context: Context) {
                 if (physical != null) {
                     // A zoom ratio on the logical camera can switch lenses, so a chosen lens zooms by its own crop.
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) set(CaptureRequest.CONTROL_ZOOM_RATIO, 1f)
-                    choice.activeArray?.let { setPhysicalCameraKey(CaptureRequest.SCALER_CROP_REGION, cropFor(it, zoom), physical) }
+                    if (choice.physicalCrop) choice.activeArray?.let { setPhysicalCameraKey(CaptureRequest.SCALER_CROP_REGION, cropFor(it, zoom), physical) }
                 } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom)
                 } else {
@@ -225,6 +233,7 @@ class CameraSource(context: Context) {
             s.setRepeatingRequest(request, null, handler)
         } catch (e: Exception) {
             Log.w(TAG, "camera request failed", e)
+            firstFailure?.invoke("The camera stopped: ${e.message}")
         }
     }
 
@@ -284,39 +293,64 @@ class CameraSource(context: Context) {
     }
 
     private fun startSession(camera: CameraDevice, choice: Choice, target: Surface, current: () -> Boolean, fail: (String) -> Unit) {
-        val output = OutputConfiguration(target).apply {
-            // The computer and the preview get the image as the camera sees
-            // it, and only the mirror setting mirrors it. Before Android 13,
-            // the framework mirrors the front camera, and GlRenderer removes
-            // that mirror, see FrameGeometry.unmirror.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) mirrorMode = OutputConfiguration.MIRROR_MODE_NONE
-            choice.physicalId?.let { setPhysicalCameraId(it) }
+        val attempt = ++sessionAttempt
+        fun attemptFailed(reason: String) {
+            if (!current() || attempt != sessionAttempt) return
+            runCatching { session?.close() }
+            session = null
+            active = null
+            sessionAttempt++
+            if (choice.physicalId == null) return fail(reason)
+            try {
+                val logical = logicalChoice(choice)
+                if (logical == null) return fail("The camera cannot stream at this size")
+                Log.w(TAG, "lens ${choice.physicalId} cannot stream alone, using camera ${choice.id}")
+                startSession(camera, logical, target, current, fail)
+            } catch (e: Exception) {
+                Log.w(TAG, "logical camera fallback failed", e)
+                fail("The camera stopped: ${e.message}")
+            }
         }
-        val config = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, listOf(output), executor, object : CameraCaptureSession.StateCallback() {
-            override fun onConfigured(s: CameraCaptureSession) {
-                if (device !== camera) return s.close()
-                session = s
-                active = choice to target
-                repeat()
-            }
-
-            override fun onConfigureFailed(s: CameraCaptureSession) {
-                if (current()) fail("The camera cannot stream at this size")
-            }
-        })
         try {
+            val output = OutputConfiguration(target).apply {
+                // The computer and the preview get the image as the camera sees
+                // it, and only the mirror setting mirrors it. Before Android 13,
+                // the framework mirrors the front camera, and GlRenderer removes
+                // that mirror, see FrameGeometry.unmirror.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) mirrorMode = OutputConfiguration.MIRROR_MODE_NONE
+                choice.physicalId?.let { setPhysicalCameraId(it) }
+            }
+            val config = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, listOf(output), executor, object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(s: CameraCaptureSession) {
+                    if (!current() || attempt != sessionAttempt || device !== camera) return s.close()
+                    session = s
+                    active = choice to target
+                    repeat(attempt, ::attemptFailed)
+                }
+
+                override fun onConfigureFailed(s: CameraCaptureSession) {
+                    runCatching { s.close() }
+                    attemptFailed("The camera cannot stream at this size")
+                }
+            })
             val physical = choice.physicalId
-            if (physical != null && runCatching { camera.isSessionConfigurationSupported(config) }.getOrDefault(true) == false) {
-                // The phone cannot stream this lens alone. The logical camera
-                // streams instead, so the image keeps going.
-                Log.w(TAG, "lens $physical cannot stream alone, using camera ${choice.id}")
-                return startSession(camera, choice.copy(physicalId = null, activeArray = null), target, current, fail)
+            if (physical != null && !runCatching { camera.isSessionConfigurationSupported(config) }
+                    .getOrElse { it is UnsupportedOperationException }) {
+                return attemptFailed("The camera cannot stream at this size")
             }
             camera.createCaptureSession(config)
         } catch (e: Exception) {
             Log.w(TAG, "session failed", e)
-            if (current()) fail("The camera stopped: ${e.message}")
+            attemptFailed("The camera stopped: ${e.message}")
         }
+    }
+
+    private fun logicalChoice(choice: Choice): Choice? {
+        val logical = choiceFor(NamedLens(choice.name, Lens(choice.id, null, choice.facing, 0f)))
+        val c = manager.getCameraCharacteristics(choice.id)
+        val sizes = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)?.getOutputSizes(SurfaceTexture::class.java)
+        return logical.takeIf { sizes?.contains(choice.size) == true && it.sensorOrientation == choice.sensorOrientation }
+            ?.copy(size = choice.size)
     }
 
     /** Closes the camera. */
@@ -326,6 +360,7 @@ class CameraSource(context: Context) {
     }
 
     private fun closeNow() {
+        sessionAttempt++
         runCatching { session?.close() }
         session = null
         active = null
@@ -348,6 +383,8 @@ class CameraSource(context: Context) {
     }
 
     companion object {
+        fun physicalCropSupported(keyNames: Collection<String>?): Boolean = "android.scaler.cropRegion" in keyNames.orEmpty()
+
         /** The longest frame at 30 fps, in nanoseconds, with a little room. */
         private const val FRAME_NS = 34_000_000L
 
