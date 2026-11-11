@@ -143,7 +143,7 @@ A device that is not paired shows only while it has a link.
 | Pairing | `pair.address`, `pair.request`, `pair.accept`, `pair.reject`, `pair.unpair` |
 | Addresses | `addresses.add`, `addresses.remove` |
 | Device | `ring`, `ping` |
-| Sharing | `clipboard.send`, `clipboard.copy`, `share.files`, `share.text`, `share.url`, `transfer.cancel` |
+| Sharing | `clipboard.send`, `clipboard.copy`, `share.files`, `share.text`, `share.url`, `transfer.cancel`, `transfer.open`, `transfer.copy` |
 | Commands | `commands.add`, `commands.remove`, `commands.run` |
 | Notifications | `notification.dismiss`, `notification.dismissAll`, `notification.reply`, `notification.action`, `notify.send` |
 | Text messages | `sms.refresh`, `sms.thread`, `sms.send` |

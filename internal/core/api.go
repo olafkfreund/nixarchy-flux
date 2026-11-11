@@ -315,6 +315,10 @@ func (d *Daemon) Call(ctx context.Context, method string, raw json.RawMessage) (
 		return d.searchClips(p.Text), nil
 	case "transfer.cancel":
 		return ok, d.CancelTransfer(p.ID)
+	case "transfer.open":
+		return ok, d.OpenTransfer(p.ID)
+	case "transfer.copy":
+		return ok, d.CopyTransfer(p.ID)
 	case "transfer.retry":
 		return ok, d.retryTransfer(p.ID)
 	case "commands.add":
