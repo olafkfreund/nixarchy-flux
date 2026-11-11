@@ -105,7 +105,12 @@ Commands:
                          authorized_keys, and the ssh-agent socket. key prints
                          only the keys, and socket only the path
   watch                  Print each state change as one JSON line
-  setup [--dry-run]      Start fluxd for this user and add the omarchy-shell plugin
+  setup [--dry-run]      Start fluxd for this user, add the omarchy-shell plugin, and
+                         let the browser extension talk to fluxd. Options: --dry-run,
+                         --no-plugin, --no-browser
+  browser install        Let the browser extension talk to fluxd, in the browsers of
+                         this user
+  browser remove         Remove those host manifests
   off                    Stop fluxd, and do not start it at login
   on                     Start fluxd, and start it at each login
   doctor                 Check the setup and print the fixes
@@ -212,6 +217,8 @@ func main() {
 		err = power(true)
 	case "setup":
 		err = setup(args)
+	case "browser":
+		err = browser(args)
 	case "doctor":
 		doctor()
 	case "update":

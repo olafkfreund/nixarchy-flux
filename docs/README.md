@@ -9,6 +9,7 @@ A device can also connect through [ZeroTier](zerotier.md) or [Tailscale](tailsca
 2. [Install the Android app](android.md), [install the iPhone app](ios.md#install-on-an-iphone), [build the Mac app](macos.md#build-and-run), or [build the Windows app](windows.md#build-and-run).
 3. [Pair your phone](features.md#pair-a-phone), [pair your iPhone](ios.md#pair-an-iphone), [pair your Mac](macos.md#pair-a-mac), or [pair your Windows computer](windows.md#pair-a-windows-computer).
 4. [Use the CLI](cli.md) or open the window with `flux-cli open`.
+5. [Add the browser extension](browser.md) to send a link to the phone from the browser.
 
 ## Use Flux
 
@@ -21,6 +22,7 @@ A device can also connect through [ZeroTier](zerotier.md) or [Tailscale](tailsca
 | [macOS](macos.md) | Mac app build, pairing, features, permissions, and local tests |
 | [Windows](windows.md) | Windows app build, pairing, features, data, and tests against `fluxd` |
 | [CLI](cli.md) | Commands, device selection, pairing by address, JSON state, and notifications from scripts |
+| [Browser extension](browser.md) | Sending from the browser, the languages, and the native host |
 | [Everyday use](features.md) | Pair, wake the computer, share, clipboard images, SMS, media, audio outputs, calls, Do Not Disturb, automatic photo transfers, and dictation in text fields |
 | [Workflow controls](workflows.md) | Offline outbox, resumable transfers, folder archives, saved snippets, device access, notification rules, automation, agent review, and remote audio |
 | [Tailscale](tailscale.md) | Extra addresses, pairing by the Tailscale address, links away from the local network, other VPNs, and connection checks |

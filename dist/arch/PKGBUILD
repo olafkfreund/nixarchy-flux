@@ -64,6 +64,8 @@ check() {
 
 package() {
 	_src
-	make install DESTDIR="$pkgdir" PREFIX=/usr
+	# VERSION keeps the extension manifest on the same version as the
+	# binaries, instead of the version of the last tag.
+	make install DESTDIR="$pkgdir" PREFIX=/usr VERSION="$pkgver"
 	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

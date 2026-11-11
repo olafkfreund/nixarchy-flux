@@ -36,6 +36,7 @@ flux-cli help
 flux-cli version
 flux-cli setup --dry-run
 flux-cli setup
+flux-cli setup --browser
 flux-cli setup --no-plugin
 flux-cli doctor
 flux-cli update --check
@@ -109,6 +110,23 @@ To select the Qt app or shell plugin explicitly:
 FLUX_GUI=app flux-cli open files
 FLUX_GUI=plugin flux-cli open notifications
 ```
+
+## Browser extension
+
+`flux-cli browser` writes the native messaging manifests that the [browser extension](browser.md) needs.
+Each browser loads the unpacked extension from its folder by hand.
+
+```sh
+flux-cli browser install
+flux-cli browser install --dry-run
+flux-cli browser remove
+flux-cli browser remove --dry-run
+```
+
+`flux-cli setup` does not write browser host manifests unless you pass `--browser` (`--no-browser` is also accepted and does nothing).
+Without `--browser`, `flux-cli setup` prints `To send links from a browser, run: flux-cli browser install`.
+`flux-cli browser install` writes the manifest once per installed browser, using the fixed Chromium extension ID and the fixed Gecko add-on ID (`flux@omarchy.org`).
+`--dry-run` lists what would be written or removed, which is worth doing before the first run on a machine with many browsers.
 
 ## Pair and discover
 

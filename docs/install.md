@@ -65,6 +65,7 @@ This method gives pacman ownership of all desktop files.
 `makepkg -s` installs missing package dependencies.
 Select a Nerd Font provider if pacman asks for one.
 The package builds the CLI, daemon, approval helper, Qt app, and shell plugin assets.
+It also installs the native messaging host and the extension files, which the [browser extension](browser.md) uses.
 
 The package does not start `fluxd` for the accounts on the computer.
 Each desktop user who wants Flux runs `flux-cli setup` once.

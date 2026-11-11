@@ -3,7 +3,7 @@
 Connect your Omarchy desktop to an Android phone, an iPhone, or a Mac over your local network, or through Tailscale or ZeroTier when you are away.
 Share files, clipboard text, and clipboard images, read phone notifications, control media, and use your phone as a camera or microphone.
 
-Flux includes a CLI, a background daemon, a native Qt window, an Omarchy shell plugin, a native Android app, a native iOS app, and a native macOS app.
+Flux includes a CLI, a background daemon, a native Qt window, an Omarchy shell plugin, a browser extension, a native Android app, a native iOS app, and a native macOS app.
 `fluxd` listens on 1 TCP port from 12100 to 12108 and on UDP port 12100, and it also opens the connections to the devices itself.
 So Flux works with the default Omarchy firewall, which blocks inbound traffic, and needs no new inbound rule.
 See [security](docs/security.md) for what a paired device can do and which settings limit it.
@@ -21,6 +21,7 @@ https://github.com/user-attachments/assets/4b8445fe-6734-4100-b200-92f57e1b353a
 | Send files, clipboard text and images, and links between devices | [Everyday use](docs/features.md) |
 | Queue files offline, send folder archives, and save clipboard snippets | [Workflow controls](docs/workflows.md) |
 | Set device access, notification rules, and local automation for device, call, notification, and agent events | [Workflow controls](docs/workflows.md#per-device-access) |
+| Send a link or a web page to the phone from the browser | [Browser extension](docs/browser.md) |
 | Read notifications, send SMS, control media, and run desktop commands from your phone | [CLI reference](docs/cli.md) |
 | Sync Do Not Disturb and pause media during calls | [Phone integration](docs/features.md#calls) |
 | Scan text, send photos, and use the phone as a webcam, a microphone, or a speaker of the computer | [Camera and streams](docs/camera.md) |
@@ -71,7 +72,7 @@ flux-cli doctor
 flux-cli open
 ```
 
-The package includes the Qt app, CLI, daemon, shell plugin, approval helper, desktop entry, icons, and system files.
+The package includes the Qt app, CLI, daemon, shell plugin, approval helper, browser extension, desktop entry, icons, and system files.
 Run `flux-cli setup` as your desktop user after installation.
 The short name `flux` also works when no other program, such as `fluxcd`, uses that name.
 
@@ -161,6 +162,7 @@ See [development](docs/development.md) for local checks and [releases](docs/rele
 - [iOS build and setup](docs/ios.md)
 - [macOS build and setup](docs/macos.md)
 - [Windows build and setup](docs/windows.md)
+- [Browser extension](docs/browser.md)
 - [CLI reference](docs/cli.md)
 - [Configuration and data paths](docs/configuration.md)
 - [Security and paired devices](docs/security.md)

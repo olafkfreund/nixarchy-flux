@@ -178,6 +178,9 @@ See `docs/troubleshooting.md#a-device-does-not-find-the-computer-after-an-update
 
 Use `docs/install.md` for the update command of each install method.
 
+`flux-cli browser install` writes the native messaging manifests for the browser extension; `flux-cli setup --browser` does it as its last step.
+The extension itself is loaded by hand, once per browser, and `docs/browser.md` says where.
+
 For a preview without installation:
 
 ```sh
@@ -204,6 +207,7 @@ make build
 | Fingerprint approval | `internal/approve/`, `cmd/flux-approve/`, `internal/core/approve.go`, Android `core/Approve*` and `ui/ApproveActivity.kt`, `macos/Sources/FluxKit/Plugins/Approve/`, `macos/App/Features/Approve/`, `ios/App/Features/Approve/` |
 | herdr agents | `internal/herdr/`, `internal/core/herdr.go`, Android `core/Herdr.kt` |
 | Live terminal | `internal/herdr/terminal_session.go`, `internal/core/herdr_terminal.go`, Android `ui/HerdrTerminal.kt` and `assets/terminal/` |
+| Browser extension | `browser/extension/`, `cmd/flux-native/`, `internal/nativemsg/` |
 | Package and system install | `dist/`, `Makefile` |
 
 Keep network state in `fluxd`.

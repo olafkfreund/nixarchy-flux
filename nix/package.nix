@@ -25,6 +25,7 @@ let
         ../cmd
         ../internal
         ../scripts
+        ../browser
         ../gui/omarchy
         ../gui/qml
         ../dist
@@ -37,6 +38,7 @@ let
     subPackages = [
       "cmd/fluxd"
       "cmd/flux"
+      "cmd/flux-native"
     ];
 
     ldflags = [
@@ -82,6 +84,16 @@ let
       (cd gui/qml && find . -path ./tools -prune -o -type f \
         \( -name '*.qml' -o -name qmldir -o -name '*.js' \) -print |
         while read -r f; do install -Dm644 "$f" "$plugin/Flux/$f"; done)
+
+      # As the Makefile's install-extension, with a version a browser accepts
+      # (N.N.N: Chromium and Firefox reject the "+" of the Nix version).
+      ext=$out/share/flux/browser-extension
+      extVersion=$(echo '${version}' | sed -E 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/; t; s/.*/0.0.0/')
+      (cd browser/extension && find . -type f ! -name 'manifest*.json' \
+        -exec install -Dm644 {} "$ext"/{} \;)
+      for m in manifest.json manifest.firefox.json; do
+        sed "s/\"version\": *\"[^\"]*\"/\"version\": \"$extVersion\"/" browser/extension/$m > "$ext/$m"
+      done
 
       install -Dm644 dist/61-flux-v4l2loopback.rules $out/lib/udev/rules.d/61-flux-v4l2loopback.rules
       install -Dm644 dist/flux.desktop $out/share/applications/flux.desktop
