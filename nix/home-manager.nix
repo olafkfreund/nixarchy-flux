@@ -90,11 +90,15 @@ in
       # A copy: Chromium saves the realpath of an unpacked extension, and a
       # link would save a store path that garbage collection removes.
       home.activation.fluxBrowserExtension = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-        dir=${lib.escapeShellArg "${config.xdg.dataHome}/flux/browser-extension"}
-        $DRY_RUN_CMD rm -rf "$dir"
-        $DRY_RUN_CMD mkdir -p "$(dirname "$dir")"
-        $DRY_RUN_CMD cp -rLT --no-preserve=mode ${core}/share/flux/browser-extension "$dir"
-        $DRY_RUN_CMD chmod -R u+w "$dir"
+        # The Chromium folder and the Firefox one, whose manifest.json is the
+        # Gecko manifest.
+        for name in browser-extension browser-extension-firefox; do
+          dir=${lib.escapeShellArg "${config.xdg.dataHome}/flux"}/$name
+          $DRY_RUN_CMD rm -rf "$dir"
+          $DRY_RUN_CMD mkdir -p "$(dirname "$dir")"
+          $DRY_RUN_CMD cp -rLT --no-preserve=mode ${core}/share/flux/$name "$dir"
+          $DRY_RUN_CMD chmod -R u+w "$dir"
+        done
       '';
 
       xdg.configFile = lib.listToAttrs (

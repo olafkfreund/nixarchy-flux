@@ -13,7 +13,7 @@ PLUGIN_FILES := manifest.json Service.qml Backend.qml BarWidget.qml Panel.qml Mo
 
 # EXT_VERSION is the Flux version in the form that a browser wants for the
 # version of an extension: numbers and nothing else.
-EXT_VERSION := $(shell echo '$(VERSION)' | sed -E 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/; t; s/.*/0.0.0/')
+EXT_VERSION := $(shell echo '$(VERSION)' | sed -E 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/; t; s/.*/0.1.0/')
 
 # copy-plugin DEST copies the plugin in the layout that `omarchy plugin
 # validate` accepts: real files, the shared views in Flux/, and no tools/.
@@ -31,6 +31,8 @@ define install-extension
 	cd browser/extension && find . -type f ! -name 'manifest*.json' -exec install -Dm644 {} $(1)/{} \;
 	sed 's/"version": *"[^"]*"/"version": "$(EXT_VERSION)"/' browser/extension/manifest.json > $(1)/manifest.json
 	sed 's/"version": *"[^"]*"/"version": "$(EXT_VERSION)"/' browser/extension/manifest.firefox.json > $(1)/manifest.firefox.json
+	cd browser/extension && find . -type f ! -name 'manifest*.json' -exec install -Dm644 {} $(1)-firefox/{} \;
+	sed 's/"version": *"[^"]*"/"version": "$(EXT_VERSION)"/' browser/extension/manifest.firefox.json > $(1)-firefox/manifest.json
 endef
 
 .PHONY: build build-go build-gui test test-gui vet install install-user install-plugin uninstall uninstall-user uninstall-plugin dev open snapshot android macos test-macos install-macos ios ios-release test-ios browser clean
@@ -158,7 +160,7 @@ uninstall-user:
 	fi; true
 	rm -f $(USER_PREFIX)/bin/fluxd $(USER_PREFIX)/bin/flux-cli $(USER_PREFIX)/bin/flux-gui
 	rm -f $(USER_PREFIX)/bin/flux-native
-	rm -rf $(USER_PREFIX)/share/flux/browser-extension
+	rm -rf $(USER_PREFIX)/share/flux/browser-extension $(USER_PREFIX)/share/flux/browser-extension-firefox
 	@# Remove the flux link only when it points to flux-cli.
 	@link=$(USER_PREFIX)/bin/flux; if [ "$$(readlink "$$link")" = flux-cli ]; then rm -f "$$link"; fi
 	rm -rf $(USER_PREFIX)/share/flux/omarchy-plugin

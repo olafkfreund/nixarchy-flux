@@ -88,12 +88,17 @@ let
       # As the Makefile's install-extension, with a version a browser accepts
       # (N.N.N: Chromium and Firefox reject the "+" of the Nix version).
       ext=$out/share/flux/browser-extension
-      extVersion=$(echo '${version}' | sed -E 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/; t; s/.*/0.0.0/')
+      extVersion=$(echo '${version}' | sed -E 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/; t; s/.*/0.1.0/')
       (cd browser/extension && find . -type f ! -name 'manifest*.json' \
         -exec install -Dm644 {} "$ext"/{} \;)
       for m in manifest.json manifest.firefox.json; do
         sed "s/\"version\": *\"[^\"]*\"/\"version\": \"$extVersion\"/" browser/extension/$m > "$ext/$m"
       done
+      # Firefox reads manifest.json from the picked folder, so Firefox and Zen
+      # get their own folder whose manifest.json is the Gecko manifest.
+      (cd browser/extension && find . -type f ! -name 'manifest*.json' \
+        -exec install -Dm644 {} "$ext-firefox"/{} \;)
+      sed "s/\"version\": *\"[^\"]*\"/\"version\": \"$extVersion\"/" browser/extension/manifest.firefox.json > "$ext-firefox/manifest.json"
 
       install -Dm644 dist/61-flux-v4l2loopback.rules $out/lib/udev/rules.d/61-flux-v4l2loopback.rules
       install -Dm644 dist/flux.desktop $out/share/applications/flux.desktop

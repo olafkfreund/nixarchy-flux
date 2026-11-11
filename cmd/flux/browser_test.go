@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/user"
@@ -302,6 +303,8 @@ func nixBrowserFixture(t *testing.T) (string, string) {
 	share := filepath.Join(home, "package", "share", "flux", "browser-extension")
 	write(t, filepath.Join(share, "manifest.json"), `{"name":"Flux"}`)
 	write(t, filepath.Join(share, "icons", "icon.png"), "icon")
+	write(t, filepath.Join(firefoxDir(share), "manifest.json"), `{"name":"Flux","browser_specific_settings":{"gecko":{}}}`)
+	write(t, filepath.Join(firefoxDir(share), "icons", "icon.png"), "icon")
 	return home, share
 }
 
@@ -417,8 +420,8 @@ func TestNixBrowserLeavesManagedSymlinks(t *testing.T) {
 	if err := os.Symlink(managedManifest, manifest); err != nil {
 		t.Fatal(err)
 	}
-	if err := browserInstall(nil); err == nil || !strings.Contains(err.Error(), "differs") {
-		t.Fatalf("mismatch: %v", err)
+	if out := captureBrowserOutput(t, func() error { return browserInstall(nil) }); !strings.Contains(out, "differs") {
+		t.Fatalf("a differing managed manifest must be reported, and install must go on:\n%s", out)
 	}
 	body, _ := json.Marshal(manifestFor(target))
 	write(t, managedManifest, string(body))
@@ -473,6 +476,10 @@ func installable(t *testing.T) string {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_DATA_HOME", "")
 	write(t, filepath.Join(home, ".local", "bin", hostBinary), "#!/bin/sh\n")
+	oldExe, oldInstalled := browserExecutable, installedExtension
+	browserExecutable = func() (string, error) { return filepath.Join(home, "nowhere", "bin", "flux-cli"), nil }
+	installedExtension = filepath.Join(home, "no-system-install")
+	t.Cleanup(func() { browserExecutable, installedExtension = oldExe, oldInstalled })
 	return home
 }
 
@@ -504,5 +511,95 @@ func write(t *testing.T, path, body string) {
 	}
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestNixBrowserCopiesFirefoxFolder checks F1: the Firefox folder, whose
+// manifest.json is the Gecko manifest, is copied too, and the help points
+// Firefox at its manifest.json.
+func TestNixBrowserCopiesFirefoxFolder(t *testing.T) {
+	home, _ := nixBrowserFixture(t)
+	write(t, filepath.Join(home, ".nix-profile", "bin", hostBinary), "native")
+	mkdir(t, filepath.Join(home, ".mozilla", "firefox"))
+	out := captureBrowserOutput(t, func() error { return browserInstall(nil) })
+	ff := firefoxDir(userExtension())
+	if got := read(t, filepath.Join(ff, "manifest.json"), nil); !strings.Contains(got, "gecko") {
+		t.Fatalf("Firefox folder manifest.json: %s", got)
+	}
+	if !strings.Contains(out, filepath.Join(ff, "manifest.json")) {
+		t.Fatalf("help must name the Firefox manifest.json:\n%s", out)
+	}
+}
+
+// TestBrowserManagedDanglingSymlink checks F2: a managed manifest whose
+// target is gone is reported, not fatal.
+func TestBrowserManagedDanglingSymlink(t *testing.T) {
+	home := installable(t)
+	mkdir(t, filepath.Join(home, ".config", "chromium", "NativeMessagingHosts"))
+	link := filepath.Join(home, ".config", "chromium", "NativeMessagingHosts", nativemsg.Host+".json")
+	if err := os.Symlink(filepath.Join(home, "gone.json"), link); err != nil {
+		t.Fatal(err)
+	}
+	out := captureBrowserOutput(t, func() error { return browserInstall(nil) })
+	if !strings.Contains(out, "target is missing") {
+		t.Fatalf("a dangling managed manifest must be reported:\n%s", out)
+	}
+}
+
+// TestBrowserRemoveLeavesManagedSymlink checks F3.
+func TestBrowserRemoveLeavesManagedSymlink(t *testing.T) {
+	home := installable(t)
+	dir := filepath.Join(home, ".config", "chromium", "NativeMessagingHosts")
+	mkdir(t, dir)
+	body, _ := json.Marshal(hostManifest{Name: nativemsg.Host})
+	real := filepath.Join(home, "managed.json")
+	write(t, real, string(body))
+	link := filepath.Join(dir, nativemsg.Host+".json")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	out := captureBrowserOutput(t, func() error { return browserRemove(nil) })
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 || !strings.Contains(out, "managed by Home Manager") {
+		t.Fatalf("remove must leave a managed manifest: %v\n%s", err, out)
+	}
+}
+
+// TestBrowserInstallRefusesBadID checks F8: --id --dry-run is not an ID.
+func TestBrowserInstallRefusesBadID(t *testing.T) {
+	installable(t)
+	for _, args := range [][]string{{"--id", "--dry-run"}, {"--id=short"}, {"--id", "JGFIBBDALCKCBMDCNGBALOBBHCBEPAMM"}} {
+		if err := browserInstall(args); err == nil || !strings.Contains(err.Error(), "not a Chromium extension ID") {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if err := browserInstall([]string{"--id", extensionID, "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestHomeManagerManifestsMatchTheCLI checks F6: the literals that the Home
+// Manager module writes are the ones that flux-cli writes.
+func TestHomeManagerManifestsMatchTheCLI(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "nix", "home-manager.nix"))
+	if errors.Is(err, os.ErrNotExist) {
+		// The Nix build copies only the Go sources; nix/checks.nix checks
+		// the Home Manager manifests there.
+		t.Skip("nix/home-manager.nix is not in this source tree")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	chromium := manifestFor(target{host: "x", origins: []string{"chrome-extension://" + extensionID + "/"}})
+	gecko := manifestFor(target{host: "x", extensions: []string{geckoID}})
+	for _, want := range []string{
+		`name = "` + chromium.Name + `"`,
+		`description = "` + chromium.Description + `"`,
+		`type = "` + chromium.Type + `"`,
+		`"` + chromium.AllowedOrigins[0] + `"`,
+		`"` + gecko.AllowedExtensions[0] + `"`,
+	} {
+		if !strings.Contains(string(src), want) {
+			t.Errorf("nix/home-manager.nix lacks %s", want)
+		}
 	}
 }

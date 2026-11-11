@@ -86,6 +86,14 @@ details; approving this plan approves them.
 | C17 | (agy plan review) step order | steps 2 and 3 both edit `cmd/flux/browser.go`, so they run one after the other on the same Codex member; step 4 starts after step 3; step 5 may run beside steps 2–4 | parallel edits of one file conflict |
 | C18 | (agy plan review) step 4 constants | the HM manifests use these literals: `name = "org.omarchy.flux"`, `description = "Flux host for the Flux browser extension"`, Chromium origin `chrome-extension://jgfibbdalckcbmdcngbalobbhcbepamm/`, Gecko ID `flux@omarchy.org` | the coder must not guess them; key order in JSON does not matter to browsers or to `browserRemove` |
 | C19 | (implementation) the browser option adds the core to `home.packages` | only when `services.flux.enable` is off; with it on, `cfg.package` already holds the core. The module's `config` is an `lib.mkMerge` of 2 `mkIf` blocks | 2 copies of each file in the profile risk a `buildEnv` collision |
+| F1 | (Codex, agy diff reviews; after the owner merged #29 as it was) one unpacked folder with `manifest.firefox.json` | a second folder `browser-extension-firefox` whose `manifest.json` is the Gecko manifest, in the Makefile, the Nix package, the CLI copy and the Home Manager copy; help and docs point Firefox and Zen at it | Firefox reads `manifest.json` from the folder of the picked file, so picking `manifest.firefox.json` loaded the Chromium manifest |
+| F2 | (Opus, agy) a differing managed manifest aborts install | report it and go on; compare `path` after `EvalSymlinks`; a dangling link is reported | install stopped part-way |
+| F3 | (Opus) | `browser remove` leaves a Home Manager link alone | it deleted a managed manifest that the next switch put back |
+| F4 | (Opus, agy) | usage text lists `--browser`; `setup.go` renames its local `browser` variable | the help still described the old default-on step |
+| F5 | (Opus, agy) | on a Nix build, help says to run `flux-cli browser install`, never `make install`; a symlinked extension folder gets a warning | wrong advice, and a link would make Chromium save a store path |
+| F6 | (Opus, agy) | `installable()` replaces the executable and `installedExtension` (now a var); a Go test checks the Home Manager literals against `manifestFor` (skipped in the Nix sandbox, where `nix/checks.nix` covers it) | tests could read the host's `/usr`, and Home Manager parity was untested |
+| F7 | (agy) `EXT_VERSION` fallback `0.0.0` | `0.1.0`, in the Makefile and the Nix package; the package check asserts `N.N.N` in all 3 manifests | Chromium rejects `0.0.0` |
+| F8 | (agy) | `--id` must match `^[a-p]{32}$` | `--id --dry-run` took `--dry-run` as the ID and wrote files |
 
 ## Steps
 
