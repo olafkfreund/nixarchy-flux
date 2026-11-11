@@ -75,6 +75,7 @@ Run `flux-cli setup` as your desktop user after installation.
 The short name `flux` also works when no other program, such as `fluxcd`, uses that name.
 
 The [install guide](docs/install.md) covers dependencies, source builds, user-only installation, updates, and removal.
+On NixOS or Home Manager, see the [Nix flake guide](docs/nix.md).
 Flux checks for a new release once a day. To install it, run `flux-cli update`.
 
 ## Connect your phone
