@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 48
 spec: spec/2026-11-11-48-tsnet-camera.md
 coders:
