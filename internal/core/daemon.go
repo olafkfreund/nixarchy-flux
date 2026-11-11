@@ -49,8 +49,8 @@ type Daemon struct {
 	clipSend      context.CancelFunc
 	transfers     []*Transfer
 	outbox        *outbox
-	resumeMu      sync.Mutex
 	resumeReplies map[string]chan resumeMessage
+	resumeWorkers map[string]*resumeWorker
 	resumeDir     string
 	automationQ   chan automationEvent
 
@@ -374,6 +374,7 @@ func New(ctx context.Context, logger *log.Logger, opts Options) (*Daemon, error)
 		return nil, err
 	}
 	d.resumeReplies = map[string]chan resumeMessage{}
+	d.resumeWorkers = map[string]*resumeWorker{}
 	if err := d.loadOutbox(); err != nil {
 		return nil, err
 	}

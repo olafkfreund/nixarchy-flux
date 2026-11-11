@@ -175,6 +175,13 @@ func (d *Daemon) progress(t *Transfer) func(int64) {
 
 func (d *Daemon) finishTransfer(t *Transfer, err error) {
 	d.mu.Lock()
+	received := d.finishTransferLocked(t, err)
+	d.mu.Unlock()
+	d.finishTransferEmit(t, received)
+}
+
+// finishTransferLocked changes the record while d.mu is held.
+func (d *Daemon) finishTransferLocked(t *Transfer, err error) bool {
 	received := err == nil && t.Dir == "in" && t.State != "done"
 	switch {
 	case err == nil:
@@ -186,7 +193,10 @@ func (d *Daemon) finishTransfer(t *Transfer, err error) {
 	}
 	t.Rate = 0
 	d.trimTransfersLocked()
-	d.mu.Unlock()
+	return received
+}
+
+func (d *Daemon) finishTransferEmit(t *Transfer, received bool) {
 	if received {
 		d.emitAutomation(automationEvent{Kind: "file.received", Device: t.Device, Path: t.Path})
 	}

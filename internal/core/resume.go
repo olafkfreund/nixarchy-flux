@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -33,10 +34,32 @@ type resumeMessage struct {
 }
 
 type incomingRecord struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-	Hash string `json:"hash"`
-	Path string `json:"path,omitempty"`
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	Hash     string `json:"hash"`
+	Path     string `json:"path,omitempty"`
+	Canceled bool   `json:"canceled,omitempty"`
+}
+
+type resumePacket struct {
+	link    *lan.Link
+	packet  *proto.Packet
+	message resumeMessage
+}
+
+type resumeRun struct {
+	transfer  *Transfer
+	ctx       context.Context
+	cancel    context.CancelFunc
+	link      *lan.Link
+	last      time.Time
+	published bool
+}
+
+type resumeWorker struct {
+	queue  chan resumePacket
+	events chan struct{}
+	runs   map[string]*resumeRun
 }
 
 func (d *Daemon) sendResumable(ctx context.Context, l *lan.Link, t *Transfer, j outboxJob, path string) error {
@@ -119,18 +142,167 @@ func (d *Daemon) handleResumable(dev *Device, l *lan.Link, p *proto.Packet) {
 	if b.Action != "offer" && b.Action != "chunk" {
 		return
 	}
-	go func() {
-		d.resumeMu.Lock()
-		defer d.resumeMu.Unlock()
+	if !transferHash.MatchString(b.Hash) || b.Size < 0 || b.Size > 1<<40 || safeName(b.Name) != b.Name || b.Name == "" {
+		_ = l.Send(proto.New(proto.TypeFluxTransfer, resumeMessage{Action: "error", ID: b.ID, Error: "invalid transfer metadata"}))
+		return
+	}
+	d.mu.Lock()
+	if d.resumeWorkers == nil {
+		d.resumeWorkers = map[string]*resumeWorker{}
+	}
+	w := d.resumeWorkers[dev.ID]
+	if w == nil {
+		w = &resumeWorker{queue: make(chan resumePacket, 8), events: make(chan struct{}, 1), runs: map[string]*resumeRun{}}
+		d.resumeWorkers[dev.ID] = w
+		go d.runResumeWorker(dev, w)
+	}
+	select {
+	case w.queue <- resumePacket{l, p, b}:
+		d.mu.Unlock()
+	default:
+		d.mu.Unlock()
+		_ = l.Send(proto.New(proto.TypeFluxTransfer, resumeMessage{Action: "error", ID: b.ID, Error: "too many transfer packets"}))
+	}
+}
+
+func (d *Daemon) runResumeWorker(dev *Device, w *resumeWorker) {
+	tick := time.NewTicker(receiveIdle / 4)
+	defer tick.Stop()
+	lastWork := time.Now()
+	for {
+		select {
+		case pkt := <-w.queue:
+			d.sweepResumeRuns(dev, w)
+			d.processResumePacket(dev, w, pkt)
+			lastWork = time.Now()
+		case <-w.events:
+			d.sweepResumeRuns(dev, w)
+		case <-tick.C:
+			d.sweepResumeRuns(dev, w)
+		case <-d.ctx.Done():
+			return
+		}
+		d.mu.Lock()
+		if len(w.queue) == 0 && len(w.runs) == 0 && time.Since(lastWork) >= receiveIdle {
+			delete(d.resumeWorkers, dev.ID)
+			d.mu.Unlock()
+			return
+		}
+		d.mu.Unlock()
+	}
+}
+
+func (d *Daemon) processResumePacket(dev *Device, w *resumeWorker, pkt resumePacket) {
+	b := pkt.message
+	run := w.runs[b.ID]
+	if run == nil {
 		if b.Action == "offer" {
 			pruneIncoming(d.resumeDir, time.Now().Add(-7*24*time.Hour))
 		}
-		reply, err := d.receiveResumable(dev, l, p, b)
-		if err != nil {
-			reply = resumeMessage{Action: "error", ID: b.ID, Error: err.Error()}
+		if !d.startReceive(dev) {
+			_ = pkt.link.Send(proto.New(proto.TypeFluxTransfer, resumeMessage{Action: "error", ID: b.ID, Error: fmt.Sprintf("the device sends more than %d files at the same time", maxReceives)}))
+			return
 		}
-		_ = l.Send(proto.New(proto.TypeFluxTransfer, reply))
-	}()
+		t := d.newTransfer(dev, b.Name, "", "in", b.Size)
+		ctx, cancel := context.WithCancel(d.ctx)
+		run = &resumeRun{transfer: t, ctx: ctx, cancel: cancel, link: pkt.link, last: time.Now()}
+		w.runs[b.ID] = run
+		d.mu.Lock()
+		t.cancel = func() {
+			cancel()
+			select {
+			case w.events <- struct{}{}:
+			default:
+			}
+		}
+		if t.State == "canceled" {
+			t.cancel()
+		}
+		d.mu.Unlock()
+	}
+	ctx, cancel := context.WithCancel(run.ctx)
+	cancelOnLinkDown(ctx, pkt.link, cancel)
+	reply, err := d.receiveResumable(ctx, dev, pkt.link, pkt.packet, b, run)
+	stopped := ctx.Err() != nil
+	if stopped && (err == nil || errors.Is(err, context.Canceled)) {
+		err = d.resumeStop(run)
+	}
+	cancel()
+	if err != nil {
+		reply = resumeMessage{Action: "error", ID: b.ID, Error: err.Error()}
+	}
+	_ = pkt.link.Send(proto.New(proto.TypeFluxTransfer, reply))
+	if err != nil || reply.Action == "done" || stopped || run.ctx.Err() != nil {
+		d.endResumeRun(dev, w, b.ID, err)
+	} else {
+		run.last = time.Now()
+	}
+}
+
+// errLinkDown ends a resumable receive whose link closed. The partial data
+// stays, so the sender can resume.
+var errLinkDown = errors.New("the device disconnected")
+
+// resumeStop is the error of a run whose context ended: context.Canceled
+// only for a user cancel, so finishTransfer labels a link drop or a daemon
+// stop as failed, not canceled.
+func (d *Daemon) resumeStop(run *resumeRun) error {
+	d.mu.Lock()
+	canceled := run.transfer.State == "canceled"
+	d.mu.Unlock()
+	if canceled {
+		return context.Canceled
+	}
+	return errLinkDown
+}
+
+func (d *Daemon) sweepResumeRuns(dev *Device, w *resumeWorker) {
+	for id, run := range w.runs {
+		select {
+		case <-run.link.Done():
+			d.endResumeRun(dev, w, id, errLinkDown)
+			continue
+		default:
+		}
+		if run.ctx.Err() != nil {
+			d.endResumeRun(dev, w, id, d.resumeStop(run))
+		} else if time.Since(run.last) >= receiveIdle {
+			d.endResumeRun(dev, w, id, errStalled)
+		}
+	}
+}
+
+func (d *Daemon) endResumeRun(dev *Device, w *resumeWorker, id string, err error) {
+	run := w.runs[id]
+	if run == nil {
+		return
+	}
+	run.cancel()
+	d.mu.Lock()
+	canceled := run.transfer.State == "canceled"
+	if !canceled {
+		_ = d.finishTransferLocked(run.transfer, err)
+		received := err == nil && run.published
+		d.mu.Unlock()
+		d.finishTransferEmit(run.transfer, received)
+	} else {
+		d.trimTransfersLocked()
+		d.mu.Unlock()
+		d.markDirty()
+		key := sha256.Sum256([]byte(dev.ID + ":" + id))
+		dir := filepath.Join(d.resumeDir, hex.EncodeToString(key[:]))
+		meta := filepath.Join(dir, "state.json")
+		var record incomingRecord
+		if data, readErr := os.ReadFile(meta); readErr == nil && json.Unmarshal(data, &record) == nil {
+			record.Canceled = true
+			if saveErr := saveJSON(meta, record); saveErr != nil {
+				d.logf("cancel transfer %s: %v", id, saveErr)
+			}
+		}
+		_ = os.Remove(filepath.Join(dir, "data"))
+	}
+	d.endReceive(dev)
+	delete(w.runs, id)
 }
 
 func pruneIncoming(dir string, before time.Time) {
@@ -145,7 +317,7 @@ func pruneIncoming(dir string, before time.Time) {
 	}
 }
 
-func (d *Daemon) receiveResumable(dev *Device, l *lan.Link, p *proto.Packet, b resumeMessage) (resumeMessage, error) {
+func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link, p *proto.Packet, b resumeMessage, run *resumeRun) (resumeMessage, error) {
 	ack := resumeMessage{Action: "offset", ID: b.ID}
 	if !transferHash.MatchString(b.Hash) || b.Size < 0 || b.Size > 1<<40 || safeName(b.Name) != b.Name || b.Name == "" {
 		return ack, errors.New("invalid transfer metadata")
@@ -161,6 +333,9 @@ func (d *Daemon) receiveResumable(dev *Device, l *lan.Link, p *proto.Packet, b r
 			return ack, errors.New("transfer metadata changed")
 		}
 		r = old
+		if r.Canceled {
+			return ack, errors.New("the transfer was canceled")
+		}
 		if r.Path != "" {
 			ack.Action, ack.Offset = "done", r.Size
 			return ack, nil
@@ -187,9 +362,8 @@ func (d *Daemon) receiveResumable(dev *Device, l *lan.Link, p *proto.Packet, b r
 		if b.Offset != offset || p.PayloadSize <= 0 || p.PayloadSize > transferChunk || p.PayloadSize > b.Size-offset {
 			return ack, errors.New("invalid transfer chunk")
 		}
-		ctx, cancel := context.WithTimeout(d.ctx, time.Minute)
+		ctx, cancel := context.WithTimeout(ctx, time.Minute)
 		defer cancel()
-		cancelOnLinkDown(ctx, l, cancel)
 		rc, err := l.FetchPayload(ctx, p)
 		if err != nil {
 			return ack, err
@@ -207,6 +381,7 @@ func (d *Daemon) receiveResumable(dev *Device, l *lan.Link, p *proto.Packet, b r
 			return ack, err
 		}
 		offset += n
+		d.progress(run.transfer)(offset)
 	}
 	ack.Offset = offset
 	if offset != b.Size {
@@ -250,6 +425,15 @@ func (d *Daemon) receiveResumable(dev *Device, l *lan.Link, p *proto.Packet, b r
 	if err != nil {
 		return ack, err
 	}
+	d.mu.Lock()
+	if run.transfer.State == "canceled" {
+		d.mu.Unlock()
+		_ = os.Remove(r.Path)
+		return ack, context.Canceled
+	}
+	run.transfer.State = "done"
+	run.transfer.Done = run.transfer.Size
+	d.mu.Unlock()
 	if err = os.Rename(dest.Name(), r.Path); err != nil {
 		os.Remove(r.Path)
 		return ack, err
@@ -259,11 +443,10 @@ func (d *Daemon) receiveResumable(dev *Device, l *lan.Link, p *proto.Packet, b r
 		return ack, err
 	}
 	os.Remove(part)
-	t := d.newTransfer(dev, b.Name, r.Path, "in", b.Size)
 	d.mu.Lock()
-	t.Path = r.Path
+	run.transfer.Path = r.Path
 	d.mu.Unlock()
-	d.finishTransfer(t, nil)
+	run.published = true
 	d.notify(desktop.Notification{AppName: "Flux", Title: "Received " + b.Name, Body: "Saved as " + r.Path,
 		Actions: []desktop.Action{{Key: "open:" + r.Path, Label: "Open"}}})
 	ack.Action = "done"

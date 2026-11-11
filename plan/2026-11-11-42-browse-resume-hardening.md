@@ -88,6 +88,10 @@ These tighten or correct the approved spec; approving this plan approves them.
 | R7 | `checkSpace(resumeDir, …)` on offer | `os.MkdirAll(resumeDir, 0o700)` before the first check | `checkSpace` calls `statfs` on a folder that does not exist yet on a fresh install (`share.go:538-543`) |
 | R8 | the existing outbox test keeps passing | step 2 migrates `TestOutboxRestartAndResumableDelivery` (`outbox_test.go:56-85`), which calls `receiveResumable` directly, to dispatch through `handleResumable` and read the replies | the direct call bypasses the single worker owner |
 | R9 | 64 records in all | 64 records **per device** | as approved in the spec text; made explicit |
+| R10 | (agy plan review) a stop ends the run | a link drop, unpair or daemon stop ends the run with `errLinkDown`, never `context.Canceled`; only a user cancel uses `context.Canceled` (`resumeStop`) | `finishTransfer` labels any "context canceled" error as `canceled` (`share.go:180`) |
+| R11 | (agy plan review) limits on a new offer | check `maxPartials` **before** evicting old records for `maxRecords` | a refused offer must not delete tombstones and receipts |
+| R12 | (agy plan review) worker lifetime | the worker returns on `d.ctx.Done()`; `receiveIdle` becomes a `var` so tests can shorten it | no goroutine outlives the daemon; idle tests must not wait a minute |
+| R13 | (agy plan review) publish checks | recheck pairing and the context before the `EXDEV` rename too; drop the old `newTransfer` at the end of `receiveResumable` (done in step 2) | both publish paths need the same check |
 
 ## Steps
 
