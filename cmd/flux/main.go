@@ -27,6 +27,9 @@ import (
 )
 
 var version = "dev"
+var packager = "" // "nix" when built by the flake
+
+func nixBuild() bool { return packager == "nix" }
 
 const usage = `Usage: flux-cli [command] [--device NAME] [args]
 

@@ -180,6 +180,10 @@ func removeUserUnit(path string, dry bool, run func(string, string, ...string) e
 }
 
 func setupService(dry bool, run func(string, string, ...string) error) error {
+	if nixBuild() {
+		fmt.Println("  - fluxd.service is managed by the NixOS or Home Manager module (services.flux)")
+		return nil
+	}
 	path := userUnit()
 	restart := false
 	if _, err := os.Stat(systemUnit); err == nil {
@@ -363,6 +367,11 @@ func setupPlugin(dry bool, run func(string, string, ...string) error) error {
 // setupSystemReport checks the parts that need root and prints the command
 // that adds them.
 func setupSystemReport() {
+	if nixBuild() {
+		fmt.Println("  - To use the phone as a webcam, set services.flux.webcam.enable in NixOS")
+		fmt.Println("  - To use phone approval, set services.flux.approve.services in NixOS")
+		return
+	}
 	script := "/usr/share/flux/post-install.sh"
 	if _, err := os.Stat(script); err != nil {
 		script = "dist/post-install.sh (from the checkout, after sudo make install)"

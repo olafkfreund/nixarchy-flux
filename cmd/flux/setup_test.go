@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,6 +117,54 @@ func TestSetupFailsWhenAStepFails(t *testing.T) {
 	err := setup([]string{"--no-plugin"})
 	if err == nil || err.Error() != "1 step failed" {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestNixSetup(t *testing.T) {
+	packager = "nix"
+	t.Cleanup(func() { packager = "" })
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"service", func() error {
+			return setupService(false, func(string, string, ...string) error {
+				t.Fatal("setup ran systemctl")
+				return nil
+			})
+		}},
+		{"system report", func() error { setupSystemReport(); return nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			read, write, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout := os.Stdout
+			os.Stdout = write
+			t.Cleanup(func() { os.Stdout = stdout })
+			err = tc.run()
+			write.Close()
+			out, readErr := io.ReadAll(read)
+			read.Close()
+			if err != nil || readErr != nil {
+				t.Fatalf("run: %v, read: %v", err, readErr)
+			}
+			want := "services.flux"
+			if tc.name == "system report" {
+				want = "services.flux.webcam.enable"
+				if !strings.Contains(string(out), "services.flux.approve.services") {
+					t.Fatalf("missing approval option: %s", out)
+				}
+			}
+			if !strings.Contains(string(out), want) {
+				t.Fatalf("missing %s: %s", want, out)
+			}
+		})
+	}
+	if _, err := os.Stat(userUnit()); !os.IsNotExist(err) {
+		t.Fatalf("setup wrote a unit: %v", err)
 	}
 }
 
