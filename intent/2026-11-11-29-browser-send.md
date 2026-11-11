@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 29
 author: olafkfreund
 ---
@@ -78,7 +78,10 @@ cannot be merged as it is:
 - Must not break the existing Arch install or `make install`.
 - Tests pass in the Nix sandbox.
 
-## Open questions
+## Decisions (approved 2026-11-11)
+
+The owner approved the recommended answer to each question below.
+
 
 1. **Setup default.** Should `flux-cli setup` stop installing host manifests
    by default (opt-in through `flux-cli browser install` or
