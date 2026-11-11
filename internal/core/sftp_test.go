@@ -284,6 +284,102 @@ func TestBrowseRoots(t *testing.T) {
 	}
 }
 
+func TestBrowseSymlinkToHiddenHomeFolder(t *testing.T) {
+	home, _ := browseTree(t)
+	docs := filepath.Join(home, "Documents")
+	if err := os.Remove(docs); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".ssh"), docs); err != nil {
+		t.Fatal(err)
+	}
+	fsys := testBrowseFS(t, home)
+	defer fsys.Close()
+	c := serveBrowse(t, fsys)
+	if _, err := readRemote(c, filepath.Join(docs, "id_ed25519")); err == nil {
+		t.Fatal("Documents symlink exposes a private key")
+	}
+	entries, err := c.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == "Documents" {
+			t.Fatal("home lists a symlink to a hidden folder")
+		}
+	}
+}
+
+func TestBrowseRootsWithSymlinkedHome(t *testing.T) {
+	realHome, outside := browseTree(t)
+	home := filepath.Join(outside, "home-link")
+	if err := os.Symlink(realHome, home); err != nil {
+		t.Fatal(err)
+	}
+	for _, downloads := range []string{filepath.Join(realHome, ".ssh"), filepath.Dir(realHome)} {
+		roots := browseRoots(home, downloads)
+		for _, r := range roots {
+			if r[0] == "Downloads" {
+				t.Fatalf("%s is a root: %q", downloads, roots)
+			}
+		}
+	}
+}
+
+func TestBrowseDropsHiddenRoots(t *testing.T) {
+	home, outside := browseTree(t)
+	private := filepath.Join(outside, ".private")
+	versions := filepath.Join(outside, "share", ".stversions")
+	for _, dir := range []string{private, versions} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	docs := filepath.Join(home, "Documents")
+	if err := os.Remove(docs); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(versions, docs); err != nil {
+		t.Fatal(err)
+	}
+	privateLink := filepath.Join(outside, "private-link")
+	if err := os.Symlink(private, privateLink); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		roots [][2]string
+	}{
+		{"download_dir outside home", browseRoots(home, private)},
+		{"Documents symlink to dot-folder", browseRoots(home, filepath.Join(home, "Downloads"))},
+		{"duplicate dot-folder roots", [][2]string{{"Home", home}, {"Downloads", private}, {"Documents", privateLink}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys, err := openBrowseFS(tc.roots, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer fsys.Close()
+			if len(fsys.roots) != 1 || fsys.roots[0].name != "Home" {
+				t.Fatalf("roots = %+v, want Home only", fsys.roots)
+			}
+		})
+	}
+}
+
+func TestBrowseDocumentsSymlinkToVisibleRoot(t *testing.T) {
+	home, _ := browseTree(t)
+	fsys := testBrowseFS(t, home)
+	defer fsys.Close()
+	if got := len(fsys.roots); got != 2 {
+		t.Fatalf("roots = %d, want Home and Documents", got)
+	}
+	c := serveBrowse(t, fsys)
+	if got, err := readRemote(c, filepath.Join(home, "Documents", "doc.txt")); err != nil || got != "doc" {
+		t.Fatalf("Documents read = %q, %v", got, err)
+	}
+}
+
 // browseSessionDaemon returns a daemon with share_home on, a paired device,
 // and a Browse PC session of that device with a client.
 func browseSessionDaemon(t *testing.T) (*Daemon, *Device, context.Context, *sftp.Client, string) {
