@@ -51,31 +51,58 @@ and the Omarchy shell plugin both load.
 
 4. **Params.** Both calls pass `{ id }` only, never `file.path`.
 
-5. **Width.** The card's `natural` width already adds
-   `actions.implicitWidth` (line 87), so a wide window makes the card wider
-   for the two icons (2 × 26 px plus spacing). On a card narrower than its
-   content the header row has no wrapping; two icons add about 56 px, far
-   less than two more words would. This is checked on a snapshot (below)
-   rather than changed.
+5. **Width.** A file card's `natural` width is at least 444 px
+   (`content = file ? 420`, line 87), and the two icons (2 × 26 px plus
+   spacing, about 56 px) fit in that. It is narrower only when the chat is:
+   `maxWidth` goes down to 280 px (`gui/qml/pages/Chat.qml:317`), which the
+   Qt app reaches at its 360 px minimum window width
+   (`gui/app/qml/Main.qml:12`); the Omarchy shell window is at least 900 px
+   wide (`gui/omarchy/Panel.qml:81`). At 280 px a received finished card's
+   header needs about 280 px (state word and time about 120, gap 16, icons
+   56, "Show in folder" about 85) of its 256 px, so the actions would cover
+   the time. Fix: a property
+   `readonly property bool crowded: meta.implicitWidth + 16 + actions.implicitWidth > col.width`;
+   when it is true, the `actions` row moves to its own line under `meta`
+   (anchored to the right, below it) and the header item's height is the
+   sum of both rows. When it is false, the header is exactly as today.
 
-6. **Test.** A new `TestCase` "ChatEntry" in `gui/tests/tst_views.qml`
-   creates a `ChatEntry` directly with a stand-in `view` (a `QtObject` with
-   `devName`, a `call(method, params, cb)` that records the request and
-   runs `cb`, and a `toast(text)` that records the text), finds the actions
-   by their `tip`, and emits their `clicked` signal:
-   - a received `done` file with a path: Open and Copy are visible; Open
-     records `transfer.open` with params exactly `{ id: "t3" }`; Copy
-     records `transfer.copy` with `{ id: "t3" }` and the toast "Copied to
-     the clipboard";
-   - a sent `done` file with a path: both visible;
-   - `active`, `queued`, `waiting`, `failed`, `canceled`, and `done`
-     without a path: neither visible;
-   - a clip entry: the file actions are not visible (the clip's own Copy
-     still is).
+6. **Order of the comment and the word action.** The comment at line 193
+   ("The actions of a file are words …") is replaced by one above the two
+   new icons: Open and Copy are icons like the same actions of a clip; the
+   other file actions are words, because each one has its own state.
+   "Show in folder" reuses the new property:
+   `visible: root.finished && !root.mine`.
+
+7. **Test.** In `gui/tests/tst_views.qml`. The two icons get `objectName`s
+   `fileOpen` and `fileCopy` (the clip's Copy also has `tip: "Copy"`, and
+   `findBy` ignores visibility, so a lookup by tip would find the clip's
+   hidden one).
+   - A new `TestCase` "ChatEntry" creates a `ChatEntry` directly, parented
+     to `top`, with `width: 500` (it has no implicit width) and a stand-in
+     `view`: a `QtObject` with `devName`, a `call(method, params, cb)` that
+     records `{method, params}` and runs `cb` only when given, and a
+     `toast(text)` that records the text. It emits the icons' `clicked`
+     signal (mouse and keyboard handling are `IconAction`'s, unchanged):
+     - a received `done` file with a path: both visible; Open records
+       `transfer.open` with params exactly `{ id: "t3" }` and no toast;
+       Copy records `transfer.copy` with exactly `{ id: "t3" }` and the
+       toast "Copied to the clipboard";
+     - a sent `done` file with a path: both visible;
+     - `active`, `queued`, `waiting`, `failed` and `canceled`, each with a
+       path (the daemon sets it before the end), and `done` without a path:
+       neither visible;
+     - a clip entry: neither visible;
+     - with `width: 280`: `crowded` is true and the actions row's `y` is
+       below `meta`; with `width: 500` it is false.
+   - In the existing `TestCase` "Errors" (with `FluxView` and the mock
+     backend, `tst_views.qml:673`): with `mock.failures["transfer.copy"]`
+     set to `{ code: "not_found", message: "… no longer exists" }`, Copy on
+     a finished card through the real `view.call` shows that message as a
+     toast and not "Copied to the clipboard".
 
 No change to the mock backend (it answers unknown methods with success,
-`gui/qml/tools/MockBackend.qml:68`), the fixture (finished `t3` and `t4`
-have paths, `fixture.json:284-302`), Go, or any other platform.
+`gui/qml/tools/MockBackend.qml:68,142`), the fixture (finished `t3` and
+`t4` have paths, `fixture.json:283-306`), Go, or any other platform.
 
 ## Alternatives rejected
 
@@ -88,13 +115,14 @@ have paths, `fixture.json:284-302`), Go, or any other platform.
   skips the daemon's check that the transfer is finished and still exists;
   the reviewed backend method was made for this.
 - **Make the image preview clickable.** Declined in the intent.
+- **Hide the time, or elide the state word, on a crowded card.** Loses
+  information the card has today; moving the actions to a second line keeps
+  all of it.
 
 ## Risks
 
-- **Narrow shell popup.** If the Omarchy shell plugin shows a card narrower
-  than its header, the icons could touch the time. Mitigation: the snapshot
-  check below; if it overlaps, the plan adds the smallest fix (for example
-  hiding the time first).
+- **The narrow Qt window.** Covered by `crowded` (design 5) and its test;
+  at widths between, the header has the same single row as today.
 - **CI does not run the QML tests.** `build.yml` runs `make vet test` (Go)
   only, so the view test runs here: `qmltestrunner` from Nix's
   `qt6.qtdeclarative` (the Makefile's default path is Arch's). The suite
@@ -107,10 +135,13 @@ have paths, `fixture.json:284-302`), Go, or any other platform.
 
 1. QML view tests, all passing, including the new "ChatEntry" case:
    `QT_QPA_PLATFORM=offscreen QML_XHR_ALLOW_FILE_READ=1 <qtdeclarative>/bin/qmltestrunner -input gui/tests`.
-2. `nix build .#flux-gui`, then `QT_QPA_PLATFORM=offscreen flux-gui --snapshot <dir>`
-   (`gui/qml/tools/Snapshot.qml`): `01-chat.png` shows Open and Copy on the
-   finished `t3` (received) and `t4` (sent) cards and not on the others, and
-   `06-chat-narrow.png` (560 px window) shows them with no overlap.
+2. `nix build .#flux-gui`, then
+   `QT_QPA_PLATFORM=offscreen flux-gui --snapshot <dir>` and the same with
+   `FLUX_SNAPSHOT_SIZE=360x760` (`gui/qml/tools/Snapshot.qml:13`):
+   `01-chat.png` shows Open, Copy and Show in folder on the received `t3`;
+   `08-chat-top.png` shows Open and Copy on the sent `t4` and nothing new on
+   `t5` (`done`, no path); the 360 px set shows the actions under the state
+   word, not over it.
 3. `nix flake check path:.` passes.
 4. Owner, on the desktop: Open launches the default app; Copy on a
    screenshot pastes an image, and Copy on a non-image pastes into a file
