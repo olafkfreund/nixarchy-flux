@@ -35,10 +35,12 @@ public final class ApprovePlugin: FluxPlugin, @unchecked Sendable {
         self.core = core
         let keys = ApproveKeys(directory: core.paths.data.appendingPathComponent("approve", isDirectory: true))
         self.keys = keys
-        Notifier.shared.register(category: Self.notificationCategory, actions: [
-            UNNotificationAction(identifier: "approve", title: "Approve", options: [.foreground]),
-            UNNotificationAction(identifier: "deny", title: "Deny", options: [.destructive]),
-        ]) { [weak self] action, info, _ in
+        do {
+            try keys.excludeFromBackup()
+        } catch {
+            FluxLog.plugin.error("approve keys stay in backups: \(String(describing: error), privacy: .public)")
+        }
+        Notifier.shared.register(category: Self.notificationCategory, actions: Self.notificationActions(platform: .current)) { [weak self] action, info, _ in
             guard let id = info["id"] as? String else { return }
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.notificationAction(action, id: id) } }
         }
@@ -54,13 +56,35 @@ public final class ApprovePlugin: FluxPlugin, @unchecked Sendable {
         }
     }
 
+    /// An unpair from either side ends the open request of the computer. A
+    /// link that only drops leaves it, because the computer can connect
+    /// again before the request expires. The core lock is held.
+    public func onDisconnected(_ device: Device) {
+        guard !device.paired else { return }
+        let computerId = device.id
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { self.unpaired(computerId) }
+        }
+    }
+
+    /// Ends the open request or enrollment of a computer that is no longer
+    /// paired. An enrollment also drops its new key.
+    @MainActor
+    func unpaired(_ computerId: String) {
+        guard let r = model.current, r.computerId == computerId else { return }
+        FluxLog.plugin.info("approve: the request of \(r.computerName, privacy: .public) ended with the unpair")
+        if r.kind == .enroll { keys.discard(computerId) }
+        end(r.id, .unpaired)
+    }
+
     // MARK: Requests
 
     @MainActor
     func receive(_ p: Packet, computerId: String, computerName: String) {
         switch p.string("kind") {
         case "cancel":
-            if let id = p.string("id") { end(id, .cancelled) }
+            // Only the computer of the open request can cancel it.
+            if let id = p.string("id"), model.current?.computerId == computerId { end(id, .cancelled) }
         case "request", "enroll":
             open(p, computerId: computerId, computerName: computerName)
         default:
@@ -76,21 +100,16 @@ public final class ApprovePlugin: FluxPlugin, @unchecked Sendable {
             model.present?()
             return
         }
-        let problem: String?
-        if let r {
-            if !ApproveMessage.fresh(r, now: Int64(Date().timeIntervalSince1970)) {
-                problem = "The clocks of this Mac and the computer differ by more than 10 minutes"
-            } else if r.kind == .approve && !keys.has(computerId) {
-                problem = "This Mac has no key for the computer. Run: sudo flux-cli approve enroll"
-            } else if model.current != nil {
-                problem = "Another request is open on this Mac"
-            } else {
-                problem = nil
-            }
-        } else {
-            problem = "The request is not valid"
-        }
-        if let problem {
+        let texts = ApproveTexts.current
+        #if os(iOS)
+        let secureEnclave = Self.secureEnclaveAvailable
+        #else
+        // A Mac without a Secure Enclave has no Touch ID either, and Approve
+        // says so.
+        let secureEnclave = true
+        #endif
+        if let problem = Self.refusal(r, now: Int64(Date().timeIntervalSince1970), hasKey: keys.has(computerId),
+                                      busy: model.current != nil, secureEnclave: secureEnclave, texts: texts) {
             FluxLog.plugin.info("approve: refused a request from \(computerName, privacy: .public): \(problem, privacy: .public)")
             core?.send(ApproveMessage.failed(id, message: problem), to: computerId)
             model.record(ApproveRecord(requestId: id, computerId: computerId, kind: r?.kind ?? (p.string("kind") == "enroll" ? .enroll : .approve),
@@ -104,21 +123,71 @@ public final class ApprovePlugin: FluxPlugin, @unchecked Sendable {
         model.phase = .ask
         model.deadline = Date().addingTimeInterval(TimeInterval(r.timeoutSeconds))
         model.record(ApproveRecord(requestId: r.id, computerId: computerId, kind: r.kind, summary: ApproveMessage.question(r),
-                                   received: Date(), outcome: .open))
+                                   received: Date(), outcome: .open, request: r))
         // The computer stops waiting at its timeout, so the request ends too.
         expiry = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(r.timeoutSeconds))
             if !Task.isCancelled { self?.end(r.id, .expired) }
         }
         Notifier.shared.post(id: Self.notificationId, category: Self.notificationCategory,
-                             title: r.kind == .approve ? "Approve \(r.service) on \(r.host)?" : "Enroll this Mac on \(r.host)?",
-                             body: ([ApproveMessage.question(r)] + Self.details(r)).joined(separator: "\n"),
-                             userInfo: ["id": r.id])
+                             title: r.kind == .approve ? "Approve \(r.service) on \(r.host)?" : texts.enrollTitle(host: r.host),
+                             body: ([ApproveMessage.question(r)] + Self.details(r, replacesKey: replacesKey(r))).joined(separator: "\n"),
+                             userInfo: ["id": r.id], interruptionLevel: Self.interruptionLevel)
         model.present?()
     }
 
-    /// The lines under the question: the terminal, the remote host, and who asks.
-    public static func details(_ r: ApproveRequest) -> [String] {
+    /// Why this device refuses the request without asking the user, or nil.
+    /// `r` is nil for a request that is not valid.
+    static func refusal(_ r: ApproveRequest?, now: Int64, hasKey: Bool, busy: Bool, secureEnclave: Bool, texts: ApproveTexts) -> String? {
+        guard let r else { return "The request is not valid" }
+        if !secureEnclave { return texts.noSecureEnclave }
+        if !ApproveMessage.fresh(r, now: now) { return texts.clockSkew }
+        if r.kind == .approve && !hasKey { return texts.noKey }
+        if busy { return texts.anotherOpen }
+        return nil
+    }
+
+    /// An iPhone asks for the time-sensitive level, which goes through a
+    /// Focus only when the app has the time-sensitive entitlement; the
+    /// project does not set it, see docs/ios.md. The Mac keeps the default level.
+    private static var interruptionLevel: UNNotificationInterruptionLevel {
+        FluxPlatform.current == .phone ? .timeSensitive : .active
+    }
+
+    /// The actions of the notification. On an iPhone, Approve needs the
+    /// iPhone unlocked and opens the prompt. Deny works on the lock screen.
+    static func notificationActions(platform: FluxPlatform) -> [UNNotificationAction] {
+        let approve: UNNotificationActionOptions = platform == .phone ? [.foreground, .authenticationRequired] : [.foreground]
+        return [
+            UNNotificationAction(identifier: "approve", title: "Approve", options: approve),
+            UNNotificationAction(identifier: "deny", title: "Deny", options: [.destructive]),
+        ]
+    }
+
+    /// What a notification action does.
+    enum NotificationRoute: Equatable {
+        /// Shows the prompt.
+        case present
+        /// Shows the prompt and asks for the biometry at once.
+        case approve
+        case deny
+    }
+
+    /// The Mac asks for Touch ID right after Approve. An iPhone opens the
+    /// prompt, because Face ID needs Flux on the screen, and the Approve
+    /// button of the prompt asks for it.
+    static func notificationRoute(_ action: String, platform: FluxPlatform) -> NotificationRoute {
+        switch action {
+        case "approve": return platform == .mac ? .approve : .present
+        case "deny": return .deny
+        default: return .present
+        }
+    }
+
+    /// The lines under the question: the terminal, the remote host, and who
+    /// asks. An enrollment that replaces the current key of the computer
+    /// says so.
+    public static func details(_ r: ApproveRequest, replacesKey: Bool = false) -> [String] {
         switch r.kind {
         case .approve:
             var lines: [String] = []
@@ -128,8 +197,16 @@ public final class ApprovePlugin: FluxPlugin, @unchecked Sendable {
             lines.append("Asked at \(time) by \(r.computerName)")
             return lines
         case .enroll:
-            return ["Flux makes a key for \(r.computerName) in the Secure Enclave of this Mac. Each approval then needs Touch ID."]
+            let texts = ApproveTexts.current
+            let detail = texts.enrollDetail(computer: r.computerName)
+            return replacesKey ? [detail, texts.enrollReplaces(computer: r.computerName)] : [detail]
         }
+    }
+
+    /// True when the enrollment `r` replaces the current key of its computer.
+    @MainActor
+    public func replacesKey(_ r: ApproveRequest) -> Bool {
+        r.kind == .enroll && model.keys[r.computerId] != nil
     }
 
     // MARK: Actions
@@ -143,17 +220,18 @@ public final class ApprovePlugin: FluxPlugin, @unchecked Sendable {
             fail(r, problem)
             return
         }
+        let texts = ApproveTexts.current
         if r.kind == .approve && keys.biometryChanged(computerId: r.computerId) {
             keys.delete(r.computerId)
             model.keys = keys.all()
-            fail(r, "The fingerprints on this Mac changed. Enroll again with: sudo flux-cli approve enroll")
+            fail(r, texts.biometryChanged)
             return
         }
         model.phase = .working
         let c = LAContext()
         c.localizedReason = r.kind == .approve
             ? "approve \(r.service) for \(r.user) on \(r.host)"
-            : "enroll this Mac to approve sudo for \(r.user) on \(r.host)"
+            : texts.enrollReason(user: r.user, host: r.host)
         c.localizedFallbackTitle = ""
         c.touchIDAuthenticationAllowableReuseDuration = 0
         context = c
@@ -191,13 +269,13 @@ public final class ApprovePlugin: FluxPlugin, @unchecked Sendable {
     @MainActor
     private func notificationAction(_ action: String, id: String) {
         guard model.current?.id == id else { return }
-        switch action {
-        case "approve":
+        switch Self.notificationRoute(action, platform: .current) {
+        case .approve:
             model.present?()
             approve()
-        case "deny":
+        case .deny:
             deny()
-        default:
+        case .present:
             model.present?()
         }
     }
@@ -210,18 +288,30 @@ public final class ApprovePlugin: FluxPlugin, @unchecked Sendable {
         switch result {
         case .success(let s):
             if let key = s.newKey {
+                // The old key stays until the new key reached the computer,
+                // so that a failed enrollment keeps the approvals working.
                 do {
-                    try keys.save(blob: key.blob, publicKey: key.publicKey, computerId: r.computerId, host: r.host, user: r.user)
+                    try keys.stage(blob: key.blob, publicKey: key.publicKey, computerId: r.computerId, host: r.host, user: r.user)
                 } catch {
                     FluxLog.plugin.error("approve: saving the key failed: \(String(describing: error), privacy: .public)")
-                    fail(r, "This Mac could not save its approval key.")
+                    fail(r, ApproveTexts.current.saveFailed)
+                    return
+                }
+                guard core?.send(ApproveMessage.enrolled(r.id, spki: key.publicKey, signature: s.signature), to: r.computerId) == true else {
+                    keys.discard(r.computerId)
+                    let old = keys.has(r.computerId) ? " The old key stays." : ""
+                    fail(r, "The new key did not reach \(r.computerName).\(old)")
+                    return
+                }
+                do {
+                    try keys.commit(r.computerId)
+                } catch {
+                    FluxLog.plugin.error("approve: saving the key failed: \(String(describing: error), privacy: .public)")
+                    keys.discard(r.computerId)
+                    fail(r, ApproveTexts.current.saveFailed)
                     return
                 }
                 model.keys = keys.all()
-                guard core?.send(ApproveMessage.enrolled(r.id, spki: key.publicKey, signature: s.signature), to: r.computerId) == true else {
-                    fail(r, "The computer is not connected. Run the enrollment again.")
-                    return
-                }
                 model.phase = .enrolled(code: ApproveMessage.fingerprint(key.publicKey))
                 end(r.id, .enrolled)
             } else {
@@ -269,15 +359,39 @@ public final class ApprovePlugin: FluxPlugin, @unchecked Sendable {
 
     // MARK: Touch ID
 
-    /// Why this Mac cannot use Touch ID now, or nil.
+    /// Whether this device can approve: it needs a Secure Enclave and the
+    /// biometry. It never falls back to a key outside the Secure Enclave.
+    public static func availability() -> ApproveAvailability {
+        availability(secureEnclave: secureEnclaveAvailable, biometryProblem: biometryProblem(), texts: .current)
+    }
+
+    /// Whether this device can make a Secure Enclave key that needs the
+    /// biometry. The iOS simulator reports a Secure Enclave, but it refuses
+    /// such a key with "This call is not supported on iOS Simulator".
+    static var secureEnclaveAvailable: Bool {
+        #if targetEnvironment(simulator)
+        false
+        #else
+        SecureEnclave.isAvailable
+        #endif
+    }
+
+    static func availability(secureEnclave: Bool, biometryProblem: String?, texts: ApproveTexts) -> ApproveAvailability {
+        if !secureEnclave { return .noSecureEnclave(texts.noSecureEnclave) }
+        if let biometryProblem { return .biometry(biometryProblem) }
+        return .ready
+    }
+
+    /// Why this device cannot use Touch ID or Face ID now, or nil.
     public static func biometryProblem() -> String? {
         let c = LAContext()
         var error: NSError?
         if c.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) { return nil }
+        let texts = ApproveTexts.current
         switch error.flatMap({ LAError.Code(rawValue: $0.code) }) {
-        case .biometryNotEnrolled: return "Set up Touch ID in System Settings first."
-        case .biometryLockout: return "Touch ID is locked. Unlock this Mac with the password first."
-        default: return "Touch ID is not available. Open the lid of this Mac, or connect a keyboard with Touch ID."
+        case .biometryNotEnrolled: return texts.notEnrolled
+        case .biometryLockout: return texts.lockedOut
+        default: return texts.unavailable
         }
     }
 
@@ -291,18 +405,19 @@ public final class ApprovePlugin: FluxPlugin, @unchecked Sendable {
 
     private static func message(for error: Error, kind: ApproveRequest.Kind) -> String {
         let e = error as NSError
+        let texts = ApproveTexts.current
         if e.domain == LAErrorDomain {
             switch LAError.Code(rawValue: e.code) {
-            case .biometryLockout: return "Touch ID is locked. Unlock this Mac with the password first."
-            case .biometryNotAvailable, .biometryNotEnrolled: return biometryProblem() ?? "Touch ID is not available."
-            case .authenticationFailed: return "Touch ID did not recognize the fingerprint."
+            case .biometryLockout: return texts.lockedOut
+            case .biometryNotAvailable, .biometryNotEnrolled: return biometryProblem() ?? texts.unavailableShort
+            case .authenticationFailed: return texts.notRecognized
             default: break
             }
         }
         if e.domain == NSOSStatusErrorDomain && e.code == Int(errSecInteractionNotAllowed) {
-            return "This Mac is locked, so it cannot use its approval key."
+            return texts.deviceLocked
         }
-        return kind == .enroll ? "This Mac could not make its approval key." : "This Mac could not use its approval key."
+        return kind == .enroll ? texts.makeFailed : texts.useFailed
     }
 }
 

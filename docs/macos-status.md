@@ -8,7 +8,7 @@ For build, use, and permissions, see [Flux for macOS](macos.md).
 ## Goal
 
 A native Mac app, in Swift and SwiftUI, that takes the place of the Android phone app toward `fluxd`.
-It speaks KDE Connect protocol version 8 with the Flux extensions and offers the Android features that macOS allows.
+It speaks Flux protocol version 8 and offers the Android features that macOS allows.
 The Mac is a device peer, not a replacement for the Omarchy desktop side.
 
 ## Plan as executed
@@ -30,8 +30,8 @@ The resulting headless daemon (`fluxd -headless -udp-port … -tcp-port …`) se
 
 | Layer | Content |
 | --- | --- |
-| Protocol | `JSONValue`, `Packet`, `Identity`, packet types, RSA 2048 self-signed certificate in the KDE Connect format, SubjectPublicKeyInfo extraction, and the 8-character verification key |
-| Network | TLS 1.2 with SwiftNIO and swift-nio-ssl, UDP identity broadcasts, the TCP listener and dialer, the plain-text identity then TLS upgrade on the same socket, links, payload servers and clients, `flux.tunnel`, and Bonjour `_kdeconnect._udp` |
+| Protocol | `JSONValue`, `Packet`, `Identity`, packet types, RSA 2048 self-signed certificate with the device ID as its common name, SubjectPublicKeyInfo extraction, and the verification key. The key now has 16 characters in 4 groups of 4. The first builds showed 8 characters. |
+| Network | TLS 1.2 with SwiftNIO and swift-nio-ssl, UDP identity broadcasts, the TCP listener and dialer, the plain-text identity then TLS upgrade on the same socket, links, payload servers and clients, `flux.tunnel`, and Bonjour `_flux._udp` |
 | Core | `FluxCore`, `Device` with pairing, `TrustStore` with pinned certificates, the `FluxPlugin` protocol, and one shared `Notifier` for UserNotifications |
 
 SwiftNIO was chosen because the protocol reads a plain-text identity line and then starts TLS on the same socket.
@@ -70,27 +70,27 @@ The integrator merged each branch into `macos-client`, resolved the composition 
 ## Current state
 
 - Branch `macos-client`, local only, not pushed.
-- 160 `FluxKitTests` pass. The app builds with no errors and no warnings in `macos/App` or `macos/Sources`.
-- The app is signed ad hoc, not sandboxed, and has no hardened runtime. It targets macOS 14 and later.
+- 249 `FluxKitTests` pass. The app builds with no errors. `LanBackend.swift` has 2 deprecation warnings for `removeHandler(context:promise:)` from newer swift-nio.
+- The app is signed ad hoc and not sandboxed, and it has the hardened runtime. It targets macOS 14 and later.
 - Dependencies: swift-nio 2.103, swift-nio-ssl 2.37, swift-certificates 1.21, swift-crypto 3.15, swift-asn1, and Citadel 0.12.0 for SSH and SFTP. Citadel requires swift-crypto below 4.
 
 ### Capabilities the Mac announces
 
 | Direction | Packet types |
 | --- | --- |
-| Incoming | `kdeconnect.ping`, `kdeconnect.battery`, `kdeconnect.battery.request`, `kdeconnect.clipboard`, `kdeconnect.clipboard.connect`, `kdeconnect.share.request`, `kdeconnect.share.request.update`, `kdeconnect.notification`, `kdeconnect.runcommand`, `kdeconnect.mpris`, `kdeconnect.sftp`, `flux.webcam`, `flux.screen`, `flux.mic`, `flux.dnd`, `flux.approve` |
-| Outgoing | `kdeconnect.ping`, `kdeconnect.battery`, `kdeconnect.clipboard`, `kdeconnect.clipboard.connect`, `kdeconnect.share.request`, `kdeconnect.share.request.update`, `kdeconnect.runcommand.request`, `kdeconnect.mpris.request`, `kdeconnect.sftp.request`, `flux.tunnel`, `flux.webcam`, `flux.screen`, `flux.mic`, `flux.dnd`, `flux.approve` |
+| Incoming | `flux.ping`, `flux.battery`, `flux.clipboard`, `flux.clipboard.connect`, `flux.share.request`, `flux.share.request.update`, `flux.notification`, `flux.runcommand`, `flux.mpris`, `flux.sftp`, `flux.webcam`, `flux.screen`, `flux.mic`, `flux.dnd`, `flux.approve`, `flux.input`, `flux.herdr`, `flux.desktop`, `flux.shortcuts`, `flux.theme`, `flux.stream.request` |
+| Outgoing | `flux.ping`, `flux.battery`, `flux.clipboard`, `flux.clipboard.connect`, `flux.share.request`, `flux.share.request.update`, `flux.runcommand.request`, `flux.mpris.request`, `flux.sftp.request`, `flux.mousepad.request`, `flux.tunnel`, `flux.webcam`, `flux.screen`, `flux.mic`, `flux.dnd`, `flux.approve`, `flux.herdr`, `flux.desktop`, `flux.shortcuts` |
 
-A Mac without an internal battery announces `kdeconnect.battery` as incoming only.
+A Mac without an internal battery announces `flux.battery` as incoming only.
 `fluxd` decides whether to use tunnels from the peer's outgoing `flux.tunnel` (`Link.CanTunnel`), so the Mac does not list it as incoming.
 
 ### Not possible on macOS
 
 | Android feature | Reason |
 | --- | --- |
-| Mirror phone notifications (`kdeconnect.notification` outgoing, `.request`, `.reply`, `.action`) | macOS gives apps no access to other apps' notifications |
-| Call alerts (`kdeconnect.telephony`) | A Mac has no telephony |
-| Text messages (`kdeconnect.sms.messages` outgoing, `kdeconnect.sms.request` and the conversation requests incoming) | macOS gives apps no access to SMS |
+| Mirror phone notifications (`flux.notification` outgoing, `.request`, `.reply`, `.action`) | macOS gives apps no access to other apps' notifications |
+| Call alerts (`flux.telephony`) | A Mac has no telephony |
+| Text messages (`flux.sms.messages` outgoing, `flux.sms.request` and the conversation requests incoming) | macOS gives apps no access to SMS |
 | Read and set Do Not Disturb directly | No public Focus API for an ad hoc signed app. The Mac reads Focus through a Focus filter and sets it by running user-chosen Shortcuts |
 | Camera zoom, exposure, and white balance presets | No macOS API. Zoom is digital, and exposure is a software gain |
 
@@ -119,7 +119,7 @@ Unless noted, the peer was the headless `fluxd` described above, driven with `fl
 | Clipboard | `flux-cli clip` reached the Mac pasteboard. A Mac pasteboard change appeared in `fluxd`'s clipboard history |
 | Screenshots | A new screenshot in a watched folder was sent once |
 | Notifications | `flux-cli notify` and `flux-cli notify --run` produced Mac notifications, including the exit code. The app delivered a banner |
-| Battery | `flux-cli status --json` showed the Mac battery, and `battery.request` was answered |
+| Battery | `flux-cli status --json` showed the Mac battery |
 | Do Not Disturb | With a non-headless `fluxd` and a fake `makoctl`: a Mac change made `fluxd` switch the mako mode. A change on the computer made the Mac run the configured shortcut command. The guard stopped echoes |
 | Media, Mac to computer | Request packets and parsing checked in the log and in unit tests. Headless `fluxd` has no MPRIS players |
 | Commands | `flux-cli commands add`, then running it from the Mac created the file on the computer side, from the smoke client and from the app UI |
@@ -140,6 +140,8 @@ Unless noted, the peer was the headless `fluxd` described above, driven with `fl
 | Media section with real players | Headless `fluxd` on macOS has no MPRIS players | Pair with a real Omarchy computer that plays media |
 | Direct SFTP route (ip and port) | `fluxd` always answers with a tunnel | Only reachable with a peer that offers a direct address |
 | Menu bar items | The automation tool cannot open a `MenuBarExtra` menu | Open the menu bar item by hand and try each entry |
+| Remote desktop | Unit tests cover the packets, the frame reader, the H.264 conversion, a VideoToolbox frame that becomes a display sample, the positions with the bars, the click and drag rules, the motion limit, and the Omarchy panel packets. Headless `fluxd` does not stream its screen, and the window needs a person at the Mac | Set `remote_desktop = true` and `remote_input = true` on an Omarchy computer, open the remote desktop on the Mac, and try each mouse action, the keys, the monitors, the Omarchy panel, dictation, sleep, and lock |
+| Touchpad and keyboard | Unit tests cover the packets, the key map, clicks and drags, the scroll direction, the release chord, and the type field. Headless `fluxd` has no input backend, and the pointer capture, the keys, and Touch ID need a person at the Mac | Set `remote_input = true` on an Omarchy computer, open the touchpad on the Mac, and try each gesture, key, and the release chord |
 | Settings window | The shell-launched app could not take keyboard focus | Open **Settings** and change each option |
 | Focus filter in System Settings | Adding the Flux filter and toggling a real Focus was not completed | Add **Flux** under **Focus > Focus filters** and toggle the Focus |
 | Notification actions | System banners were not clicked | Click Accept, Open, Stop, and Approve in the banners |
@@ -147,4 +149,7 @@ Unless noted, the peer was the headless `fluxd` described above, driven with `fl
 | Camera Screen Region and denied-camera screen | Needs a manual selection and a revoked permission | Use **Screen Region** and revoke camera access |
 | Microphone and webcam timeouts when the computer never connects | Not exercised | Block the computer's connection and wait 10 seconds |
 | A real Omarchy computer over Wi-Fi | Every test used a loopback daemon on the Mac | Pair with an Omarchy computer on the same network, including Bonjour discovery and UDP broadcasts |
+| The Flux ports | The checks above ran before the port change. No Mac build ran with UDP port 12100, link ports 12100 to 12108, and transfer ports 12070 to 12099 | Pair with a `fluxd` that uses these ports, then send a file, open **Browse**, and start the microphone |
+| Stream request | No Mac build ran the prompt window, the notification action, or the start | Run `flux-cli webcam start` and `flux-cli mic start` with Flux active and with Flux in the background. Click start in the prompt and in the notification. Click **Not now** in the prompt |
 | Approval with the real root helper and PAM | Needs root on Linux | Run `sudo flux-cli approve setup` and `enroll` on an Omarchy computer, then `sudo true` |
+| The app design of Send, Control, Computers, Media, and the Omarchy panel | No Mac build ran these pages. Only `swiftc -parse` checked the files on Linux | Build the app, then open each page. On **Send**, check the thread, the clipboard dock with **Send** and **Sent**, the tools, and the field. On **Control**, check the agent times, the tool grids, and the player dock. On **Computers**, check **Search again** in the dock. Open the media page from the dock, and the Omarchy panel from its tool, then click a window |

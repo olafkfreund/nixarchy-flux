@@ -1,8 +1,5 @@
-Browse 1.0 Browse.qml
-Clipboard 1.0 Clipboard.qml
+Chat 1.0 Chat.qml
+Device 1.0 Device.qml
 Empty 1.0 Empty.qml
-Files 1.0 Files.qml
 Messages 1.0 Messages.qml
 Notifications 1.0 Notifications.qml
-Overview 1.0 Overview.qml
-PhoneCommands 1.0 PhoneCommands.qml

@@ -27,6 +27,28 @@ class DictationTextTest {
     }
 
     @Test
+    fun makesASearchFromADictation() {
+        assertEquals("Workspace", DictationText.query(" Workspace. "))
+        assertEquals("Open the browser", DictationText.query("Open the browser?!"))
+        assertEquals("a period inside the words stays", "node.js", DictationText.query("node.js"))
+        assertEquals("", DictationText.query(" . "))
+    }
+
+    @Test
+    fun makesACommandFromADictation() {
+        assertEquals("git status", DictationText.command("Git status."))
+        assertEquals("a word in capitals stays", "README first", DictationText.command("README first"))
+        assertEquals("I stays", "I", DictationText.command("I"))
+        assertEquals("ls -la", DictationText.command("ls -la"))
+    }
+
+    @Test
+    fun keepsTheCaseOfACommand() {
+        assertEquals(Edit("git status", 10), DictationText.insert("", 0, 0, "git status", sentences = false))
+        assertEquals(Edit("cd ~/Code && git status", 23), DictationText.insert("cd ~/Code &&", 12, 12, "git status", sentences = false))
+    }
+
+    @Test
     fun insertsAtTheCursor() {
         // "Run tests" with the cursor after "Run".
         assertEquals(Edit("Run the unit tests", 12), DictationText.insert("Run tests", 3, 3, "the unit"))
@@ -101,6 +123,24 @@ class DictationTextTest {
         assertEquals("and fix", DictationText.unsettled("Run the tests.", "and fix"))
         assertEquals("hello", DictationText.unsettled("", " hello "))
         assertEquals("", DictationText.unsettled("Run the tests.", "run the tests"))
+    }
+
+    @Test
+    fun findsARestartedPartialText() {
+        // After a pause, the recognizer drops the words before it and hears only the new words.
+        assertTrue(DictationText.restarts("Run the tests on the phone first", "then"))
+        assertTrue("the same first word", DictationText.restarts("Run the tests on the phone first", "run it"))
+        assertTrue("a new first word", DictationText.restarts("Okay so", "then"))
+    }
+
+    @Test
+    fun keepsAChangedPartialText() {
+        assertFalse("more words", DictationText.restarts("Run the", "Run the tests"))
+        assertFalse("a changed last word", DictationText.restarts("Run the test", "Run the tests"))
+        assertFalse("changed words", DictationText.restarts("I scream", "ice cream"))
+        assertFalse("a number in digits", DictationText.restarts("It costs twenty five", "It costs 25"))
+        assertFalse("no partial text before", DictationText.restarts("", "Run"))
+        assertFalse("an empty partial text", DictationText.restarts("Run the tests", "  "))
     }
 
     @Test

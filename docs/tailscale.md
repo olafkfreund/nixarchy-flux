@@ -17,14 +17,55 @@ The link still uses the pinned TLS certificates from pairing.
 
 The steps are the same for a Mac that runs Flux for macOS.
 
+## Use the node built into Flux for Android
+
+Flux for Android can join the tailnet itself, without the Tailscale app.
+The node runs inside the app as a userspace node, so it takes no VPN slot:
+another VPN, such as Google VPN, keeps running.
+The phone gets a tailnet address, and the computer reaches every Flux port
+through it, so files, transfers, and the screen mirror work away from home.
+
+1. Pair the phone on the local network.
+2. On the phone, open **Sync** and turn on **Remote access**.
+3. Enter a tailnet auth key from the Tailscale admin console.
+   Use a key with an expiry, and remove the phone from the tailnet when you
+   stop using it.
+4. Copy the address that Flux shows, for example `100.101.102.103`.
+5. On the computer, add the address:
+
+   ```sh
+   flux-cli --device "Pixel 11 Pro" addresses add 100.101.102.103
+   ```
+
+6. Check the result:
+
+   ```sh
+   flux-cli doctor
+   ```
+
+The node keeps its key and identity in the app storage.
+It starts with the Flux service and stops when Flux is off.
+The node is in the arm64 APK. A build without it shows that the helper is
+missing, and the app works as before on the local network.
+Limit the Flux ports of the phone to the computer with tailnet access
+controls, as in [access and security](#access-and-security).
+
 ## Requirements
 
 - Tailscale runs on the desktop and on the phone, in the same tailnet.
-- The phone is paired with the desktop. Pair it on the local network first.
+  The built-in node above needs Tailscale only on the desktop.
+- The phone is paired with the desktop. Pair it on the local network, or pair it by its Tailscale address with `flux-cli pair --address`.
 - Flux for Android runs on the phone.
 
 Tailscale does not carry the mDNS and UDP broadcasts that Flux uses for discovery.
-So Flux cannot find or pair a device through Tailscale.
+So Flux cannot find a device through Tailscale.
+To pair through Tailscale, open Flux on the phone, then give the Tailscale address of the phone:
+
+```sh
+flux-cli pair --address 100.101.102.103
+```
+
+See [pair by address](cli.md#pair-by-address).
 
 ## Add the phone
 
@@ -97,12 +138,13 @@ flux-cli --device "Pixel 8" addresses remove pixel-8
 ## How it works
 
 - `fluxd` opens every connection to the phone. The phone listens on all its network interfaces, so it accepts connections through Tailscale.
-- For an offline paired device, `fluxd` dials the last address first. Then it dials the extra addresses in the order that you added them.
+- For an offline paired device, `fluxd` dials the last address first. Then it dials the address that UDP or mDNS reported in the last 10 minutes. Then it dials the extra addresses in the order that you added them.
 - `fluxd` starts the next address when the previous address fails or does not answer within 300 milliseconds. The first address that answers makes the link.
 - `fluxd` dials every 30 seconds while the device is offline. It also dials 2 seconds after a link drops, and at once when you add an address.
 - `fluxd` closes a link when sent data gets no acknowledgment for 30 seconds. So an old link does not stay open after the phone leaves the Wi-Fi.
 - When mDNS reports the phone, `fluxd` dials the extra addresses too. Avahi can report an old address from its cache.
-- `fluxd` uses the TCP port of the device from the last link. A device without a known port gets port 1716.
+- `fluxd` uses the TCP port of the device from the last link. A device without a known port, or with a port from before the port change, gets port 12100.
+- UDP and mDNS do not change the address or the port of a paired device, because any host on the network can send them. The address changes only when a link shows the pinned certificate.
 - Payloads, tunnels, and streams use the address of the link, so they also go through Tailscale.
 
 The addresses are in the `addresses` field of each device in `~/.local/share/flux/devices.json`.
@@ -116,7 +158,8 @@ Scripts can change the list with the `addresses.add` and `addresses.remove` [IPC
 
 An extra address can be any host name or IP address that routes to the phone.
 Use the same command for another VPN, such as WireGuard.
-The desktop must be able to open TCP connections to the phone on ports 1716 to 1764.
+For ZeroTier, see [Connect through ZeroTier](zerotier.md).
+The desktop must be able to open TCP connections to the phone on ports 12070 to 12108.
 
 ## Access and security
 
@@ -124,8 +167,16 @@ Each link uses TLS with the certificates that you pinned at pairing, as on the l
 Tailscale adds a second layer of encryption.
 
 Other devices in your tailnet can reach the Flux ports of the phone.
-They can send a pair request, as a device on the local network can.
-To stop this, use Tailscale access controls to limit TCP ports 1716 to 1764 on the phone to the desktop.
+Flux for Android takes a connection from a device that is not paired only while Flux is on the screen or while it scans.
+In that time, another device in the tailnet can send a pair request, as a device on the local network can.
+A paired computer connects at any time.
+To stop the other devices, use Tailscale access controls to limit TCP ports 12070 to 12108 on the phone to the desktop.
+
+`fluxd` also listens on 1 TCP port from 12100 to 12108 and on UDP port 12100 on all interfaces, also `tailscale0`.
+The default Omarchy firewall blocks this inbound traffic, and Flux does not need it.
+Do not add a rule such as `ufw allow in on tailscale0` for Flux.
+With such a rule, each device in the tailnet can open a link to `fluxd` and send a pair request.
+See [network ports](security.md#network-ports).
 
 ## Limits
 
@@ -151,7 +202,7 @@ To stop this, use Tailscale access controls to limit TCP ports 1716 to 1764 on t
 3. Check that the Flux port of the phone answers:
 
    ```sh
-   timeout 3 bash -c '</dev/tcp/pixel-8/1716' && echo "port 1716 answers"
+   timeout 3 bash -c '</dev/tcp/pixel-8/12100' && echo "port 12100 answers"
    ```
 
 4. If the port does not answer, open Flux for Android and check that it runs.

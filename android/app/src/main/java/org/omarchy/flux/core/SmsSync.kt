@@ -143,7 +143,7 @@ object SmsSync {
                 return@work
             }
             when (p.type) {
-                Types.SMS_REQUEST_CONVERSATIONS -> answer(app, d, conversations(app), null)
+                Types.SMS_REQUEST_CONVERSATIONS -> answer(app, d, conversations(app), null, conversations = true)
                 Types.SMS_REQUEST_CONVERSATION -> SmsPackets.thread(p)?.let { answer(app, d, thread(app, it), it.threadId) }
                 Types.SMS_REQUEST -> SmsPackets.send(p)?.let { send(app, it) }
             }
@@ -154,15 +154,25 @@ object SmsSync {
         worker.execute { runCatching(block).onFailure { Log.w(TAG, "$what failed", it) } }
     }
 
-    private fun answer(context: Context, d: Device, list: List<TextMessage>, threadId: Long?) {
+    /**
+     * Sends the answer to a request. With [conversations], the answer is the
+     * full list of conversations, and the computer replaces its list, so
+     * that a conversation that the user deleted goes away.
+     */
+    private fun answer(context: Context, d: Device, list: List<TextMessage>, threadId: Long?, conversations: Boolean = false) {
         // The newest messages go in last, so that they stay when the watch is full.
         list.sortedBy { it.date }.forEach(changes::watch)
-        d.send(SmsPackets.messages(list, names(context, list), threadId))
+        SmsPackets.messagePackets(list, names(context, list), threadId, conversations = conversations).forEach { d.send(it) }
     }
 
     // ------------------------------------------------------------------ send
 
     private fun send(context: Context, req: SmsSend) {
+        // fluxd refuses a longer message, but an older fluxd or another peer can still ask for one.
+        if (SmsPackets.tooLong(req.body)) {
+            Log.w(TAG, "not sent: the message has more than ${SmsPackets.MAX_SEND} characters")
+            return
+        }
         if (req.addresses.size > 1) {
             Log.w(TAG, "not sent: a message to ${req.addresses.size} addresses needs MMS")
             return
@@ -232,8 +242,8 @@ object SmsSync {
         out.forEach(changes::watch)
         val targets = core.connectedPaired().filter { Types.SMS_MESSAGES in it.identity.incoming }
         if (targets.isEmpty()) return
-        val packet = SmsPackets.messages(out, names(app, out))
-        targets.forEach { it.send(packet) }
+        val packets = SmsPackets.messagePackets(out, names(app, out))
+        targets.forEach { d -> packets.forEach { d.send(it) } }
         Log.i(TAG, "sent ${out.size} changed messages to ${targets.size} computers")
     }
 
@@ -284,18 +294,12 @@ object SmsSync {
         return load(context, newest.result(MAX_CONVERSATIONS))
     }
 
-    /**
-     * The newest messages of 1 thread, before the time of the request when
-     * it gives one. The arguments are text, and SQLite converts them to
-     * numbers only in a comparison with a column. So the MMS table, which
-     * keeps seconds, gets the time in seconds, rounded up.
-     */
+    /** The newest messages of 1 thread. */
     private fun thread(context: Context, r: ThreadRequest): List<TextMessage> {
-        val range = if (r.before > 0) " AND date < ?" else ""
-        fun args(before: Long) = if (r.before > 0) arrayOf(r.threadId.toString(), before.toString()) else arrayOf(r.threadId.toString())
-        val sms = smsRows(context, "thread_id = ? AND $SMS_SHOWN$range", args(r.before), "date DESC", r.count)
+        val args = arrayOf(r.threadId.toString())
+        val sms = smsRows(context, "thread_id = ? AND $SMS_SHOWN", args, "date DESC", r.count)
         val mms = runCatching {
-            mmsRows(context, "thread_id = ? AND $MMS_SHOWN$range", args((r.before + 999) / 1000), "date DESC", r.count)
+            mmsRows(context, "thread_id = ? AND $MMS_SHOWN", args, "date DESC", r.count)
         }.getOrElse {
             Log.w(TAG, "cannot read MMS", it)
             emptyList()

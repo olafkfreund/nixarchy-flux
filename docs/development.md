@@ -78,10 +78,11 @@ Stop the daemon before you remove the temporary directory.
 ## UI checks
 
 ```sh
-make snapshot
+make snapshot test-gui
 ```
 
 The Qt host renders fixture screens into `snapshots/`.
+`make test-gui` runs the [QML view tests](qml.md#view-tests) with the mock backend.
 The [QML guide](qml.md#snapshot-harness) covers theme and screen filters.
 The [shell guide](omarchy.md#offscreen-test) covers an isolated plugin host.
 
@@ -97,6 +98,67 @@ The release build runs R8 and checks release-only build errors.
 Without release credentials, it produces an unsigned APK.
 See [Android tools](android.md#test) for a test peer and phone screenshots.
 
+## Update xterm.js
+
+The live terminal of Flux for Android draws with xterm.js from the npm package `@xterm/xterm`.
+The app keeps 3 files of the package in `android/app/src/main/assets/terminal/`:
+
+| File in the app | File in the package |
+| --- | --- |
+| `xterm.js` | `lib/xterm.js` |
+| `xterm.css` | `css/xterm.css` |
+| `xterm-LICENSE.txt` | `LICENSE` |
+
+The comment at the top of `index.html` names the version that the app uses.
+
+To update xterm.js:
+
+1. Set `VERSION` to the new version. This command gets the newest version from the registry:
+
+   ```sh
+   VERSION=$(npm view @xterm/xterm version)
+   ```
+
+2. From the repository root, download the package into a temporary folder:
+
+   ```sh
+   REPO=$PWD
+   cd "$(mktemp -d)"
+   npm pack "@xterm/xterm@$VERSION"
+   ```
+
+3. Compare the checksum of the archive with the checksum of the registry. The 2 lines must be the same:
+
+   ```sh
+   npm view "@xterm/xterm@$VERSION" dist.integrity
+   echo "sha512-$(openssl dgst -sha512 -binary "xterm-xterm-$VERSION.tgz" | base64 -w0)"
+   ```
+
+4. Copy the 3 files into the app:
+
+   ```sh
+   tar -xzf "xterm-xterm-$VERSION.tgz"
+   cp package/lib/xterm.js package/css/xterm.css "$REPO/android/app/src/main/assets/terminal/"
+   cp package/LICENSE "$REPO/android/app/src/main/assets/terminal/xterm-LICENSE.txt"
+   ```
+
+5. Change the version in the comment at the top of `index.html`.
+6. Make sure that `xterm.js` still has the class names `xterm-accessibility` and `live-region`. The output must show the 2 names:
+
+   ```sh
+   grep -oE 'xterm-accessibility|live-region' "$REPO/android/app/src/main/assets/terminal/xterm.js" | sort -u
+   ```
+
+   `index.html` uses these names so that TalkBack does not read each frame. If a name changed, change `index.html` too.
+7. Run the [Android checks](#android-checks).
+8. Open **Live** on a phone and check the terminal.
+9. Turn on TalkBack on the phone.
+10. Open **Live** again. TalkBack must not read each new frame aloud.
+
+Do not change the copied files, so that each file stays the same as the file in the package.
+A reviewer can then compare each file with the package.
+`xterm.js` ends with a `sourceMappingURL` comment, and the app does not include the map file.
+
 ## macOS checks
 
 ```sh
@@ -105,6 +167,31 @@ make test-macos macos
 
 The tests cover packets, certificates, the verification key, and the wire formats and logic of each feature.
 See [Flux for macOS](macos.md#test-against-a-computer-on-the-same-mac) to test the app against a local `fluxd`.
+
+## iOS checks
+
+```sh
+make ios test-ios ios-release
+```
+
+The build must show no warnings in `ios/`.
+`make test-ios` runs the app tests and the FluxKit tests in an iPhone simulator.
+`make ios-release` builds the app for iPhones in Release without signing, in `ios/build/Build/Products/Release-iphoneos`.
+It shows the errors that only the optimized build has, like the Android release build.
+A change in FluxKit needs both `make test-macos` and `make test-ios`, because the two platforms compile different code.
+See [Flux for iOS](ios.md#local-tests) for the simulator and the device checks.
+
+The `ios` job in `build.yml` also runs `make ios-release`.
+Then it checks that the built `Info.plist` has a text for each permission and lists `_flux._udp`.
+It also checks that the app and the share extension each contain `PrivacyInfo.xcprivacy`.
+
+Pull requests run no build, to save GitHub minutes.
+Each push to `master` runs all jobs, and macOS runners use the minutes at a high rate.
+To build and test a branch before the merge, start a manual run:
+
+```sh
+gh workflow run build.yml --ref BRANCH
+```
 
 ## Package and workflow checks
 
@@ -131,12 +218,13 @@ The [release guide](releasing.md) covers the archive-based AUR recipe.
 | Change | Required check |
 | --- | --- |
 | Go CLI or daemon | `make test vet` and the relevant package tests |
-| Shared QML or host | `make build-gui snapshot` and both host contracts |
+| Shared QML or host | `make build-gui snapshot test-gui` and both host contracts |
 | Android | JVM tests, lint, debug build, and release build |
 | macOS | `make test-macos macos`, then a run against `fluxd` |
+| iOS | `make ios test-ios ios-release`, then a run in the simulator against `fluxd` |
 | Protocol | Go, Kotlin, and Swift tests, plus the two-daemon end-to-end test |
-| Approval | Read `docs/approve.md`, then run Go and Android approval tests |
+| Approval | Read `docs/approve.md`, then run the Go and Android approval tests. For a change in FluxKit or the Apple apps, also run the Swift approval tests `ApproveMessageTests`, `ApprovePluginLogicTests`, `ApproveKeysBackupTests`, and the iOS `ApproveLogicTests` with `make test-macos test-ios`. They run only on a Mac or in the `macos` and `ios` jobs of CI. |
 | Package or workflow | Shell syntax, `actionlint`, package build, and release-generator tests |
 
-The repository currently has no selected license.
-Preserve that state until the source owner chooses one.
+Flux uses the [MIT license](../LICENSE).
+Only the source owner changes the license.

@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "FluxKit",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(name: "FluxKit", targets: ["FluxKit"]),
     ],
@@ -37,7 +37,15 @@ let package = Package(
         ),
         .testTarget(
             name: "FluxKitTests",
-            dependencies: ["FluxKit"],
+            // The network tests connect to the payload listener as a computer.
+            // The line tests run the decoder in an embedded channel.
+            dependencies: [
+                "FluxKit",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

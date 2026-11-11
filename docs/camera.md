@@ -4,9 +4,17 @@
 
 ## Camera modes
 
-The Android Camera screen includes text, QR, photo, document, signature, and webcam modes.
+The Android Camera screen has text, QR, photo, document, and signature modes.
+Select a mode in the mode strip above the shutter.
+The webcam has its own screen: open **Control**, then **Webcam** in the **Stream** band.
 Text recognition and barcode recognition use models bundled in the app.
 Document capture uses the Google Play services document scanner.
+The iPhone has the same modes with Apple's Vision and VisionKit. See [Flux for iOS](ios.md#features).
+
+To add words to scanned text, select the mic key next to the text field and speak.
+The words go in at the cursor on the Android phone and at the end of the text on the iPhone and the Mac.
+To empty the scanned text, select the clear key of the text field, or **Clear** on the iPhone and the Mac.
+On the Android phone, the expand key opens the text in a large editor.
 
 Scanned text and documents use the desktop `scan_dir`.
 Photos use `photo_dir`.
@@ -17,7 +25,7 @@ See [configuration](configuration.md) for their default paths.
 Signature mode turns a signature on paper into a transparent PNG that you can paste on the computer.
 
 1. Sign on blank white paper with a dark pen.
-2. Open **Camera**, then **Signature**, and fit the signature in the frame.
+2. In **Send**, open a camera mode, select **Signature** in the mode strip, and fit the signature in the frame.
 3. Tap the shutter. To use a photo that you already have, tap the gallery button instead.
 4. Select **Black**, **Blue**, or **Original** for the ink color.
 5. Tap **Send**.
@@ -36,6 +44,8 @@ wl-paste --list-types
 
 ## Phone as webcam
 
+An iPhone streams as a webcam too, and stops when Flux leaves its screen, because iOS gives the camera only to the app on the screen.
+
 Install the optional packages and your kernel's matching headers.
 For the standard Arch `linux` kernel:
 
@@ -47,8 +57,9 @@ sudo sh /usr/share/flux/post-install.sh
 For another kernel, select its matching headers package.
 The setup preserves existing `v4l2loopback` camera settings.
 
-On the phone, open Camera, select Webcam, and press Start.
+On the phone, open **Control**, select **Webcam** in the **Stream** band, and press **Start webcam**.
 Desktop video apps see **Flux Camera**.
+On Android, the webcam keeps streaming when you leave the screen or lock the phone. See [streams in the background](#streams-in-the-background).
 
 ```sh
 flux-cli webcam
@@ -57,8 +68,8 @@ flux-cli webcam reset
 flux-cli webcam stop
 ```
 
-On the desktop, open the PHONE CAMERA card on Overview and select Settings.
-On the phone, select Settings in Webcam mode.
+On the desktop, open the **Phone** page, then select **Settings** on the **Phone camera** card.
+On the phone, select **Settings** on the Webcam screen.
 The preview shows each change.
 Changes to `aspect` or `resolution` restart the stream.
 Other settings apply while the stream runs.
@@ -69,7 +80,7 @@ Other settings apply while the stream runs.
 | `resolution` | `720`, `1080`, measured on the frame's short side | `720` |
 | `camera` | `back`, `front` | `back` |
 | `mirror` | `true`, `false` | `false` |
-| `zoom` | `1` to the camera maximum | `1` |
+| `zoom` | `1` to the camera maximum. Flux for Android allows at most `10`, and the iPhone and the Mac at most `4`. | `1` |
 | `exposure` | The camera's EV range | `0` |
 | `whiteBalance` | `auto`, `daylight`, `cloudy`, `shade`, `incandescent`, `fluorescent`, `twilight` | `auto` |
 | `brightness` | `-1` to `1` | `0` |
@@ -80,11 +91,22 @@ Other settings apply while the stream runs.
 `flux-cli webcam reset` restores neutral image settings and keeps the aspect, resolution, and camera.
 The phone limits values to its camera's capabilities and saves them for the next stream.
 
+`fluxd` takes the settings and the camera capabilities only from the phone that streams.
+It refuses settings with more than 4096 bytes, a list with more than 16 values, or a text with more than 128 characters.
+It forgets the settings when the stream stops.
+`fluxd` sends only the keys in the table to the phone.
+It refuses a number outside the range -65536 to 65536, and a resolution that is negative or not a whole number.
+
+The udev rule `61-flux-v4l2loopback.rules` gives the user at the seat access to the control device of `v4l2loopback`.
+Each process of that user can then add and remove the loopback devices that no app has open.
+`fluxd` removes only the device with the label **Flux Camera**.
+A headless `fluxd` does not start the webcam.
+
 ## Phone as microphone
 
-On the phone, open Microphone and press Start.
-The stream stops when you leave the screen.
+On the phone, open **Control**, select **Mic** in the **Stream** band, and press **Start the mic**.
 Desktop apps see **Flux Microphone**.
+On Android, the mic keeps streaming when you leave the screen or lock the phone. See [streams in the background](#streams-in-the-background).
 The daemon uses `pw-cat` from PipeWire, so this feature needs no additional package on Omarchy.
 
 ```sh
@@ -95,7 +117,203 @@ flux-cli mic stop
 To include audio with the webcam, enable **Also send the microphone** in the phone's Webcam settings.
 The virtual source exists only while the phone streams.
 
+`fluxd` keeps at most 150 milliseconds of audio in front of `pw-cat`.
+After a stall of the network, it drops the oldest audio, so the delay does not grow.
+The journal then shows `dropped audio after a network stall` once for the stream.
+
+## Phone as speaker
+
+The phone can play the audio of the computer.
+Use it to hear the computer on the phone speaker, or on Bluetooth earbuds that you paired with the phone.
+The stream does not need the [remote desktop](remote-desktop.md).
+
+1. On the phone, open **Control**, then **Media**, and select the computer.
+2. Tap **Play on phone** in the dock.
+
+The key then shows **Plays on phone** and `Live`.
+To stop, tap the key again.
+On Android, the audio keeps playing when you leave Flux or lock the phone. See [streams in the background](#streams-in-the-background).
+
+To mute the computer while the phone plays, long-press **Play on phone**, or tap the output key next to it.
+Then turn on **Mute omarchy while this phone plays**, with the name of your computer.
+`fluxd` then mutes the default output of the computer, and turns its sound on again when the stream stops.
+An output that you muted before stays muted.
+A change of the switch applies at once to the audio that plays.
+When you select another output while the phone plays, `fluxd` turns the sound of the old output on again and mutes the new one within 2 seconds.
+If `fluxd` stops during the stream, its next start turns the sound of that output on again.
+
+On the computer, run:
+
+```sh
+flux-cli speaker
+flux-cli speaker start
+flux-cli speaker stop
+```
+
+`flux-cli speaker start` asks the phone, and the audio starts after you tap **Play on phone** on the phone. See [start from the computer](#start-from-the-computer).
+In the Flux window, the **Phone speaker** card on the **Phone** page shows the stream and the output that `fluxd` muted, with **Stop**.
+While the phone plays, the computer shows a notification with **Stop**.
+
+`fluxd` captures the monitor of the default output with `pw-record` from PipeWire, as for the [remote desktop audio](workflows.md#remote-desktop-audio).
+The phone gets what the computer plays, also while the output is muted.
+The mute option needs `pactl`. See [audio outputs](features.md#audio-outputs).
+Omarchy installs both tools.
+A headless `fluxd` does not play its audio on a phone.
+
+The phone takes the audio focus of Android, so another player on the phone pauses.
+During a call or a voice prompt, the audio of the computer is silent.
+When another app starts to play, or the headphones disconnect, the audio of the computer stops.
+
+### Delay and data rate
+
+The audio is stereo, 48 kHz, signed 16-bit PCM, in frames of 20 ms.
+It needs about 1.54 Mbit/s, which is a small part of a Wi-Fi link.
+Flux sends PCM and not Opus, because PCM adds no codec delay and no work for the CPU on either side, and it uses the frames of the remote desktop audio.
+On Tailscale over mobile data, the stream uses about 700 MB each hour.
+
+Flux keeps the delay short:
+
+- `pw-record` captures in blocks of 20 ms.
+- `fluxd` keeps at most 100 ms of audio for a slow network. After a stall of the network, it drops the oldest audio, so the delay does not grow. The journal then shows `dropped audio after a network stall` once for the stream.
+- The phone keeps at most 100 ms of audio before it plays. It starts to play after 40 ms on Android 12 and later.
+
+On Wi-Fi, the audio plays about 0.1 to 0.2 seconds after the computer plays it.
+Bluetooth earbuds add their own delay, often 0.1 to 0.3 seconds.
+So a video on the computer can be out of sync with the sound on the phone.
+
+Only Flux for Android plays the audio of the computer.
+Flux for iOS, Flux for macOS, and Flux for Windows do not have this feature.
+
+## Streams in the background
+
+On Android, the webcam, the mic, and the audio of the computer keep streaming after you leave their screen, switch to another app, or lock the phone.
+Flux shows each stream that runs:
+
+- **Chat** shows a green notice, for example `The mic streams to omarchy. It keeps running when you leave Flux.` or `The audio of omarchy plays on this phone. It keeps running when you leave Flux.` The notice has **Open** and **Stop the mic**, **Stop webcam**, or **Stop the audio**.
+- A notification in the **Live streams** channel names the streams, for example `The webcam and the mic stream to omarchy`. It has a stop action for each stream. A tap on the notification opens Flux.
+- Android shows its privacy dot for the camera or the microphone.
+
+To stop a stream, use one of these:
+
+- **Stop webcam**, **Stop the mic**, or **Stop the audio** in **Chat** or in the notification, or the stop key of the stream screen.
+- `flux-cli webcam stop`, `flux-cli mic stop`, or `flux-cli speaker stop` on the computer.
+
+Android gives the camera and the microphone to an app in the background only through a foreground service.
+Flux starts this service when you start a stream on its screen, so start each stream from Flux on the screen.
+The audio of the computer uses the media playback type of this service.
+When another app takes the camera, the image on the computer stops. To get the camera back, open the Webcam screen again.
+A stream also stops when the link drops or when you unpair the computer, as on the screen.
+
+An iPhone keeps only the mic stream in the background. See [Flux for iOS](ios.md#features).
+
+## Start from the computer
+
+The computer can ask a paired device to start its webcam or its mic, or to play the audio of the computer.
+The device always asks you first.
+Its camera and its microphone turn on only after you tap start on the device, also while Flux is on its screen.
+The audio of the computer plays only after you tap **Play on phone**.
+
+To ask the device, run:
+
+```sh
+flux-cli webcam start
+flux-cli mic start
+flux-cli speaker start
+```
+
+The command prints the device that got the request:
+
+```text
+Asked Pixel 8 to start the webcam. Confirm on Pixel 8.
+```
+
+To ask 1 device of many, give its name or its ID:
+
+```sh
+flux-cli --device "Pixel 8" webcam start
+flux-cli mic start --device "Pixel 8"
+```
+
+In the Flux window, open the **Phone** page and select **Start** on the **Phone camera** card, the **Phone microphone** card, or the **Phone speaker** card.
+The cards show **Start** while no stream of that kind runs and the selected device can take the request.
+After the request, the card shows `Confirm on Pixel 8.` for 60 seconds, or until the stream starts.
+
+The device shows the request in 1 of 2 forms:
+
+| Flux on the device | What the device shows |
+| --- | --- |
+| On the screen | A prompt with the title `omarchy asks for the webcam`, `omarchy asks for the mic`, or `omarchy asks to play its audio on this phone`. The prompt has the buttons **Start webcam**, **Start the mic**, or **Play on phone**, and **Not now**. |
+| Not on the screen | A notification with the text `Tap to start the webcam.`, `Tap to start the mic.`, or `Tap to play the audio on this phone.` under the same title. On a Mac, the text starts with `Click`. The notification has a start action. |
+
+The title has the name of the computer, as `flux-cli status` shows it.
+The request ends after 60 seconds.
+The prompt or the notification then goes away.
+A tap on start opens the Webcam screen, the Mic screen, or the Media screen of that computer.
+The device then starts the stream with the saved settings when it can reach the computer.
+When a stream of that kind already runs to that computer, the request does nothing.
+
+Each platform has its own limits:
+
+- Flux for Android waits up to 60 seconds until it can start the stream. It waits for the unlock of the phone and for the link. A tap on the notification shows the prompt. Only the start action starts the stream. See [webcam and mic requests](android.md#webcam-and-mic-requests).
+- Flux for iOS waits up to 15 seconds until it can start the stream. A suspended Flux cannot remove the notification after 60 seconds. See [start a stream from the computer](ios.md#start-a-stream-from-the-computer).
+- Flux for macOS shows the prompt only while Flux is the active app. Else it shows the notification. See [start a stream from the computer](macos.md#start-a-stream-from-the-computer).
+
+`fluxd` refuses a request in these cases:
+
+| Case | Error code |
+| --- | --- |
+| No `--device`, and no paired, connected device can take the request. An earlier Flux app cannot take it. Update Flux on the device. Only Flux for Android takes a speaker request. | `no_device` |
+| No `--device`, and more than 1 device can take the request. The error lists the devices. Give `--device`. The name in `--device` can also match more than 1 device. Then give the device ID. | `ambiguous` |
+| No device has the name or the ID in `--device`. | `not_found` |
+| The device that `--device` names is not paired. | `not_paired` |
+| The device that `--device` names has no link now. | `offline` |
+| The device that `--device` names cannot take the request. An earlier Flux app cannot take it. `fluxd` in headless mode also returns this code, with or without `--device`. | `not_supported` |
+| A stream of that kind runs. Stop it first, for example with `flux-cli webcam stop`. | `already_active` |
+| The same device got a request of the same kind less than 3 seconds ago. The device also ignores such a request. | `too_soon` |
+
+### Wire format
+
+`fluxd` sends a `flux.stream.request` packet to the device:
+
+```json
+{"type":"flux.stream.request","body":{"kind":"webcam"}}
+```
+
+`kind` is `webcam`, `mic`, or `speaker`.
+The device ignores any other kind and any extra field.
+A device lists `flux.stream.request` in its incoming packet types only when it can stream both `webcam` and `mic`.
+`fluxd` sends the packet only to a paired, connected device that lists it, the same as `flux.theme`.
+The state of such a device has `streamrequest` in its `plugins`.
+`fluxd` sends `speaker` only to a device that also lists `flux.speaker`. The state of such a device also has `speaker` in its `plugins`.
+
+The packet only asks.
+It never starts the camera or the microphone.
+After the tap, the device starts the stream with its usual `flux.webcam`, `flux.mic`, or `flux.speaker` start packet, and `fluxd` handles it as each other start.
+
+The phone starts the audio of the computer with `flux.speaker`.
+It listens on a TLS port, and `fluxd` connects out to it, as for the microphone:
+
+```json
+{"type":"flux.speaker","body":{"state":"start","port":12071,"mute":true}}
+{"type":"flux.speaker","body":{"state":"mute","mute":false}}
+{"type":"flux.speaker","body":{"state":"stop"}}
+```
+
+`fluxd` answers with these states:
+
+| State | Fields | Meaning |
+| --- | --- | --- |
+| `live` | `rate`, `channels` | The capture runs, and the frames come on the stream. |
+| `muted` | `output`, and `message` after an error | `fluxd` muted the output with the description `output`, or turned its sound on again when `output` is empty. |
+| `error` | `message` | The stream did not start or stopped. |
+| `stop` | None | The user stopped the stream on the computer. |
+
+Each frame on the stream has the size of the data as a big-endian 32-bit number, the flags byte 8, and 20 ms of PCM.
+These are the audio frames of the remote desktop.
+
 ## Screen mirror
+
+The iPhone does not mirror its screen. See [Flux for iOS](ios.md#screen-mirror).
 
 Install `mpv` or use `ffplay` from FFmpeg:
 
@@ -114,4 +332,13 @@ flux-cli screen stop
 ```
 
 The window uses the `flux-screen` app ID.
-`dist/hyprland.lua` includes a floating-window rule for it.
+`dist/hyprland.lua` includes a rule that floats the window and keeps it from taking the keyboard focus.
+`ffplay` closes its window at the end of the stream, as `mpv` does.
+A phone can start a new mirror at most once in 3 seconds.
+
+## Stream sessions
+
+The webcam, the microphone, the phone speaker, and the screen mirror each have 1 session.
+A new start stops the session that runs.
+The new `ffmpeg`, `pw-cat`, `pw-record`, or player starts after the old one stopped, so 2 of them never write to 1 device.
+A stream stops when the phone stops it, when the link drops, when the device is unpaired, or when you stop it on the computer.

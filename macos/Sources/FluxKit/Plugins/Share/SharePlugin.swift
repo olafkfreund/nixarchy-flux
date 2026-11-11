@@ -1,14 +1,35 @@
+#if os(macOS)
 import AppKit
+import CoreServices
+#endif
 import Foundation
+import NIOConcurrencyHelpers
 import UserNotifications
 
-/// File, text, and link sharing: kdeconnect.share.request in both
-/// directions. A file from the computer comes on a payload port, or through a
-/// Flux tunnel when the computer blocks incoming connections. A file to the
-/// computer goes out on a payload port that this Mac opens.
+/// File, text, and link sharing: flux.share.request in both
+/// directions. A file from the computer comes through a Flux tunnel. A file
+/// to the computer goes out on a payload port that this device opens.
+///
+/// This device never opens a received file or link by itself. The user
+/// opens a file from its notification or the Share card, and a link from
+/// its notification.
 public final class SharePlugin: FluxPlugin, @unchecked Sendable {
     private weak var core: FluxCore?
+    private let resumable = ResumableTransfer()
     public let model: ShareModel
+    /// Opens a received file after the user asks for it. On macOS, nil
+    /// opens it with the default app. On iOS the app sets it, for example
+    /// to Quick Look.
+    @MainActor public var openFile: (@MainActor @Sendable (URL) -> Void)?
+    /// Opens a received link after a click on its notification. On macOS,
+    /// nil opens it in the default browser. On iOS the app sets it. Without
+    /// it the link is not opened.
+    @MainActor public var openLink: (@MainActor @Sendable (URL) -> Void)?
+
+    /// The transfer streams that run, so that an unpair ends them.
+    private let streams = NIOLockedValueBox<[UUID: (deviceId: String, stream: TLSStream)]>([:])
+    /// The space that a received file leaves free on the volume, in bytes.
+    static let freeSpaceReserve: Int64 = 256 << 20
 
     static let fileCategory = "share.file"
     static let linkCategory = "share.link"
@@ -19,41 +40,80 @@ public final class SharePlugin: FluxPlugin, @unchecked Sendable {
         model = ShareModel(downloadFolder: Self.defaultFolder)
     }
 
-    public let incoming = [PacketType.share, PacketType.shareUpdate]
-    public let outgoing = [PacketType.share, PacketType.shareUpdate, PacketType.fluxTunnel]
+    public let incoming = [PacketType.share, PacketType.shareUpdate, PacketType.fluxTransfer]
+    public let outgoing = [PacketType.share, PacketType.shareUpdate, PacketType.fluxTunnel, PacketType.fluxTransfer]
 
     public func attach(core: FluxCore) {
         self.core = core
         let folder = downloadFolder
         ui { $0.downloadFolder = folder }
-        Notifier.shared.register(category: Self.fileCategory, actions: [
-            UNNotificationAction(identifier: "open", title: "Open"),
-            UNNotificationAction(identifier: "reveal", title: "Show in Finder"),
-        ]) { action, info, _ in
+        #if os(macOS)
+        let open = UNNotificationAction(identifier: "open", title: "Open")
+        let fileActions = [open, UNNotificationAction(identifier: "reveal", title: "Show in Finder")]
+        #else
+        // Without .foreground, iOS runs the action in the background, where
+        // Flux cannot show a file or open a link.
+        let open = UNNotificationAction(identifier: "open", title: "Open", options: [.foreground])
+        let fileActions = [open]
+        #endif
+        Notifier.shared.register(category: Self.fileCategory, actions: fileActions) { [weak self] action, info, _ in
             guard let path = info["path"] as? String else { return }
             let url = URL(fileURLWithPath: path)
             DispatchQueue.main.async {
-                if action == "reveal" {
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                } else {
-                    NSWorkspace.shared.open(url)
+                MainActor.assumeIsolated {
+                    #if os(macOS)
+                    if action == "reveal" {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                        return
+                    }
+                    #endif
+                    self?.openReceivedFile(url)
                 }
             }
         }
-        Notifier.shared.register(category: Self.linkCategory, actions: [UNNotificationAction(identifier: "open", title: "Open")]) { _, info, _ in
-            guard let link = info["url"] as? String, let url = URL(string: link) else { return }
-            DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+        Notifier.shared.register(category: Self.linkCategory, actions: [open]) { [weak self] _, info, _ in
+            guard let link = info["url"] as? String, let url = ShareWire.webURL(link) else { return }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.openReceivedLink(url) } }
         }
+    }
+
+    /// Opens a file through openFile, or with the default app on macOS.
+    @MainActor
+    private func openReceivedFile(_ url: URL) {
+        if let openFile {
+            openFile(url)
+            return
+        }
+        #if os(macOS)
+        NSWorkspace.shared.open(url)
+        #endif
+    }
+
+    /// Opens a link through openLink, or in the default browser on macOS.
+    @MainActor
+    private func openReceivedLink(_ url: URL) {
+        if let openLink {
+            openLink(url)
+            return
+        }
+        #if os(macOS)
+        NSWorkspace.shared.open(url)
+        #endif
     }
 
     // MARK: Settings
 
-    static var defaultFolder: URL {
-        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+    static var defaultFolder: URL { FluxFolders.downloads }
+
+    /// The name of a folder in messages. The default folder has the name
+    /// that users know: Downloads on macOS, Files on iOS, where the Files
+    /// app shows the Documents folder of the app.
+    static func placeName(_ folder: URL) -> String {
+        folder.standardizedFileURL == FluxFolders.downloads.standardizedFileURL ? FluxFolders.downloadsName : folder.lastPathComponent
     }
 
-    /// The folder for received files. The default is ~/Downloads.
+    /// The folder for received files. The default is ~/Downloads on macOS
+    /// and the app's Documents folder on iOS.
     public var downloadFolder: URL {
         guard let path = core?.defaults.string(forKey: Self.folderKey), !path.isEmpty else { return Self.defaultFolder }
         return URL(fileURLWithPath: path, isDirectory: true)
@@ -67,89 +127,181 @@ public final class SharePlugin: FluxPlugin, @unchecked Sendable {
 
     // MARK: Receive
 
-    /// Text goes on the clipboard, a web link opens in the default browser,
-    /// and a file goes to the download folder. A share.request.update only
-    /// announces a batch, so it needs no action.
+    /// Text goes on the clipboard, a web link waits in a notification, and a
+    /// file goes to the download folder. A share.request.update only
+    /// announces a batch, so it needs no action. The core lock is held.
     public func handle(_ packet: Packet, from device: Device) {
+        if packet.type == PacketType.fluxTransfer {
+            guard let core, let certificate = device.certificate,
+                  ["offer", "chunk"].contains(packet.string("action") ?? "") else { return }
+            let id = device.id, from = device.name, folder = downloadFolder
+            Task.detached { [self] in
+                do {
+                    if let saved = try await resumable.receive(packet, device: id, certificate: certificate, core: core, folder: folder) {
+                        Notifier.shared.post(id: "share-\(UUID().uuidString)", category: Self.fileCategory,
+                                             title: "Received \(saved.lastPathComponent)", body: "From \(from)", userInfo: ["path": saved.path])
+                        let transfer = FileTransfer(id: UUID(), deviceId: id, name: saved.lastPathComponent, incoming: true, size: packet.long("size") ?? 0)
+                        ui { $0.start(transfer); $0.finish(transfer.id, file: saved, error: nil) }
+                    }
+                } catch {
+                    core.send(Packet(PacketType.fluxTransfer, ["action": "error", "id": packet.string("id"), "error": error.localizedDescription]), to: id)
+                }
+            }
+            return
+        }
         guard let core, packet.type == PacketType.share, let request = ShareRequest(packet) else { return }
         let from = device.name
         switch request {
         case .text(let text):
-            core.plugin(ClipboardPlugin.self)?.putFromComputer(text)
+            core.plugin(ClipboardPlugin.self)?.putFromComputer(text, from: device.id)
             core.toast("Text from \(from) is on the clipboard")
-        case .url(let link):
-            if let url = URL(string: link), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
-                DispatchQueue.main.async { NSWorkspace.shared.open(url) }
-            } else {
-                // Other schemes can start apps, so they wait for a click.
-                Notifier.shared.post(id: "share-\(UUID().uuidString)", category: Self.linkCategory,
-                                     title: "Link from \(from)", body: link, userInfo: ["url": link])
-            }
+        case .url(let web):
             core.toast("Link from \(from)")
-        case .file(let name, let open, let lastModified):
-            guard let address = device.link?.address, let cert = device.certificate else { return }
+            // The links share the notification limit of the computer, so
+            // that a computer cannot bury the other notifications.
+            guard NotificationLimit.allowsNow(device.id) else {
+                FluxLog.plugin.info("link notification dropped: too many from \(from, privacy: .public)")
+                return
+            }
+            // The link opens only after a click on the notification, like
+            // in the Android app. The links count toward the delivered
+            // notifications of the computer.
+            let id = DeliveredNotifications.linkId(deviceId: device.id)
+            DeliveredNotifications.post(id: id, deviceId: device.id)
+            Notifier.shared.post(id: id, category: Self.linkCategory,
+                                 title: "Link from \(from)", body: web.absoluteString, userInfo: ["url": web.absoluteString])
+        case .file(let name, let lastModified):
+            guard let token = packet.payloadTunnel, let cert = device.certificate else { return }
+            guard packet.payloadSize > 0 else {
+                device.send(Tunnel.failed(token: token, error: "the file has no size"))
+                return
+            }
             core.toast("Receiving \(name)")
-            let job = Download(deviceId: device.id, from: from, address: address, cert: cert, packet: packet,
-                               name: name, open: open, lastModified: lastModified)
+            let job = Download(deviceId: device.id, from: from, token: token, cert: cert, packet: packet,
+                               name: name, lastModified: lastModified)
             Task.detached { [self] in await download(job) }
         }
+    }
+
+    /// An unpair ends the transfers of the device. A link that only drops
+    /// leaves them, because they have their own connections.
+    public func onDisconnected(_ device: Device) {
+        guard !device.paired else { return }
+        let id = device.id
+        let ended = streams.withLockedValue { all -> [TLSStream] in
+            let mine = all.filter { $0.value.deviceId == id }
+            for key in mine.keys { all[key] = nil }
+            return mine.values.map { $0.stream }
+        }
+        ended.forEach { $0.channel.channel.close(promise: nil) }
+    }
+
+    /// Keeps a stream until its transfer ends. It returns false when the
+    /// device is no longer paired, for example after an unpair during the
+    /// wait for the computer. The core lock comes first, as in an unpair.
+    private func register(_ stream: TLSStream, id: UUID, deviceId: String) -> Bool {
+        core?.withDevice(deviceId) { d -> Bool in
+            guard d.paired else { return false }
+            streams.withLockedValue { $0[id] = (deviceId, stream) }
+            return true
+        } ?? false
+    }
+
+    private func unregister(_ id: UUID) {
+        streams.withLockedValue { $0[id] = nil }
     }
 
     /// 1 file that the computer offers.
     private struct Download: Sendable {
         let deviceId: String
         let from: String
-        let address: String
+        /// The tunnel that the payload comes through.
+        let token: String
         let cert: [UInt8]
         let packet: Packet
         let name: String
-        let open: Bool
         let lastModified: Int64?
     }
+
+    /// Reports whether a file of the size fits on the volume of the folder
+    /// with the reserve left free. It is true when the volume does not tell.
+    static func fits(_ size: Int64, in folder: URL) -> Bool {
+        guard let free = try? folder.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage else {
+            return true
+        }
+        return fits(size, free: free)
+    }
+
+    static func fits(_ size: Int64, free: Int64) -> Bool {
+        size >= 0 && size <= free - freeSpaceReserve
+    }
+
+    #if os(macOS)
+    /// Marks a received file as a download, so that Gatekeeper checks it
+    /// when the user opens it. The app has no sandbox, so macOS does not
+    /// mark the files that it writes.
+    static func quarantine(_ url: URL) {
+        var values = URLResourceValues()
+        values.quarantineProperties = [
+            kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
+            kLSQuarantineAgentNameKey as String: "Flux",
+        ]
+        var file = url
+        do {
+            try file.setResourceValues(values)
+        } catch {
+            FluxLog.plugin.error("cannot mark \(url.lastPathComponent, privacy: .private(mask: .hash)) as a download: \(String(describing: error), privacy: .public)")
+        }
+    }
+    #endif
 
     private func download(_ job: Download) async {
         guard let core else { return }
         let folder = downloadFolder
-        let token = job.packet.payloadTunnel
         let transfer = FileTransfer(id: UUID(), deviceId: job.deviceId, name: job.name, incoming: true, size: job.packet.payloadSize)
         ui { $0.start(transfer) }
         let part: (url: URL, handle: FileHandle)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            guard Self.fits(job.packet.payloadSize, in: folder) else {
+                throw FluxError("there is not enough free space in \(Self.placeName(folder))")
+            }
             part = try Self.createExclusive(in: folder, name: job.name + ".part")
         } catch {
             core.toast("Cannot save \(job.name): \(error.localizedDescription)")
-            if let token { core.send(Tunnel.failed(token: token, error: "cannot save the file"), to: job.deviceId) }
+            core.send(Tunnel.failed(token: job.token, error: "cannot save the file"), to: job.deviceId)
             ui { $0.finish(transfer.id, file: nil, error: error) }
             return
         }
         do {
-            let stream: TLSStream
-            if let token {
-                // The computer blocks incoming connections: listen and let it connect.
-                stream = try await Tunnel.accept(tls: core.tls, expected: job.cert, token: token) { [weak core] p in
-                    core?.send(p, to: job.deviceId)
-                }
-            } else {
-                stream = try await Payload.connect(tls: core.tls, host: job.address, port: job.packet.payloadPort)
+            // Listen and let the computer connect.
+            let stream = try await Tunnel.accept(tls: core.tls, expected: job.cert, token: job.token) { [weak core] p in
+                core?.send(p, to: job.deviceId)
             }
+            guard register(stream, id: transfer.id, deviceId: job.deviceId) else {
+                await stream.discard()
+                throw FluxError("\(job.from) is not paired")
+            }
+            defer { unregister(transfer.id) }
             try await stream.receive(into: part.handle, size: job.packet.payloadSize, progress: progress(transfer.id))
             try part.handle.close()
             let saved = try Self.moveExclusive(part.url, in: folder, name: job.name)
+            #if os(macOS)
+            Self.quarantine(saved)
+            #endif
             if let ms = job.lastModified, ms > 0 {
                 try? FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: Double(ms) / 1000)], ofItemAtPath: saved.path)
             }
             ui { $0.finish(transfer.id, file: saved, error: nil) }
             Notifier.shared.post(id: "share-\(transfer.id.uuidString)", category: Self.fileCategory,
                                  title: "Received \(saved.lastPathComponent)",
-                                 body: "From \(job.from), saved in \(folder.lastPathComponent)",
+                                 body: "From \(job.from), saved in \(Self.placeName(folder))",
                                  userInfo: ["path": saved.path])
-            core.toast("Saved \(saved.lastPathComponent) in \(folder.lastPathComponent)")
-            if job.open { DispatchQueue.main.async { NSWorkspace.shared.open(saved) } }
+            core.toast("Saved \(saved.lastPathComponent) in \(Self.placeName(folder))")
         } catch {
             try? part.handle.close()
             try? FileManager.default.removeItem(at: part.url)
-            FluxLog.plugin.error("receive \(job.name, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+            FluxLog.plugin.error("receive \(job.name, privacy: .private(mask: .hash)) failed: \(String(describing: error), privacy: .public)")
             ui { $0.finish(transfer.id, file: nil, error: error) }
             core.toast("Receiving \(job.name) failed")
         }
@@ -195,14 +347,24 @@ public final class SharePlugin: FluxPlugin, @unchecked Sendable {
             core.toast("Not connected. Try again in a moment")
             return
         }
-        Task.detached { [self] in await sendBatch(list, to: peer) }
+        Task.detached { [self] in await sendBatch(list, to: peer) { _, _ in } }
     }
 
-    private func sendBatch(_ urls: [URL], to peer: Peer) async {
+    /// Sends files to a connected computer in 1 batch, like `send(files:to:)`,
+    /// and returns after the batch ends. `result` gets each file with nil
+    /// once the computer received it, or with the error. It throws when the
+    /// computer is not connected, and then no file goes out.
+    public func sendAndWait(files: [URL], to deviceId: String, result: @escaping @Sendable (URL, Error?) -> Void) async throws {
+        guard let peer = peer(deviceId) else { throw FluxError("Not connected") }
+        await sendBatch(files, to: peer, result: result)
+    }
+
+    private func sendBatch(_ urls: [URL], to peer: Peer, result: @Sendable (URL, Error?) -> Void) async {
         guard let core else { return }
         let files: [(url: URL, size: Int64)] = urls.compactMap { url in
             guard let size = Self.fileSize(url) else {
                 core.toast("Cannot read \(url.lastPathComponent)")
+                result(url, FluxError("cannot read \(url.lastPathComponent)"))
                 return nil
             }
             return (url, size)
@@ -218,9 +380,11 @@ public final class SharePlugin: FluxPlugin, @unchecked Sendable {
                     ShareWire.file(name: name, count: files.count, total: total, size: file.size, port: port)
                 }
                 sent.append(name)
+                result(file.url, nil)
             } catch {
-                FluxLog.plugin.error("send \(name, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+                FluxLog.plugin.error("send \(name, privacy: .private(mask: .hash)) failed: \(String(describing: error), privacy: .public)")
                 core.toast("Sending \(name) failed")
+                result(file.url, error)
             }
         }
         if sent.count == 1 {
@@ -245,21 +409,37 @@ public final class SharePlugin: FluxPlugin, @unchecked Sendable {
     /// Sends text that the camera read. The "scan" flag makes the computer
     /// save it in a file. It returns false when the computer is not connected.
     public func sendScan(text: String, to deviceId: String) -> Bool {
-        core?.send(ShareWire.scan(text), to: deviceId) ?? false
+        guard core?.send(ShareWire.scan(text), to: deviceId) == true else { return false }
+        ui { $0.record(SentItem(deviceId: deviceId, kind: .scan, text: text)) }
+        return true
     }
 
-    /// Sends text, or a link when the text is 1 URL.
-    public func send(text: String, to deviceId: String) {
+    /// The largest text or link that `send(text:to:)` sends. The computer
+    /// reads 1 packet as 1 line and closes the link after a line over its
+    /// limit.
+    public static let maxText = 1 << 20
+
+    /// Sends text, or a link when the text is 1 URL. It returns false when
+    /// the text did not go out.
+    @discardableResult
+    public func send(text: String, to deviceId: String) -> Bool {
+        guard text.utf8.count <= Self.maxText else {
+            core?.toast("The text is larger than 1 MB. Send it as a file")
+            return false
+        }
         guard let core, let peer = peer(deviceId) else {
             core?.toast("Not connected. Try again in a moment")
-            return
+            return false
         }
         let p = ShareWire.text(text)
         guard core.send(p, to: deviceId) else {
             core.toast("Not connected. Try again in a moment")
-            return
+            return false
         }
-        core.toast(p.has("url") ? "Link sent to \(peer.name)" : "Text sent to \(peer.name)")
+        let link = p.string("url")
+        ui { $0.record(SentItem(deviceId: deviceId, kind: link != nil ? .link : .text, text: link ?? text)) }
+        core.toast(link != nil ? "Link sent to \(peer.name)" : "Text sent to \(peer.name)")
+        return true
     }
 
     /// The fields of a connected, paired computer that a transfer needs.
@@ -270,9 +450,9 @@ public final class SharePlugin: FluxPlugin, @unchecked Sendable {
     }
 
     private func peer(_ id: String) -> Peer? {
-        core?.device(id).flatMap { d in
-            core?.locked { d.paired && d.online ? d.certificate.map { Peer(id: d.id, name: d.name, cert: $0) } : nil }
-        }
+        core?.withDevice(id) { d in
+            d.paired && d.online ? d.certificate.map { Peer(id: d.id, name: d.name, cert: $0) } : nil
+        } ?? nil
     }
 
     /// Offers 1 file on a payload port and streams it to the computer, which
@@ -290,6 +470,11 @@ public final class SharePlugin: FluxPlugin, @unchecked Sendable {
                 throw FluxError("Not connected")
             }
             let stream = try await server.accept()
+            guard register(stream, id: transfer.id, deviceId: peer.id) else {
+                await stream.discard()
+                throw FluxError("\(peer.name) is not paired")
+            }
+            defer { unregister(transfer.id) }
             try await stream.send(from: handle, size: size, progress: progress(transfer.id))
             ui { $0.finish(transfer.id, file: nil, error: nil) }
         } catch {

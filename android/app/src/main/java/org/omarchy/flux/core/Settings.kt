@@ -23,10 +23,39 @@ class Settings(context: Context) {
             prefs.edit().putBoolean("enabled", v).commit()
         }
 
-    /** The color theme of the app. */
+    /** Runs the userspace tailnet node, so a paired computer can reach this phone away from home. */
+    var remoteAccess: Boolean
+        get() = prefs.getBoolean("remoteAccess", false)
+        set(v) = prefs.edit().putBoolean("remoteAccess", v).apply()
+
+    /** The Tailscale auth key of the userspace node. Empty until the user enters one. */
+    var tailnetAuthKey: String
+        get() = prefs.getString("tailnetAuthKey", "").orEmpty()
+        set(v) = prefs.edit().putString("tailnetAuthKey", v).apply()
+
+    /** The descriptions of the shortcuts that the Omarchy panel pins, or null for the defaults. */
+    var pinnedShortcuts: List<String>?
+        get() = prefs.getString("pinnedShortcuts", null)?.split('\n')?.filter { it.isNotEmpty() }
+        set(v) = prefs.edit().putString("pinnedShortcuts", v?.joinToString("\n")).apply()
+
+    /** The color theme of the app. Without a choice, it is [ThemeMode.Computer]. */
     var theme: ThemeMode
         get() = ThemeMode.fromKey(prefs.getString("theme", null))
         set(v) = prefs.edit().putString("theme", v.key).apply()
+
+    /**
+     * The theme of each computer and the last theme, in the JSON form of
+     * [org.omarchy.flux.theme.ThemeBook.toJson], or null. The next cold
+     * start draws the theme at once.
+     */
+    var computerThemes: String?
+        get() = prefs.getString("computerThemes", null)
+        set(v) = prefs.edit().putString("computerThemes", v).apply()
+
+    /** The scroll direction of the touchpad screen. Without a choice, it is [ScrollMode.Computer]. */
+    var touchpadScroll: ScrollMode
+        get() = ScrollMode.fromKey(prefs.getString("touchpadScroll", null))
+        set(v) = prefs.edit().putString("touchpadScroll", v.key).apply()
 
     /** Sends the calls of this phone to the computers. It needs the phone permission. */
     var callAlerts: Boolean

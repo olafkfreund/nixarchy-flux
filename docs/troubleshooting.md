@@ -12,8 +12,8 @@ systemctl --user status fluxd
 journalctl --user -u fluxd -n 100 --no-pager
 ```
 
-Inspect `flux-cli setup` output directly.
-It can print a failed setup step and still exit with zero.
+`flux-cli setup` returns 1 when the service step or the plugin step fails.
+A missing system part does not change the exit code, so also read the list under `3. System parts` in its output.
 
 ## flux runs another program
 
@@ -47,6 +47,85 @@ If another daemon holds the socket, stop that process before you start the servi
 A foreground development daemon and the user service cannot share one socket.
 See [isolated development](development.md#isolated-daemon).
 
+## fluxd runs an earlier version
+
+`flux-cli version` shows the version of the running `fluxd`.
+`fluxd.service` restarts by itself after an update.
+It waits while 1 of these runs:
+
+- A file transfer
+- A webcam, microphone, or screen mirror stream
+- The live terminal of a herdr agent on the phone
+- The remote desktop
+- A Browse PC session
+- The send of the Android app
+- A fingerprint approval
+- An SSH signature that waits for the phone
+
+The journal then shows a line such as `the restart waits for Browse PC`.
+To end a Browse PC session, select **Stop** in its desktop notification.
+
+If `flux-cli version` says `fluxd runs an earlier version`, restart the service once:
+
+```sh
+systemctl --user restart fluxd
+```
+
+If the new version still does not start, read the log:
+
+```sh
+journalctl --user -u fluxd -n 50 --no-pager
+```
+
+The line `the new ... does not run` means that the new binary failed its version check.
+Install the update again.
+
+### The service runs an old fluxd after a package install
+
+systemd uses a unit in `~/.config/systemd/user/` before the unit of the package in `/usr/lib/systemd/user/`.
+A `flux-cli setup` of a checkout or `make install-user` writes such a unit.
+After a package install, it hides the unit of the package, and the service runs the old `fluxd`.
+`flux-cli doctor` reports it:
+
+```text
+✗ /home/you/.config/systemd/user/fluxd.service hides /usr/lib/systemd/user/fluxd.service, so the service does not run the fluxd of the package. To remove it, run: flux-cli setup
+```
+
+To remove a unit that `flux-cli setup` wrote, run `flux-cli setup` again.
+`flux-cli setup` keeps a unit that you changed and prints its path.
+Remove such a unit yourself, then reload systemd:
+
+```sh
+systemctl --user daemon-reload
+```
+
+## The release check fails
+
+Flux works without the internet.
+Only the daily [release check](configuration.md#release-check) needs a connection to `api.github.com`.
+`flux-cli doctor` shows the error of the last failed check.
+`fluxd` tries again after 1 hour or at the next network change, but not earlier than 1 minute after the failure.
+
+To turn the check off, set `check_updates = false` in `~/.config/flux/config.toml`, then run:
+
+```sh
+systemctl --user reload fluxd
+```
+
+## flux-cli update refuses a release
+
+`flux-cli update` checks `SHA256SUMS.sig` with the public release key of its build, then it checks the package against `SHA256SUMS`.
+When a check fails, it installs nothing and prints the cause:
+
+| Message | Next step |
+| --- | --- |
+| `the release has no SHA256SUMS.sig, so Flux cannot check who made it` | The upload of the release can be incomplete. Try again later. |
+| `SHA256SUMS.sig does not match SHA256SUMS and the release key, so Flux does not trust this release` | Do not install the release. Report it to the maintainer. |
+| `the SHA-256 checksum of FILE is …, and SHA256SUMS gives …` | The download is damaged. Run `flux-cli update` again. |
+
+A `flux-cli` without a release key checks only `SHA256SUMS` and says so.
+See [check a release](install.md#check-a-release) to check the files by hand.
+
 ## The phone does not appear
 
 1. Open Flux for Android or Flux for macOS.
@@ -57,6 +136,9 @@ See [isolated development](development.md#isolated-daemon).
    systemctl status avahi-daemon
    ```
 
+   If Avahi is inactive, start it with `sudo systemctl enable --now avahi-daemon`.
+   `fluxd` publishes the computer through Avahi again when Avahi starts or restarts, so `fluxd` needs no restart.
+
 4. Request discovery:
 
    ```sh
@@ -64,9 +146,35 @@ See [isolated development](development.md#isolated-daemon).
    flux-cli status
    ```
 
+   `flux-cli discover` asks Avahi for the address of each Flux device again, and `fluxd` connects to each one.
+   Avahi reports a device only when it appears on the network.
+   So a phone that stayed on the network after its link closed, for example after an unpair, connects again only after `flux-cli discover` or after **+ Pair new device** in the Flux window.
+
+5. Read the mDNS lines in the log:
+
+   ```sh
+   journalctl --user -u fluxd -e | grep mDNS
+   ```
+
+   | Line | Meaning |
+   | --- | --- |
+   | `mDNS: publishing this computer and looking for _flux._udp devices through Avahi` | mDNS runs. |
+   | `mDNS: resolving the N devices that Avahi reports` | `flux-cli discover` ran. With 0, Avahi reports no Flux device to `fluxd`. Compare with `avahi-browse -r -t _flux._udp`. |
+   | `mDNS: found "NAME" at IP:PORT` | `fluxd` has the address of the device and connects to it. A failed connection logs a `connect to` line. |
+   | `mDNS: cannot resolve ID: ERROR` | Avahi has the device but cannot get its address. |
+   | `mDNS: ID has no IPv4 address that Flux can use` | The device has only an IPv6 or loopback address. Flux finds devices over IPv4 only. |
+   | `mDNS: the Avahi browser failed, starting it again` | Avahi stopped the search. `fluxd` starts a new one. |
+
 Guest Wi-Fi and client isolation can block devices on the same access point.
-Flux uses outbound desktop connections and mDNS, so a new inbound desktop firewall rule is not the default fix.
+When discovery finds no device, pair by the IP address of the phone with `flux-cli pair --address`. See [pair by address](cli.md#pair-by-address).
+`fluxd` listens on 1 TCP port from 12100 to 12108 and on UDP port 12100, but it does not need inbound traffic.
+It finds the devices through mDNS and opens the connections itself.
+So a new inbound desktop firewall rule is not the default fix.
+See [network ports](security.md#network-ports).
 Keep the existing identity and trust store while you diagnose connectivity.
+
+Flux for Android takes a connection from a new computer only while Flux is on the screen or while it scans.
+Open Flux on the phone before you pair.
 
 On a Mac, check that Flux has access to the local network.
 To read the Mac logs, run:
@@ -75,9 +183,66 @@ To read the Mac logs, run:
 log stream --predicate 'subsystem == "org.omarchy.flux"'
 ```
 
+## The pairing keys differ
+
+The pairing key has 16 characters in 4 groups of 4, for example `5EE6 825F 974E D59A`.
+An earlier Flux app shows only 8 characters.
+If 1 screen shows 8 characters, reject the request, update Flux on that device, and pair again.
+If the 16 characters differ, reject the request.
+Another device can be between the phone and the computer.
+
+`flux-cli pair` finds a name only among the devices that are connected and not paired.
+When the name still matches more than 1 device, `flux-cli pair` returns the `ambiguous` error with the device IDs.
+See [pair and discover](cli.md#pair-and-discover) for the match rule of each command.
+Give the device ID in place of the name.
+
+## A paired phone stops connecting after an update
+
+Flux 0.8 changed the names on the network.
+A Flux app from before 0.8 cannot connect to `fluxd` 0.8 or later.
+`flux-cli update --phone` cannot send it the new app, because it needs a connection.
+The log of `fluxd` then shows `TLS handshake: EOF` for the phone every 30 seconds.
+
+When the old app announces itself, `fluxd` logs `runs a Flux app older than 0.8` once.
+`flux-cli status` and `flux-cli doctor` then name the phone.
+Install the latest app from the [releases](https://github.com/bjarneo/flux/releases/latest).
+On Android, [install it with adb](android-setup.md#install-with-adb).
+`adb install -r` keeps the app data, so the phone stays paired.
+
+## A device does not find the computer after an update
+
+`fluxd` uses UDP port 12100 and TCP ports 12070 to 12108.
+A Flux app from before the port change uses the ports 1716 to 1764.
+On an Android phone, an iPhone, or a Mac, such an app does not find the computer, and `fluxd` does not connect to it.
+`flux-cli update --phone` cannot send it the new app, because it needs a connection.
+
+Install the latest app on each device from the [releases](https://github.com/bjarneo/flux/releases/latest).
+On Android, [install it with adb](android-setup.md#install-with-adb).
+`adb install -r` keeps the app data, so the phone stays paired.
+On an iPhone, [install the release with a sideload tool](ios.md#install-a-release-with-a-sideload-tool).
+
+## A pairing from the computer stops after the phone accepts
+
+A pairing that you start on the computer can stop right after you accept on the phone.
+The Flux window then shows `Pairing with Pixel 8 stopped, because the connection closed`.
+A large phone clipboard can be the cause, because Flux for Android sends its clipboard when it accepts.
+Until you confirm on the computer, `fluxd` reads at most 64 KiB in 1 packet from the phone.
+It closes the connection for a larger packet, and the pairing stops.
+
+To find the cause, run:
+
+```sh
+journalctl --user -u fluxd -n 50 --no-pager | grep "packet too large"
+```
+
+To pair, do 1 of these steps:
+
+- Clear the phone clipboard, or copy a short text on the phone, and pair again.
+- Start the pairing on the phone, and accept it on the computer.
+
 ## The phone does not connect away from home
 
-Flux reaches a phone outside the local network only through an extra address, for example its Tailscale name.
+Flux reaches a phone outside the local network only through an extra address, for example its Tailscale name or its ZeroTier address.
 
 ```sh
 flux-cli addresses
@@ -86,8 +251,8 @@ tailscale ping pixel-8
 journalctl --user -u fluxd -n 50 --no-pager | grep "connect to"
 ```
 
-If `flux-cli addresses` shows `none` for the phone, add its Tailscale name.
-See [Connect through Tailscale](tailscale.md#troubleshoot) for the other checks.
+If `flux-cli addresses` shows `none` for the phone, add its Tailscale name or its ZeroTier address.
+See [Connect through Tailscale](tailscale.md#troubleshoot) or [Connect through ZeroTier](zerotier.md#troubleshoot) for the other checks.
 
 ## The window or bar item is missing
 
@@ -112,7 +277,7 @@ Missing icons usually indicate a missing Nerd Font or Qt SVG package.
 
 If the Messages page is missing, the phone does not offer its text messages.
 
-1. Open the device screen of the computer in Flux for Android.
+1. Open **Computers > Sync** in Flux for Android.
 2. Turn on **Text messages**.
 3. Allow SMS access when the phone asks.
 
@@ -120,9 +285,45 @@ If the switch stays off, open **Settings > Apps > Flux > Permissions** on the ph
 If Android shows **Restricted setting**, open **Settings > Apps > Flux**, open the menu, and select **Allow restricted settings**.
 Then turn on **Text messages** again.
 
-If a sent message shows **Not sent**, the phone could not send it.
+If a sent message shows **Not sent**, the phone could not send it, or the phone did not report it in 60 seconds.
 Check the signal and the SMS app on the phone.
+When the phone reports the message later, **Not sent** goes away.
 Flux does not send messages to a group. Reply to a group on the phone.
+
+If a message is on the phone but not on the desktop, check these causes:
+
+- The app on the phone keeps the message in its own database, for example an RCS chat. Flux reads only the SMS and MMS database of the phone.
+- The message is older than the last 100 messages of the conversation. The desktop shows only these 100 messages.
+
+## Conversations show numbers
+
+Flux shows the numbers of the conversations when it cannot read the contacts of the phone.
+
+1. Open **Computers > Sync** in Flux for Android.
+2. Under **Text messages**, select **Allow contacts**, and allow the access.
+3. Open the **Messages** page on the desktop again.
+
+If Android does not ask, select **Open app settings** and allow **Contacts**.
+
+## A phone copy does not reach the computer
+
+Android lets only the app on the screen read the clipboard.
+Flux sends a phone copy by itself only while Flux is on the screen.
+For a copy in another app, use one of these paths:
+
+- The **Send clipboard** tile in Quick Settings.
+- The **Send clipboard** action on the service notification.
+- **Send to computer** in the text selection menu.
+- **Send with Flux** in the share sheet.
+
+See [send a copy from another app](features.md#send-a-copy-from-another-app).
+
+If a tap on **Send clipboard** shows the message **Turn on Sync clipboard first**, open **Computers > Sync**.
+Then turn on **Sync clipboard**.
+
+A copy that its app marks as sensitive, for example a password, does not sync by itself.
+The **Send clipboard** tile does not send it either.
+To send such a copy, open Flux and tap **Send clipboard** in **Send**.
 
 ## Media controls do not show on the phone
 
@@ -142,6 +343,27 @@ Restart it with `systemctl --user restart fluxd`.
 A player that does not accept a new volume shows no volume control.
 Chromium is an example.
 
+## Audio outputs do not show on the phone
+
+**Audio outputs** in **Media** needs `pactl` on the computer.
+When the phone shows an error in the place of the outputs, check `pactl` and the log of the daemon:
+
+```sh
+pactl --format=json list sinks
+journalctl --user -u fluxd --no-pager | grep "audio output"
+```
+
+If `pactl` is not installed, install it:
+
+```sh
+sudo pacman -S libpulse
+```
+
+The list leaves out an output whose ports are all not available, such as headphones that are not plugged in.
+Plug in the device, then wait up to 10 seconds, or open **Media** again.
+An earlier `fluxd` does not send the outputs, and the dock of **Media** then shows no output key.
+Update Flux on the computer.
+
 ## Camera, microphone, or screen fails
 
 ```sh
@@ -155,6 +377,34 @@ The webcam needs `ffmpeg`, `v4l2loopback-dkms`, and headers for the active kerne
 The microphone needs PipeWire and phone microphone permission.
 The screen mirror needs `mpv` or `ffplay` and the Android capture prompt.
 See [camera and streams](camera.md) for setup commands.
+
+## The phone plays no audio of the computer
+
+```sh
+flux-cli speaker
+pw-record --version
+journalctl --user -u fluxd --no-pager | grep speaker
+```
+
+The phone speaker needs `pw-record` from PipeWire.
+If the phone shows `pw-record is not installed on the computer`, install it:
+
+```sh
+sudo pacman -S pipewire
+```
+
+The phone plays what the default output of the computer plays.
+If you hear nothing, play a sound on the computer, and check its default output with `pactl get-default-sink`.
+If the computer stays loud while the phone plays, check **Mute omarchy while this phone plays** in the audio sheet of **Media**.
+`flux-cli speaker` then shows the output that `fluxd` muted, or why it could not mute it.
+If an output stays muted after a crash, turn its sound on again:
+
+```sh
+pactl set-sink-mute @DEFAULT_SINK@ 0
+```
+
+A gap in the audio comes from a stall of the network.
+`fluxd` and the phone then drop the old audio, so the delay stays short.
 
 ## herdr agents do not show
 
@@ -184,6 +434,9 @@ An APK with a different certificate cannot update an installed app.
 A lower version code cannot replace a higher version code through a normal update.
 Use the original release key and a higher code for release upgrades.
 See [APK signatures](releasing.md#android-release-key).
+
+If Play Protect shows **App blocked to protect your device**, install with `adb`.
+See [Android setup and Play Protect](android-setup.md#install-flux-past-the-block).
 
 ## Fingerprint approval falls back to a password
 

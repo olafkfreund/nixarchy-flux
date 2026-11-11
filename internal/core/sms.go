@@ -1,13 +1,64 @@
 package core
 
 import (
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"flux/internal/proto"
 )
+
+// Limits on the SMS data of a phone. The state holds each conversation,
+// so a device cannot make the state large. fluxd keeps the newest
+// maxConversations conversations. Flux for Android sends at most 500.
+// maxSmsAddress is the longest address that fluxd keeps. A phone number
+// is shorter. fluxd drops a longer address and does not cut it, because a
+// cut address can name another person. maxSmsName is the longest contact
+// name and the longest name of a conversation.
+const (
+	maxConversations = 500
+	maxSmsLast       = 1 << 10
+	maxSmsAddresses  = 20
+	maxSmsAddress    = 64
+	maxSmsName       = 256
+)
+
+// maxSmsSend is the longest text message in characters that fluxd sends.
+// It is about 10 SMS parts.
+const maxSmsSend = 1600
+
+// smsSendWait is the time that the phone has to report a sent text
+// message. After it, the entry in the outbox shows as failed. The tests
+// make it shorter.
+var smsSendWait = 60 * time.Second
+
+// maxOutbox is the largest number of entries in the outbox of 1 device. A
+// new entry removes the oldest entry.
+const maxOutbox = 50
+
+// smsClockSlack is the largest time in seconds that the clock of the phone
+// can be behind the clock of the computer. A message of the phone that is
+// older than its entry by more than this is a different message.
+const smsClockSlack = 120
+
+// OutboxMessage is a text message that fluxd sent through the phone and
+// that the phone has not reported yet. Thread is the newest conversation
+// with only Address, or -1 for a new conversation. Failed is true when the
+// phone did not report the message in smsSendWait.
+type OutboxMessage struct {
+	Thread   int64  `json:"thread"`
+	Address  string `json:"address"`
+	Body     string `json:"body"`
+	Time     int64  `json:"time"` // seconds
+	Outgoing bool   `json:"outgoing"`
+	Pending  bool   `json:"pending"`
+	Failed   bool   `json:"failed"`
+
+	seq int64 // the number of the entry in the outbox of the device
+}
 
 // SmsMessage is one text message.
 type SmsMessage struct {
@@ -47,6 +98,12 @@ type Conversation struct {
 	Pending   bool     `json:"pending"`
 	Failed    bool     `json:"failed"`
 
+	// Changes counts the new and changed messages of the thread that the
+	// phone reported since the last list of conversations. A message that
+	// is older than Last also counts, so the page loads the thread again
+	// and shows that message.
+	Changes int64 `json:"changes"`
+
 	id    int64
 	ms    int64
 	subID int64
@@ -60,8 +117,7 @@ type smsWire struct {
 	Type   int    `json:"type"`
 	Read   int    `json:"read"`
 	SubID  *int64 `json:"sub_id"`
-	// ContactName is a Flux extension. KDE Connect phones send only the
-	// address.
+	// The phone leaves ContactName out when it does not know the name.
 	Addresses []struct {
 		Address     string `json:"address"`
 		ContactName string `json:"contactName"`
@@ -90,10 +146,13 @@ func (w smsWire) message() SmsMessage {
 	}
 	for _, a := range w.Addresses {
 		addr := strings.TrimSpace(a.Address)
-		if addr == "" {
+		if addr == "" || len(addr) > maxSmsAddress {
 			continue
 		}
-		name := strings.TrimSpace(a.ContactName)
+		if len(m.Addresses) == maxSmsAddresses {
+			break
+		}
+		name := cutText(strings.TrimSpace(a.ContactName), maxSmsName)
 		if name == "" {
 			name = addr
 		}
@@ -108,8 +167,8 @@ func (w smsWire) message() SmsMessage {
 
 func (m SmsMessage) conversation() *Conversation {
 	return &Conversation{
-		Thread: m.Thread, Name: strings.Join(m.names, ", "), Address: m.Address, Addresses: m.Addresses,
-		Last: m.Body, Time: m.Time, Unread: !m.Read && !m.Outgoing,
+		Thread: m.Thread, Name: cutText(strings.Join(m.names, ", "), maxSmsName), Address: m.Address, Addresses: m.Addresses,
+		Last: cutText(m.Body, maxSmsLast), Time: m.Time, Unread: !m.Read && !m.Outgoing,
 		Outgoing: m.Outgoing, Pending: m.Pending, Failed: m.Failed,
 		id: m.ID, ms: m.ms, subID: m.subID,
 	}
@@ -121,42 +180,55 @@ func (m SmsMessage) conversation() *Conversation {
 func (d *Daemon) handleSms(dev *Device, p *proto.Packet) {
 	var b struct {
 		Messages []smsWire `json:"messages"`
-		// ThreadID is a Flux extension. A Flux phone names the thread in
-		// the answer to a thread request, so that a new message does not
-		// count as the answer.
+		// ThreadID names the thread in the answer to a thread request, so
+		// that a new message does not count as the answer.
 		ThreadID *int64 `json:"threadID"`
+		// Conversations marks the first packet of the answer to a
+		// conversations request. That answer has the latest message of each
+		// thread of the phone. An older app sends no marker, and fluxd then
+		// only adds messages.
+		Conversations bool `json:"conversations"`
 	}
 	if p.Decode(&b) != nil {
 		return
 	}
 	msgs := make([]SmsMessage, 0, len(b.Messages))
-	threads := map[int64]bool{}
 	for _, w := range b.Messages {
-		m := w.message()
-		msgs = append(msgs, m)
-		threads[m.Thread] = true
+		msgs = append(msgs, w.message())
 	}
+	// The waiting callers share the slice, so it is sorted here, oldest
+	// first, and the callers only read it.
+	sort.SliceStable(msgs, func(i, j int) bool { return msgs[i].ms < msgs[j].ms })
 	d.mu.Lock()
+	// The first packet of the answer replaces the list, so that a thread
+	// that the user deleted on the phone goes. The phone can split 1 answer
+	// into more packets, and fluxd adds the packets that follow.
+	if b.Conversations && b.ThreadID == nil {
+		dev.conversations = map[int64]*Conversation{}
+	}
+	// The phone reports a new or changed message without a thread request.
+	report := b.ThreadID == nil && !b.Conversations
 	for _, m := range msgs {
 		// A newer message replaces the latest message of its thread. The
 		// same message can come again with a new type or read state.
 		c, ok := dev.conversations[m.Thread]
+		var changes int64
+		if ok {
+			changes = c.Changes
+		}
+		if report {
+			changes++
+		}
 		if !ok || m.ms > c.ms || (m.ms == c.ms && m.ID == c.id) {
-			dev.conversations[m.Thread] = m.conversation()
+			c = m.conversation()
+			dev.conversations[m.Thread] = c
 		}
+		c.Changes = changes
 	}
-	// Other phones send the answer without a thread, so a packet with 1
-	// thread counts as the answer.
-	answer, found := int64(0), false
-	switch {
-	case b.ThreadID != nil:
-		answer, found = *b.ThreadID, true
-	case !dev.fluxApp() && len(threads) == 1:
-		for t := range threads {
-			answer, found = t, true
-		}
-	}
-	if found {
+	pruneConversations(dev.conversations, maxConversations)
+	confirmOutboxLocked(dev, msgs)
+	if b.ThreadID != nil {
+		answer := *b.ThreadID
 		for _, ch := range dev.threadWait[answer] {
 			select {
 			case ch <- msgs:
@@ -187,7 +259,6 @@ func (d *Daemon) SmsThread(dev *Device, thread int64) ([]SmsMessage, error) {
 	}
 	select {
 	case msgs := <-ch:
-		sort.SliceStable(msgs, func(i, j int) bool { return msgs[i].ms < msgs[j].ms })
 		return msgs, nil
 	case <-time.After(8 * time.Second):
 		d.stopWait(dev, thread, ch)
@@ -208,7 +279,8 @@ func (d *Daemon) stopWait(dev *Device, thread int64, ch chan []SmsMessage) {
 }
 
 // SendSms sends a text message through the phone. A reply to a known
-// conversation goes out on the SIM of that conversation.
+// conversation goes out on the SIM of that conversation. The message
+// stays in the outbox of the device until the phone reports it.
 func (d *Daemon) SendSms(dev *Device, addresses []string, body string) error {
 	list := make([]map[string]string, 0, len(addresses))
 	clean := make([]string, 0, len(addresses))
@@ -221,18 +293,165 @@ func (d *Daemon) SendSms(dev *Device, addresses []string, body string) error {
 	if len(list) == 0 || strings.TrimSpace(body) == "" {
 		return apiErr("bad_params", "Give at least 1 address and a message")
 	}
+	if n := utf8.RuneCountInString(body); n > maxSmsSend {
+		return apiErr("bad_params", "The message has %d characters. Send at most %d", n, maxSmsSend)
+	}
 	d.mu.Lock()
-	flux := dev.fluxApp()
 	sub := conversationSim(dev.conversations, clean)
 	d.mu.Unlock()
-	if len(list) > 1 && flux {
+	if len(list) > 1 {
 		return apiErr("unsupported", "%s sends a text message to 1 address. Send group messages on the phone", dev.Name)
 	}
 	b := map[string]any{"version": 2, "addresses": list, "messageBody": body}
 	if sub >= 0 {
 		b["subID"] = sub
 	}
-	return d.send(dev, proto.New(proto.TypeSmsRequest, b))
+	// The entry comes before the request, so that a fast report of the
+	// phone finds it.
+	seq := d.addOutbox(dev, clean[0], body)
+	if err := d.send(dev, proto.New(proto.TypeSmsRequest, b)); err != nil {
+		d.dropOutbox(dev, seq)
+		return err
+	}
+	time.AfterFunc(smsSendWait, func() { d.failOutbox(dev, seq) })
+	return nil
+}
+
+// addOutbox adds a pending entry to the outbox of the device for a text
+// message to address. It returns the number of the entry.
+func (d *Daemon) addOutbox(dev *Device, address, body string) int64 {
+	d.mu.Lock()
+	dev.outboxSeq++
+	e := OutboxMessage{
+		Thread: conversationThread(dev.conversations, address), Address: address, Body: body,
+		Time: time.Now().Unix(), Outgoing: true, Pending: true, seq: dev.outboxSeq,
+	}
+	dev.outbox = append(dev.outbox, e)
+	if n := len(dev.outbox) - maxOutbox; n > 0 {
+		dev.outbox = slices.Delete(dev.outbox, 0, n)
+	}
+	d.mu.Unlock()
+	d.markDirty()
+	return e.seq
+}
+
+// dropOutbox removes the entry seq from the outbox of the device.
+func (d *Daemon) dropOutbox(dev *Device, seq int64) {
+	d.mu.Lock()
+	n := len(dev.outbox)
+	dev.outbox = slices.DeleteFunc(dev.outbox, func(e OutboxMessage) bool { return e.seq == seq })
+	changed := len(dev.outbox) != n
+	d.mu.Unlock()
+	if changed {
+		d.markDirty()
+	}
+}
+
+// failOutbox marks the entry seq as failed when the phone has not
+// reported it.
+func (d *Daemon) failOutbox(dev *Device, seq int64) {
+	d.mu.Lock()
+	i := slices.IndexFunc(dev.outbox, func(e OutboxMessage) bool { return e.seq == seq })
+	changed := i >= 0 && dev.outbox[i].Pending
+	if changed {
+		dev.outbox[i].Pending, dev.outbox[i].Failed = false, true
+	}
+	d.mu.Unlock()
+	if changed {
+		d.markDirty()
+	}
+}
+
+// confirmOutboxLocked removes the entries of the outbox that the phone
+// reports in msgs. A failed entry also goes, because the message of the
+// phone then shows its real state. The caller holds d.mu.
+func confirmOutboxLocked(dev *Device, msgs []SmsMessage) {
+	if len(dev.outbox) == 0 {
+		return
+	}
+	dev.outbox = slices.DeleteFunc(dev.outbox, func(e OutboxMessage) bool {
+		return slices.ContainsFunc(msgs, e.reportedBy)
+	})
+}
+
+// reportedBy reports whether m from the phone is the message of the entry.
+// The thread or the address of m must match. The phone can put a message
+// in another thread than the conversation that the user replied to, for
+// example when it has 2 threads with the same number.
+func (e OutboxMessage) reportedBy(m SmsMessage) bool {
+	if !m.Outgoing || m.Time < e.Time-smsClockSlack || !sameSmsText(m.Body, e.Body) {
+		return false
+	}
+	if e.Thread >= 0 && m.Thread == e.Thread {
+		return true
+	}
+	return len(m.Addresses) == 1 && samePhone(m.Addresses[0], e.Address)
+}
+
+// sameSmsText reports whether phone, the text of a message of the phone,
+// is the text that fluxd sent. Android keeps a long message as the
+// text of its parts. On some phones, these parts have other line ends,
+// and plain characters in place of special characters. So the texts also
+// match when they have the same characters after the line ends, except
+// where sent has a character that is not ASCII.
+func sameSmsText(phone, sent string) bool {
+	if phone == sent {
+		return true
+	}
+	a, b := []rune(smsLines(phone)), []rune(smsLines(sent))
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] && b[i] < utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// smsLines returns s with Unix line ends and without the space at the
+// start and the end.
+func smsLines(s string) string {
+	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n"))
+}
+
+// conversationThread returns the thread of the newest conversation with
+// only this address, or -1.
+func conversationThread(convos map[int64]*Conversation, address string) int64 {
+	thread, newest := int64(-1), int64(-1)
+	for _, c := range convos {
+		if c.ms <= newest || !slices.Equal(c.Addresses, []string{address}) {
+			continue
+		}
+		thread, newest = c.Thread, c.ms
+	}
+	return thread
+}
+
+// phoneChars matches an address that has only the characters of a phone
+// number.
+var phoneChars = regexp.MustCompile(`^[0-9+\-(). ]+$`)
+
+// samePhone reports whether 2 addresses name the same person. Phone
+// numbers match on their last 8 digits, so that +47 912 34 567 matches
+// 91234567. Other addresses match without case.
+func samePhone(a, b string) bool {
+	da, db := digitsOf(a), digitsOf(b)
+	if len(da) < 3 || len(db) < 3 || !phoneChars.MatchString(a) || !phoneChars.MatchString(b) {
+		return strings.EqualFold(a, b)
+	}
+	return da[max(0, len(da)-8):] == db[max(0, len(db)-8):]
+}
+
+// digitsOf returns the ASCII digits of s.
+func digitsOf(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, s)
 }
 
 // conversationSim returns the SIM of the newest conversation with exactly
@@ -247,6 +466,17 @@ func conversationSim(convos map[int64]*Conversation, addresses []string) int64 {
 		sub, newest = c.subID, c.ms
 	}
 	return sub
+}
+
+// pruneConversations removes the oldest conversations until at most max
+// stay.
+func pruneConversations(m map[int64]*Conversation, max int) {
+	if len(m) <= max {
+		return
+	}
+	for _, c := range sortedConversations(m)[max:] {
+		delete(m, c.Thread)
+	}
 }
 
 func sortedConversations(m map[int64]*Conversation) []*Conversation {

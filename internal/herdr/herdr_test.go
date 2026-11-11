@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -136,6 +138,66 @@ func TestControlRequests(t *testing.T) {
 	}
 }
 
+func TestLayoutRequests(t *testing.T) {
+	path, reqs := fakeServer(t, func(req request) []string {
+		switch req.Method {
+		case "workspace.create":
+			return []string{`{"id":"flux","result":{"type":"workspace_created","workspace":{"workspace_id":"w2","label":"flux"},` +
+				`"tab":{"tab_id":"w2:t1","workspace_id":"w2"},"root_pane":{"pane_id":"w2:p1","tab_id":"w2:t1","cwd":"/src/flux"}}}`}
+		case "server.agent_manifests":
+			return []string{`{"id":"flux","result":{"type":"agent_manifest_status","manifests":[{"agent":"claude"},{"agent":""},{"agent":"codex"}]}}`}
+		case "agent.get":
+			return []string{`{"id":"flux","result":{"type":"agent_info","agent":{"pane_id":"w2:p1","agent":null,"name":"claude-flux"}}}`}
+		}
+		return []string{`{"id":"flux","result":{"type":"ok"}}`}
+	})
+	ctx := context.Background()
+	c, err := CreateWorkspace(ctx, path, "/src/flux")
+	if err != nil || c.Workspace.ID != "w2" || c.Tab.ID != "w2:t1" || c.RootPane.ID != "w2:p1" || c.RootPane.Cwd != "/src/flux" {
+		t.Fatalf("created %+v %v", c, err)
+	}
+	if _, err := CreateTab(ctx, path, "w2", "/src/web"); err != nil {
+		t.Fatal(err)
+	}
+	if err := StartAgent(ctx, path, "claude-flux", "claude", "w2:p1"); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := GetAgent(ctx, path, "w2:p1"); err != nil || a.Agent != "" || a.Name != "claude-flux" {
+		t.Fatalf("agent %+v %v", a, err)
+	}
+	if kinds, err := AgentKinds(ctx, path); err != nil || strings.Join(kinds, ",") != "claude,codex" {
+		t.Fatalf("kinds %v %v", kinds, err)
+	}
+	if _, err := ReadPane(ctx, path, "w2:p1", 1000, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClosePane(ctx, path, "w2:p1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`workspace.create {"cwd":"/src/flux","focus":false}`,
+		`tab.create {"cwd":"/src/web","focus":false,"workspace_id":"w2"}`,
+		`agent.start {"kind":"claude","name":"claude-flux","pane_id":"w2:p1"}`,
+		`agent.get {"target":"w2:p1"}`,
+		`server.agent_manifests {}`,
+		`pane.read {"format":"ansi","lines":1000,"pane_id":"w2:p1","source":"recent_unwrapped","strip_ansi":false}`,
+		`pane.close {"pane_id":"w2:p1"}`,
+	}
+	for _, w := range want {
+		req := <-reqs
+		params, _ := json.Marshal(req.Params)
+		if got := req.Method + " " + string(params); got != w {
+			t.Errorf("request %s, want %s", got, w)
+		}
+	}
+}
+
+func TestCode(t *testing.T) {
+	if Code(fmt.Errorf("read: %w", &Error{Code: "agent_not_idle"})) != "agent_not_idle" || Code(errors.New("x")) != "" || Code(nil) != "" {
+		t.Fatal("Code")
+	}
+}
+
 func TestCallReturnsHerdrError(t *testing.T) {
 	path, _ := fakeServer(t, func(req request) []string {
 		return []string{`{"id":"flux","error":{"code":"agent_not_found","message":"agent target w9:p1 not found"}}`}
@@ -216,10 +278,15 @@ func TestSubscribe(t *testing.T) {
 
 func TestReadLineLimit(t *testing.T) {
 	long := strings.Repeat("x", maxLine+1) + "\n"
-	if _, err := readLine(bufio.NewReader(strings.NewReader(long))); !errors.Is(err, errLineTooLong) {
+	r := bufio.NewReader(strings.NewReader(long))
+	if _, err := readLine(r, maxLine); !errors.Is(err, errLineTooLong) {
 		t.Fatalf("error %v, want errLineTooLong", err)
 	}
-	line, err := readLine(bufio.NewReader(strings.NewReader("abc\nrest")))
+	small := bufio.NewReader(strings.NewReader("abcd\n"))
+	if _, err := readLine(small, 4); !errors.Is(err, errLineTooLong) {
+		t.Fatalf("error %v, want errLineTooLong for a small limit", err)
+	}
+	line, err := readLine(bufio.NewReader(strings.NewReader("abc\nrest")), maxLine)
 	if err != nil || string(line) != "abc\n" {
 		t.Fatalf("line %q, error %v", line, err)
 	}
@@ -234,5 +301,31 @@ func TestSocketPath(t *testing.T) {
 	t.Setenv("HERDR_SOCKET_PATH", "/run/herdr-test.sock")
 	if got := SocketPath(); got != "/run/herdr-test.sock" {
 		t.Fatalf("path %q", got)
+	}
+}
+
+func TestCheckOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "owner.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := checkOwner(conn, os.Getuid()); err != nil {
+		t.Errorf("a socket of this user: %v", err)
+	}
+	if err := checkOwner(conn, os.Getuid()+1); err == nil || !strings.Contains(err.Error(), "belongs to user") {
+		t.Errorf("a socket of another user: %v", err)
+	}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	if err := checkOwner(a, os.Getuid()); err == nil {
+		t.Error("a pipe is not a Unix socket")
 	}
 }

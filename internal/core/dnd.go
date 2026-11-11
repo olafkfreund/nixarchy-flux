@@ -9,13 +9,11 @@ import (
 )
 
 // dndPoll is how often fluxd reads the Do Not Disturb state of the desktop.
-// The Omarchy shell has no change event, and a read of its state file is
-// cheap.
+// The Omarchy shell has no change event.
 const dndPoll = 2 * time.Second
 
 // dndSettle is how long fluxd waits for the desktop to report a state that
-// a phone set. The Omarchy shell writes its state file 200 ms after a
-// change.
+// a phone set.
 const dndSettle = 3 * time.Second
 
 // dndBackend is the Do Not Disturb of the desktop. desktop.DND implements it.
@@ -74,11 +72,24 @@ func (g *dndGuard) remote(on bool, now time.Time) bool {
 }
 
 // dndLoop reads the desktop state and sends each local change to the
-// phones.
+// phones. It reads only while Do Not Disturb sync is on and a phone that
+// accepts flux.dnd is connected. Otherwise it waits for wakeDnd.
 func (d *Daemon) dndLoop(ctx context.Context) {
 	t := time.NewTicker(dndPoll)
 	defer t.Stop()
 	for {
+		if !d.dndWanted() {
+			// The first read after the pause only sets the start value.
+			d.mu.Lock()
+			d.dndGuard = dndGuard{}
+			d.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return
+			case <-d.dndWake:
+			}
+			continue
+		}
 		on, ok := d.dnd.Get()
 		if ok {
 			d.mu.Lock()
@@ -97,6 +108,31 @@ func (d *Daemon) dndLoop(ctx context.Context) {
 	}
 }
 
+// dndWanted reports whether Do Not Disturb sync is on and a connected
+// phone accepts flux.dnd.
+func (d *Daemon) dndWanted() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.cfg.SyncDnd {
+		return false
+	}
+	for _, dev := range d.devices {
+		if dev.Paired && dev.link != nil && dev.accepts(proto.TypeFluxDnd) {
+			return true
+		}
+	}
+	return false
+}
+
+// wakeDnd makes the Do Not Disturb loop check again whether it must read
+// the desktop state.
+func (d *Daemon) wakeDnd() {
+	select {
+	case d.dndWake <- struct{}{}:
+	default:
+	}
+}
+
 // handleDnd applies the Do Not Disturb state of a phone to this computer,
 // and gives it to the other phones.
 func (d *Daemon) handleDnd(dev *Device, p *proto.Packet) {
@@ -109,17 +145,39 @@ func (d *Daemon) handleDnd(dev *Device, p *proto.Packet) {
 	on := *body.On
 	d.mu.Lock()
 	apply := d.dnd != nil && d.cfg.SyncDnd && d.dndGuard.remote(on, time.Now())
+	l := dev.link
 	d.mu.Unlock()
 	if !apply {
 		return
 	}
 	d.logf("%s turned Do Not Disturb %s", dev.Name, onOff(on))
 	d.sendDnd(on, dev.ID)
-	go func() {
-		if err := d.dnd.Set(on); err != nil {
-			d.logf("set Do Not Disturb: %v", err)
-		}
-	}()
+	// 1 worker applies the states in order, and only the newest waiting
+	// state runs. Fast changes on the phone then end with the last state,
+	// and start 1 process at a time.
+	d.runContent(&d.content.dndQ, 0, func() { d.applyDnd(dev, l, on) })
+}
+
+// applyDnd sets the Do Not Disturb state of this computer to a state that
+// the phone dev sent on the link l. The state waits on the worker, so it
+// applies only while dev is paired and l is its link.
+func (d *Daemon) applyDnd(dev *Device, l *lan.Link, on bool) {
+	d.mu.Lock()
+	ok := d.dnd != nil && d.cfg.SyncDnd && dev.Paired && dev.link == l
+	d.mu.Unlock()
+	if !ok {
+		return
+	}
+	if err := d.dnd.Set(on); err != nil {
+		d.logf("set Do Not Disturb: %v", err)
+	}
+	d.mu.Lock()
+	// The desktop can report the state only after the apply, so the wait
+	// for the state starts again.
+	if g := &d.dndGuard; g.pending && g.known == on {
+		g.until = time.Now().Add(dndSettle)
+	}
+	d.mu.Unlock()
 }
 
 // sendDnd sends the state to each paired phone that is connected and

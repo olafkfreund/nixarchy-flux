@@ -1,6 +1,9 @@
+import Crypto
 import Foundation
+#if os(macOS)
 import IOKit.ps
 import SystemConfiguration
+#endif
 
 /// A snapshot of the core for the UI.
 public struct CoreState: Sendable, Equatable {
@@ -10,6 +13,12 @@ public struct CoreState: Sendable, Equatable {
     public var listeningUdp = true
     public var tcpPort = 0
     public var enabled = true
+    /// True while a search for computers runs.
+    public var searching = false
+
+    /// True when the user did not allow Flux to use the local network.
+    /// Discovery and links then fail.
+    public var localNetworkDenied = false
 
     public init() {}
 }
@@ -21,11 +30,12 @@ public struct FluxPaths: Sendable {
     let suite: String
 
     /// ~/Library/Application Support/Flux, or FLUX_DATA_DIR. FLUX_DATA_DIR
-    /// also moves the settings to a separate defaults domain.
+    /// also moves the settings to a separate defaults domain, the same for
+    /// each launch with the same directory.
     public static func standard(_ env: [String: String] = ProcessInfo.processInfo.environment) -> FluxPaths {
         if let dir = env["FLUX_DATA_DIR"], !dir.isEmpty {
             let url = URL(fileURLWithPath: dir, isDirectory: true)
-            return FluxPaths(data: url, suite: "org.omarchy.flux.test." + String(url.path.hashValue, radix: 36))
+            return FluxPaths(data: url, suite: testSuite(url.path))
         }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return FluxPaths(data: base.appendingPathComponent("Flux", isDirectory: true), suite: "org.omarchy.flux")
@@ -34,6 +44,13 @@ public struct FluxPaths: Sendable {
     public init(data: URL, suite: String) {
         self.data = data
         self.suite = suite
+    }
+
+    /// The defaults domain for a data directory. String.hashValue changes
+    /// with each launch, so the name comes from a SHA-256 of the path.
+    static func testSuite(_ path: String) -> String {
+        let digest = SHA256.hash(data: Data(path.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "org.omarchy.flux.test." + digest
     }
 }
 
@@ -54,8 +71,27 @@ public final class FluxCore: @unchecked Sendable {
     private var order: [String] = []
     private var backend: LanBackend?
     private var bonjour: Bonjour?
-    private var rebroadcast: DispatchSourceTimer?
+    /// Counts the searches, so that the end of an old search does not end a new one.
+    private var searchCount = 0
+    private var searching = false
     private var routes: [String: [FluxPlugin]] = [:]
+    /// The last state that went to onChange.
+    private var published: CoreState?
+
+    /// True after Bonjour reported that the local network is not allowed.
+    private var localNetworkDenied = false
+
+    /// The hosts whose last incoming pairing request ended without a pairing.
+    private var pairCooldown = PairCooldown()
+    /// How long an incoming pairing request stays open. A test sets a shorter time.
+    var incomingPairSeconds = incomingPairTimeout
+
+    /// The most devices that are not paired and have a link. A new link
+    /// closes the oldest one, so that strangers cannot fill the list.
+    static let maxUnpairedLinks = 8
+    /// How long the link of a device that is not paired stays open without
+    /// a pairing, in seconds. fluxd closes such a link after the same time.
+    static let unpairedIdleSeconds: Double = 120
 
     /// Called on the main queue after each state change.
     public var onChange: (@Sendable (CoreState) -> Void)?
@@ -76,25 +112,39 @@ public final class FluxCore: @unchecked Sendable {
         for t in trust.all() {
             let identity = Identity(deviceId: t.id, deviceName: t.name, deviceType: t.type, protocolVersion: protocolVersion,
                                     incoming: t.isFlux ? [PacketType.fluxTunnel] : [], outgoing: [])
+            // Older versions paired with any device, for example phones and
+            // other Macs. Drop those pairings.
+            guard identity.isFlux else {
+                FluxLog.core.info("removed the pairing with \(t.name, privacy: .public), which is not an Omarchy computer")
+                trust.remove(t.id)
+                continue
+            }
+            // TrustStore drops an entry whose certificate does not read. A
+            // device without a pinned certificate is not paired.
+            guard let pinned = t.certificateDER else { continue }
             let d = Device(core: self, identity: identity)
             d.pairState = .paired
             d.lastIp = t.lastIp
-            d.certificate = t.certificateDER
+            d.certificate = pinned
             devices[t.id] = d
             order.append(t.id)
         }
         for p in plugins {
-            for type in p.incoming { routes[type, default: []].append(p) }
+            for type in p.handledTypes { routes[type, default: []].append(p) }
         }
         for p in plugins { p.attach(core: self) }
     }
 
     // MARK: Identity
 
+    #if os(macOS)
     /// The computer name from System Settings > General > Sharing.
     public var deviceName: String {
         cleanName((SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? Host.current().localizedName ?? "Mac")
     }
+
+    /// The name of this app in the identity.
+    public static let appName = "macos"
 
     /// "laptop" when the Mac has an internal battery, else "desktop".
     public static let deviceType: String = {
@@ -106,6 +156,45 @@ public final class FluxCore: @unchecked Sendable {
         }
         return "desktop"
     }()
+    #else
+    /// The name that the user gives the iPhone in Flux, else "iPhone". iOS
+    /// gives apps only the generic device name.
+    public var deviceName: String {
+        cleanName(defaults.string(forKey: Self.deviceNameKey) ?? "", fallback: "iPhone")
+    }
+
+    /// The iPhone is a phone.
+    public static let deviceType = "phone"
+
+    /// The name of this app in the identity.
+    public static let appName = "ios"
+
+    /// Stores the device name. An empty name goes back to "iPhone". The new
+    /// name goes out through Bonjour and to known computers. A computer reads
+    /// the name only when a link starts, so the open links close, and the
+    /// computers connect again with the new name.
+    @MainActor
+    public func setDeviceName(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let old = deviceName
+        if trimmed.isEmpty {
+            defaults.removeObject(forKey: Self.deviceNameKey)
+        } else {
+            defaults.set(trimmed, forKey: Self.deviceNameKey)
+        }
+        guard deviceName != old else { return }
+        let (b, bj, links) = lock.withLock { (backend, bonjour, devices.values.compactMap(\.link)) }
+        links.forEach { $0.close() }
+        if let b {
+            bj?.publish(name: deviceName, type: Self.deviceType, port: b.tcpPort)
+            b.broadcast()
+        }
+        publish()
+    }
+    #endif
+
+    /// The defaults key of the device name that the user sets on iOS.
+    public static let deviceNameKey = "deviceName"
 
     public var incomingCapabilities: [String] { unique(plugins.flatMap(\.incoming)) }
     public var outgoingCapabilities: [String] { unique(plugins.flatMap(\.outgoing)) }
@@ -117,7 +206,22 @@ public final class FluxCore: @unchecked Sendable {
 
     public func identity(tcpPort: Int) -> Identity {
         Identity(deviceId: local.deviceId, deviceName: deviceName, deviceType: Self.deviceType, protocolVersion: protocolVersion,
-                 incoming: incomingCapabilities, outgoing: outgoingCapabilities, tcpPort: tcpPort)
+                 incoming: incomingCapabilities, outgoing: outgoingCapabilities, tcpPort: tcpPort,
+                 app: Self.appName, appVersion: Self.appVersion)
+    }
+
+    /// The version of this app, from CFBundleShortVersionString. The build
+    /// sets it from the last release tag.
+    public static let appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+
+    /// Sends the identity again to each connected, paired computer, after
+    /// the capabilities changed. fluxd takes the new capabilities from it.
+    public func sendIdentity() {
+        let port = lock.withLock { backend?.tcpPort ?? 0 }
+        let p = identity(tcpPort: port).packet()
+        lock.withLock {
+            for d in devices.values where d.paired { d.send(p) }
+        }
     }
 
     // MARK: Settings
@@ -137,60 +241,121 @@ public final class FluxCore: @unchecked Sendable {
     /// Starts discovery and the link listener unless the user turned Flux off.
     public func start() {
         guard enabled else { return }
-        let b: LanBackend = lock.withLock {
-            if let b = backend { return b }
+        let started: LanBackend? = lock.withLock {
+            if backend != nil { return nil }
             let identityFn: @Sendable (Int) -> Identity = { [unowned self] port in self.identity(tcpPort: port) }
             let b = LanBackend(tls: tls, config: lanConfig, identity: identityFn, delegate: BackendDelegate(core: self))
             backend = b
             return b
         }
+        guard let b = started else { return }
         Task.detached { [self] in
             await b.start()
-            if !lanConfig.loopbackOnly {
-                let bonjour = Bonjour(selfId: local.deviceId) { [weak self] ip in self?.announceTo(ip) }
-                bonjour.publish(name: deviceName, type: Self.deviceType, port: b.tcpPort)
-                bonjour.browse()
-                lock.withLock { self.bonjour = bonjour }
+            // A stop during the start wins: the backend and its Bonjour end.
+            guard lock.withLock({ backend === b }) else {
+                b.stop()
+                return
             }
-            startRebroadcast()
-            publish()
+            if !lanConfig.loopbackOnly {
+                let bonjour = Bonjour(selfId: local.deviceId, found: { [weak self] ip in self?.announceTo(ip) },
+                                      denied: { [weak self] denied in self?.setLocalNetworkDenied(denied) })
+                bonjour.publish(name: deviceName, type: Self.deviceType, port: b.tcpPort)
+                let (current, old) = lock.withLock { () -> (Bool, Bonjour?) in
+                    guard backend === b else { return (false, nil) }
+                    defer { self.bonjour = bonjour }
+                    return (true, self.bonjour)
+                }
+                old?.stop()
+                guard current else {
+                    bonjour.stop()
+                    return
+                }
+            }
+            search()
         }
+    }
+
+    private func setLocalNetworkDenied(_ denied: Bool) {
+        let changed = lock.withLock { () -> Bool in
+            guard localNetworkDenied != denied else { return false }
+            localNetworkDenied = denied
+            return true
+        }
+        guard changed else { return }
+        if denied { FluxLog.net.error("the local network is not allowed for Flux") }
+        publish()
+    }
+
+    /// True while the network runs.
+    public var isRunning: Bool { lock.withLock { backend != nil } }
+
+    /// Brings the network back when the app returns to the screen. A stopped
+    /// network starts. A running one announces this device again and
+    /// searches, so that the computers connect at once. iOS stops the network
+    /// after the app leaves the screen.
+    public func resume() {
+        guard enabled else { return }
+        let (b, bj) = lock.withLock { (backend, bonjour) }
+        guard let b else {
+            start()
+            return
+        }
+        bj?.publish(name: deviceName, type: Self.deviceType, port: b.tcpPort)
+        search()
     }
 
     /// Closes every link and stops discovery.
     public func stop() {
-        let (b, bj, timer, links) = lock.withLock { () -> (LanBackend?, Bonjour?, DispatchSourceTimer?, [Link]) in
-            defer { backend = nil; bonjour = nil; rebroadcast = nil }
-            return (backend, bonjour, rebroadcast, devices.values.compactMap(\.link))
+        let (b, bj, links) = lock.withLock { () -> (LanBackend?, Bonjour?, [Link]) in
+            defer { backend = nil; bonjour = nil; searching = false; searchCount += 1 }
+            return (backend, bonjour, devices.values.compactMap(\.link))
         }
-        timer?.cancel()
         bj?.stop()
         b?.stop()
         links.forEach { $0.close() }
         publish()
     }
 
-    /// Paired devices that are offline get the identity again every 30
-    /// seconds, so that they reconnect after a network change.
-    private func startRebroadcast() {
-        let timer = DispatchSource.makeTimerSource(queue: .global())
-        timer.schedule(deadline: .now() + 30, repeating: 30)
-        timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            let anyOffline = self.lock.withLock { self.devices.values.contains { $0.paired && !$0.online } }
-            if anyOffline { self.rediscover() }
-        }
-        timer.resume()
-        lock.withLock {
-            rebroadcast?.cancel()
-            rebroadcast = timer
-        }
-    }
+    /// How long a search for computers runs.
+    static let searchSeconds: Double = 10
 
-    /// Sends the identity again, for example after the network changes.
-    public func rediscover() {
-        lock.withLock { backend }?.broadcast()
+    /// Looks for computers for 10 seconds: Bonjour browses, and the identity
+    /// goes out at once and again after 3 and 6 seconds. Flux does not search
+    /// all the time. After a search ends, a paired computer still gets a dial
+    /// from this device when its UDP identity arrives. A computer that is
+    /// not paired finds this device through its Bonjour service and connects.
+    ///
+    /// A search clears the Local Network warning. The browse sets it again
+    /// when the access is still off, for example after a visit to Settings.
+    public func search() {
+        let (b, bj, count) = lock.withLock { () -> (LanBackend?, Bonjour?, Int) in
+            searchCount += 1
+            searching = backend != nil
+            if backend != nil { localNetworkDenied = false }
+            return (backend, bonjour, searchCount)
+        }
+        guard let b else { return }
+        bj?.browse()
+        b.broadcast()
         publish()
+        for delay in [3.0, 6.0] {
+            DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.lock.withLock({ self.searchCount == count }) else { return }
+                b.broadcast()
+            }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.searchSeconds) { [weak self] in
+            guard let self else { return }
+            // A newer search keeps the state. Without Bonjour the search ends too.
+            let (ended, bonjour) = self.lock.withLock { () -> (Bool, Bonjour?) in
+                guard self.searchCount == count else { return (false, nil) }
+                self.searching = false
+                return (true, self.bonjour)
+            }
+            guard ended else { return }
+            bonjour?.stopBrowsing()
+            self.publish()
+        }
     }
 
     /// Sends the identity to one host, for example one that mDNS found.
@@ -199,24 +364,47 @@ public final class FluxCore: @unchecked Sendable {
     }
 
     fileprivate func attach(_ link: Link) {
+        guard link.identity.isFlux else {
+            FluxLog.core.info("closed the link from \(link.identity.deviceName, privacy: .public), which is not an Omarchy computer")
+            link.close()
+            return
+        }
         locked {
-            let id = link.identity.deviceId
-            let existing = devices[id]
-            let old = existing?.link
-            if let old, old.isOpen, old !== link, old.peerCertificate != link.peerCertificate {
-                // Only the same certificate may replace a live link.
+            // Flux is off, or a newer start replaced the backend.
+            guard backend != nil else {
                 link.close()
                 return
             }
+            // A link came through, so the local network works.
+            localNetworkDenied = false
+            let id = link.identity.deviceId
+            if let refusal = refusal(of: link) {
+                FluxLog.core.error("closed the link from \(link.identity.deviceName, privacy: .public): \(refusal, privacy: .public)")
+                link.close()
+                return
+            }
+            let existing = devices[id]
+            let old = existing?.link
             let d: Device
             if let existing {
                 d = existing
             } else {
+                evictUnpairedLink()
                 d = Device(core: self, identity: link.identity)
                 devices[id] = d
                 order.append(id)
             }
             d.identity = link.identity
+            // A pairing is bound to the link on which it started. fluxd ends
+            // its side when a new link replaces that link, so this side ends
+            // too, before the new link can accept it.
+            if let old, old !== link, d.pairState == .requested || d.pairState == .incoming {
+                FluxLog.core.info("ended the pairing with \(d.name, privacy: .public): a new link replaced its link")
+                // The reset of an incoming pairing makes its host wait.
+                let incoming = d.pairState == .incoming
+                d.resetPair()
+                toast(Device.pairStoppedText(computer: d.name, incoming: incoming))
+            }
             // Set the new link first, so that closing the old link does not
             // mark the device offline.
             d.link = link
@@ -232,17 +420,103 @@ public final class FluxCore: @unchecked Sendable {
                 }
             }
             link.start(
-                onPacket: { [weak self, weak d] p in
-                    guard let self, let d else { return }
-                    self.locked { self.dispatch(d, p) }
+                onPacket: { [weak self, weak d, weak link] p in
+                    guard let self, let d, let link else { return }
+                    // Only a pair packet changes the state. Plugin packets
+                    // skip the publish. A packet counts only when it comes
+                    // on the current link of the device.
+                    if p.type == PacketType.pair {
+                        self.locked { if d.link === link { self.dispatch(d, p) } }
+                    } else {
+                        self.lock.withLock { if d.link === link { self.dispatch(d, p) } }
+                    }
                 },
                 onClose: { [weak self, weak d] in
                     guard let self, let d else { return }
                     self.detach(d, link)
                 }
             )
-            if d.paired { onConnected(d) }
+            if d.paired {
+                onConnected(d)
+            } else {
+                closeWhenIdle(link, id: id)
+            }
         }
+    }
+
+    /// Closes the link of a device that is not paired when no pairing runs
+    /// on it after `unpairedIdleSeconds`. A pairing that runs moves the
+    /// check to later, and a pairing that ends it.
+    private func closeWhenIdle(_ link: Link, id: String) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.unpairedIdleSeconds) { [weak self, weak link] in
+            guard let self, let link else { return }
+            let state = self.lock.withLock { () -> PairState? in
+                guard let d = self.devices[id], d.link === link else { return nil }
+                return d.pairState
+            }
+            // The link closed, or it is no longer the link of the device.
+            guard let state else { return }
+            switch state {
+            case .paired:
+                return
+            case .requested, .incoming:
+                self.closeWhenIdle(link, id: id)
+            case .none:
+                FluxLog.core.info("closed the link from \(link.identity.deviceName, privacy: .public): no pairing in \(Int(Self.unpairedIdleSeconds)) seconds")
+                link.close()
+            }
+        }
+    }
+
+    /// The reason to refuse a new link, or nil. The lock is held. A paired
+    /// device must show its pinned certificate, and a device with an open
+    /// pairing or a live link must show the certificate that it has. The
+    /// backend checks the pin too, but the device can pair between that
+    /// check and this call.
+    private func refusal(of link: Link) -> String? {
+        let id = link.identity.deviceId
+        let d = devices[id]
+        var live: [UInt8]?
+        if let old = d?.link, old.isOpen, old !== link { live = old.peerCertificate }
+        // An entry whose certificate does not read matches no certificate.
+        return Self.linkRefusal(new: link.peerCertificate, pinned: trust.get(id).map { $0.certificateDER ?? [] },
+                                pairState: d?.pairState ?? PairState.none, pairCertificate: d?.pairCertificate, live: live)
+    }
+
+    /// The reason to refuse a new link that shows the certificate `new`, or
+    /// nil. `pinned` is the certificate of the trust entry, `pairState` and
+    /// `pairCertificate` are the pairing of the device, and `live` is the
+    /// certificate of its other open link. nil means that there is none.
+    static func linkRefusal(new: [UInt8], pinned: [UInt8]?, pairState: PairState, pairCertificate: [UInt8]?, live: [UInt8]?) -> String? {
+        if let pinned, pinned != new {
+            return "the certificate differs from the paired one"
+        }
+        if let live, live != new {
+            return "a live link has another certificate"
+        }
+        // A pairing is bound to the certificate behind its key.
+        if pairState == .requested || pairState == .incoming, pairCertificate != new {
+            return "a pairing with another certificate is open"
+        }
+        return nil
+    }
+
+    /// Drops the oldest device that is not paired and has a link, when the
+    /// list holds too many of them. A device without an open pairing goes
+    /// first. The device leaves the list at once, because its link can take
+    /// seconds to close. The lock is held.
+    private func evictUnpairedLink() {
+        let unpaired = order.compactMap { devices[$0] }.filter { !$0.paired && $0.link != nil }
+        guard unpaired.count >= Self.maxUnpairedLinks,
+              let d = unpaired.first(where: { $0.pairState == .none }) ?? unpaired.first else { return }
+        FluxLog.core.info("closed the link from \(d.name, privacy: .public): too many devices that are not paired")
+        d.cancelPair()
+        let link = d.link
+        // Without its link, the device ignores the packets and the close of the old link.
+        d.link = nil
+        devices.removeValue(forKey: d.id)
+        order.removeAll { $0 == d.id }
+        link?.close()
     }
 
     private func detach(_ d: Device, _ link: Link) {
@@ -252,7 +526,7 @@ public final class FluxCore: @unchecked Sendable {
             if d.pairState == .requested || d.pairState == .incoming { d.pairState = .none }
             if d.paired {
                 for p in plugins { p.onDisconnected(d) }
-            } else {
+            } else if devices[d.id] === d {
                 devices.removeValue(forKey: d.id)
                 order.removeAll { $0 == d.id }
             }
@@ -278,25 +552,72 @@ public final class FluxCore: @unchecked Sendable {
             s.listeningUdp = backend?.listeningUdp ?? true
             s.tcpPort = backend?.tcpPort ?? 0
             s.enabled = enabled
+            s.searching = searching
+            s.localNetworkDenied = localNetworkDenied
             return s
         }
     }
 
+    /// Sends the state to onChange when it differs from the last state that
+    /// went out. The lock keeps the snapshots in order on the main queue.
     public func publish() {
         guard let onChange else { return }
-        let snapshot = state
-        DispatchQueue.main.async { onChange(snapshot) }
+        lock.withLock {
+            let snapshot = state
+            guard snapshot != published else { return }
+            published = snapshot
+            DispatchQueue.main.async { onChange(snapshot) }
+        }
     }
 
     public func toast(_ message: String) {
-        FluxLog.core.info("\(message, privacy: .public)")
+        // Toasts can name files and hold text from the computer.
+        FluxLog.core.info("\(message, privacy: .private)")
         guard let onToast else { return }
         DispatchQueue.main.async { onToast(message) }
     }
 
     public func device(_ id: String) -> Device? { lock.withLock { devices[id] } }
 
+    /// Reads fields of a device under the core lock, without a publish. The
+    /// core lock guards every field of a device, so a feature reads them
+    /// here, for example `core.withDevice(id) { $0.name }`.
+    public func withDevice<T>(_ id: String, _ body: (Device) -> T) -> T? {
+        lock.withLock { devices[id].map(body) }
+    }
+
+    /// True while a search for computers runs.
+    var isSearching: Bool { lock.withLock { searching } }
+
+    /// True when a device other than `id` has an open incoming request.
+    /// The lock is held.
+    func hasIncomingPair(except id: String) -> Bool {
+        devices.values.contains { $0.id != id && $0.pairState == .incoming }
+    }
+
+    /// Makes the host of the device wait after its incoming request ended
+    /// without a pairing, see `PairCooldown`. The lock is held.
+    func incomingPairEnded(_ d: Device) {
+        pairCooldown.add(id: d.id, ip: d.link?.address ?? d.lastIp, at: ProcessInfo.processInfo.systemUptime)
+    }
+
+    /// True while the host of the device waits after its last incoming
+    /// request. The lock is held.
+    func pairCooldownBlocks(_ d: Device) -> Bool {
+        pairCooldown.blocks(id: d.id, ip: d.link?.address ?? d.lastIp, at: ProcessInfo.processInfo.systemUptime)
+    }
+
     public func connectedPaired() -> [Device] { lock.withLock { order.compactMap { devices[$0] }.filter { $0.paired && $0.online } } }
+
+    /// The IDs of the connected, paired devices, and with `accepting` only
+    /// those that accept the packet type. It reads the devices under the lock.
+    public func connectedPairedIds(accepting type: String? = nil) -> [String] {
+        lock.withLock {
+            order.compactMap { devices[$0] }
+                .filter { d in d.paired && d.online && (type.map { d.accepts($0) } ?? true) }
+                .map(\.id)
+        }
+    }
 
     public func plugin<T: FluxPlugin>(_ type: T.Type) -> T? { plugins.lazy.compactMap { $0 as? T }.first }
 
@@ -356,16 +677,72 @@ public final class FluxCore: @unchecked Sendable {
     /// the device is offline or not paired.
     @discardableResult
     public func send(_ p: Packet, to id: String) -> Bool { lock.withLock { devices[id]?.send(p) ?? false } }
+
+    /// Sends a packet like `send` and waits until the link wrote it to the
+    /// network, so that a `stop` after it does not lose the packet. It
+    /// returns false when the device is offline or not paired, or the write
+    /// failed.
+    public func sendFlushed(_ p: Packet, to id: String) async -> Bool {
+        let link = lock.withLock { () -> Link? in
+            guard let d = devices[id], d.paired, let l = d.link, l.isOpen else { return nil }
+            return l
+        }
+        guard let link else { return false }
+        return await link.sendFlushed(p)
+    }
+
+    /// Waits for the links of the paired computers after `resume`, for
+    /// example for an App Intent while the iOS app is in the background. It
+    /// checks every 100 ms and returns the IDs of the connected, paired
+    /// computers, see `linkWaitEnds`.
+    public func waitForPairedLinks(timeout: Duration, settle: Duration = .seconds(2)) async -> [String] {
+        let clock = ContinuousClock()
+        let start = clock.now
+        var first: ContinuousClock.Instant?
+        while true {
+            let ids = connectedPairedIds()
+            let paired = lock.withLock { devices.values.filter(\.paired).count }
+            let now = clock.now
+            if first == nil, !ids.isEmpty { first = now }
+            if Task.isCancelled || Self.linkWaitEnds(connected: ids.count, paired: paired, waited: start.duration(to: now),
+                                                     sinceFirst: first?.duration(to: now), timeout: timeout, settle: settle) {
+                return ids
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    /// Reports whether the wait for links ends: no computer is paired, each
+    /// paired computer is connected, `settle` passed since the first link,
+    /// or `timeout` passed. A paired computer that is off does not hold the
+    /// others for long.
+    static func linkWaitEnds(connected: Int, paired: Int, waited: Duration, sinceFirst: Duration?, timeout: Duration, settle: Duration) -> Bool {
+        // With no paired computer, 0 of 0 are connected.
+        if connected >= paired { return true }
+        if let sinceFirst, sinceFirst >= settle { return true }
+        return waited >= timeout
+    }
 }
 
-/// Connects the backend to the core without a retain cycle.
+/// Connects the backend to the core without a retain cycle. The backend can
+/// outlive the core for a moment, so the reference is weak.
 private final class BackendDelegate: LanBackendDelegate, @unchecked Sendable {
-    unowned let core: FluxCore
+    weak var core: FluxCore?
 
     init(core: FluxCore) { self.core = core }
 
-    func trustedCertificate(deviceId: String) -> [UInt8]? { core.trust.get(deviceId)?.certificateDER }
-    func hasLink(deviceId: String) -> Bool { core.device(deviceId)?.online == true }
-    func onLink(_ link: Link) { core.attach(link) }
-    func knownAddresses() -> [String] { core.trust.all().map(\.lastIp).filter { !$0.isEmpty } }
+    func trustedCertificate(deviceId: String) -> [UInt8]? { core?.trust.get(deviceId)?.certificateDER }
+    func hasLink(deviceId: String) -> Bool { core?.withDevice(deviceId) { $0.online } ?? false }
+    func dialsFrom(deviceId: String) -> Bool {
+        guard let core else { return false }
+        return core.trust.get(deviceId) != nil || core.isSearching
+    }
+    func onLink(_ link: Link) {
+        guard let core else {
+            link.close()
+            return
+        }
+        core.attach(link)
+    }
+    func knownAddresses() -> [String] { core?.trust.all().map(\.lastIp).filter { !$0.isEmpty } ?? [] }
 }

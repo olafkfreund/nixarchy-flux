@@ -9,27 +9,38 @@ struct FluxMacApp: App {
     var body: some Scene {
         Window("Flux", id: "main") {
             RootView(launch: delegate.launch)
-                .frame(minWidth: 760, minHeight: 520)
+                .frame(minWidth: 800, minHeight: 520)
         }
-        .defaultSize(width: 900, height: 620)
+        .defaultSize(width: 1000, height: 660)
+        .commands {
+            CommandMenu("Go") { GoMenu(launch: delegate.launch) }
+        }
 
         Settings {
             if case .ready(let model) = delegate.launch {
-                SettingsView().environment(model)
+                SettingsView().fluxScreen().modifier(ThemeRoot()).environment(model)
             }
         }
 
+        // A window, not a menu: a menu runs no task when it opens, so the
+        // cards could not read a fresh output for their choices.
         MenuBarExtra {
-            if case .ready(let model) = delegate.launch {
-                MenuBarView().environment(model)
+            switch delegate.launch {
+            case .ready(let model):
+                MenuBarView().fluxScreen().modifier(ThemeRoot()).environment(model)
+            case .failed(let message):
+                LaunchErrorMenu(message: message)
             }
         } label: {
             MenuBarLabel(launch: delegate.launch)
         }
+        .menuBarExtraStyle(.window)
     }
 }
 
-/// The result of starting the core.
+/// The result of starting the core. The files of a Mac user are readable
+/// after the login, so a start that failed fails again. Flux does not start
+/// the core again. The window and the menu bar show the error until Flux quits.
 enum Launch {
     case ready(AppModel)
     case failed(String)
@@ -52,8 +63,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppearanceController.shared.start()
+        ReplyLock.watch()
         guard case .ready(let model) = launch else { return }
+        model.watchTheme()
+        model.watchEvents()
         FeatureHooks.didLaunch(model: model)
+        model.startConnectGrace()
         model.core.start()
     }
 
@@ -78,22 +93,68 @@ struct RootView: View {
     var body: some View {
         switch launch {
         case .ready(let model):
-            ContentView().environment(model)
+            ContentView().fluxScreen().modifier(ThemeRoot()).environment(model)
         case .failed(let message):
             ContentUnavailableView("Flux could not start", systemImage: "exclamationmark.triangle", description: Text(message))
         }
     }
 }
 
-/// The Flux mark in the menu bar, dimmed while no paired computer is connected.
+/// The menu bar panel when the core did not start: the error, the window
+/// that shows it, and Quit.
+struct LaunchErrorMenu: View {
+    let message: String
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Flux could not start")
+                .font(.headline)
+            Text(message)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider()
+            HStack {
+                Button("Open Flux") {
+                    openWindow(id: "main")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                Spacer()
+                Button("Quit Flux") { NSApp.terminate(nil) }
+                    .keyboardShortcut("q")
+            }
+        }
+        .padding(12)
+        .frame(width: 320)
+    }
+}
+
+/// The Flux mark in the menu bar, dimmed while no paired computer is
+/// connected, with the count of the items that need the user.
 struct MenuBarLabel: View {
     let launch: Launch
 
     var body: some View {
-        if case .ready(let model) = launch, !model.connectedPaired.isEmpty {
-            Image("MenuBarIcon")
+        if case .ready(let model) = launch {
+            MenuBarMark(model: model)
         } else {
             Image("MenuBarIconOffline")
         }
+    }
+}
+
+private struct MenuBarMark: View {
+    let model: AppModel
+
+    var body: some View {
+        let count = Inbox.needsYou(model.inboxItems())
+        HStack(spacing: 3) {
+            Image(model.connectedPaired.isEmpty ? "MenuBarIconOffline" : "MenuBarIcon")
+            if count > 0 {
+                Text(count > 9 ? "9+" : "\(count)")
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(count == 0 ? "Flux" : "Flux, \(needsText(count))")
     }
 }

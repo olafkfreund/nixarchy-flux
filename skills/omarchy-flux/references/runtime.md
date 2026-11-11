@@ -31,13 +31,14 @@ FLUX_GUI=plugin flux-cli open notifications
 `flux-cli on` removes the marker and starts the daemon.
 Prefer these commands when the user asks to turn Flux off or on.
 
-Pages: `overview`, `clipboard`, `files`, `notifications`, `messages`, `browse`, and `commands`.
+Pages: `chat`, `messages`, `notifications`, and `device`. The earlier keys `overview`, `clipboard`, `files`, and `commands` still open a page.
 
 ## Devices and transfers
 
 ```sh
 flux-cli discover
 flux-cli pair "Pixel 8"
+flux-cli pair --address 192.168.1.20
 flux-cli accept "Pixel 8"
 flux-cli reject "Pixel 8"
 flux-cli unpair "Pixel 8"
@@ -50,9 +51,23 @@ flux-cli --device "Pixel 8" url https://omarchy.org
 ```
 
 Replace the example device with a name or ID from `flux-cli status --json`.
-Names match without case.
-Use the ID when devices have the same name.
-Compare the key before the user accepts a pair request.
+Names match without case, and only a paired or connected device. A paired device comes first.
+When the name still matches more than 1 device, the command returns the `ambiguous` error with the device IDs. Use the ID then. `docs/cli.md#pair-and-discover` has the match rule of each command.
+`flux-cli status` shows the ID and the certificate fingerprint under each device.
+
+The verification key has 16 uppercase hex digits in 4 groups of 4, for example `5EE6 825F 974E D59A`.
+The user must compare all 16 characters before the user accepts a pair request.
+A pairing that this computer starts also needs a confirmation on this computer after the device accepts: **Confirm** in the Flux window or in the notification, `y` at the prompt of `flux-cli pair`, or `flux-cli accept DEVICE KEY`.
+`flux-cli accept` always sends the key, and `fluxd` refuses it when the open pairing has another key.
+Without a key and without a terminal, `flux-cli accept` accepts nothing. It prints a `flux-cli accept` command with the device ID and the key. Run that command only after the user says that the phone shows the same key.
+An earlier Flux app shows only 8 characters, so the user must update Flux on every device first.
+`flux-cli pair` and `flux-cli accept` print the name, the ID, and the key.
+`flux-cli unpair` prints the name, the ID, and the certificate fingerprint.
+An unpair from either side ends every session of the device and closes its link.
+Flux for Android takes a new computer only while Flux is on the screen or while it scans.
+`flux-cli discover` asks Avahi for each Flux device again, so a phone whose link closed connects again.
+When discovery finds nothing, `flux-cli pair --address HOST[:PORT]` connects to the phone without discovery, then pairs as `flux-cli pair` does. Without a port, it tries each port from 12100 to 12108.
+Flux for Android shows **Wake** for a paired computer that sleeps. It sends a Wake-on-LAN magic packet. Read `docs/features.md#wake-the-computer`.
 
 ## Extra addresses and Tailscale
 
@@ -69,9 +84,16 @@ Each device in `flux-cli status --json` has an `addresses` list.
 `flux-cli doctor` reports an extra host name that does not resolve.
 The addresses are in `~/.local/share/flux/devices.json`. Change them with the CLI, not by hand, while `fluxd` runs.
 
-Flux cannot discover or pair a device through Tailscale.
-Pair on the local network first.
+Flux cannot discover a device through Tailscale.
+To pair through Tailscale, run `flux-cli pair --address` with the Tailscale address of the phone.
 Read `docs/tailscale.md` for the limits and the troubleshooting steps.
+
+On a computer, ZeroTier makes a virtual Ethernet network, so mDNS and the UDP broadcasts of `fluxd` reach a Mac or a Windows computer on it.
+On a phone, ZeroTier One runs as a VPN that carries no mDNS, so Flux cannot discover or pair a phone through ZeroTier.
+Pair the phone on the local network, then add its ZeroTier IP address as an extra address.
+`flux-cli doctor` checks that each `zt*` interface is up, has an IPv4 address, and is not left out by `allow-interfaces` or `deny-interfaces` in `/etc/avahi/avahi-daemon.conf`.
+In `sudo zerotier-cli peers`, a latency of `-1` for the phone means that the desktop gets no answer from it.
+Read `docs/zerotier.md` for the setup, the limits, and the troubleshooting steps.
 
 ## Notifications and commands
 
@@ -89,6 +111,20 @@ flux-cli run COMMAND_ID
 Put `--device` before `--` with `notify --run`.
 The process exits with the wrapped command's exit code.
 
+An automation rule runs a configured command after an event:
+
+```sh
+flux-cli automation
+flux-cli automation add agent.blocked COMMAND_ID
+flux-cli --device "Pixel 8" automation add device.disconnected COMMAND_ID 60
+flux-cli automation remove RULE_ID
+```
+
+The events are `device.connected`, `device.disconnected`, `file.received`, `battery.low`, `call.ringing`, `call.missed`, `notification.received`, `agent.blocked`, and `agent.done`.
+The agent events take no `--device`.
+Read `docs/workflows.md#local-automation` for the numbers, the cooldown, and the `FLUX_` variables.
+Add a rule only when the user asks for it, because the command runs as the user.
+
 For SMS, use the recipient and message from the user:
 
 ```sh
@@ -105,17 +141,29 @@ The command ID comes from the list or the add result.
 
 Start capture on the phone.
 The CLI reports state, changes webcam settings, and stops streams.
+It can also ask the phone to start the webcam or the mic, or to play the audio of the computer.
 
 ```sh
 flux-cli webcam
+flux-cli webcam start
 flux-cli webcam set aspect=1:1 brightness=0.2
 flux-cli webcam reset
 flux-cli webcam stop
 flux-cli mic
+flux-cli mic start
 flux-cli mic stop
+flux-cli speaker
+flux-cli speaker start
+flux-cli speaker stop
 flux-cli screen
 flux-cli screen stop
 ```
+
+`flux-cli webcam start`, `flux-cli mic start`, and `flux-cli speaker start` only ask.
+The stream starts after the user taps start on the phone.
+Tell the user to confirm on the phone.
+Before you report that the stream runs, check `webcam`, `mic`, or `speaker` in `flux-cli status --json`.
+The phone speaker needs `pw-record` from PipeWire, and its mute option needs `pactl`.
 
 The webcam needs `ffmpeg` and `v4l2loopback-dkms` with the matching kernel headers.
 The microphone needs PipeWire and `pw-cat`.
@@ -137,19 +185,34 @@ Key settings:
 | --- | --- |
 | `auto_clipboard` | Sync clipboard text and images in both directions |
 | `notifications` | Show phone notifications on the desktop |
-| `share_home` | Share the desktop home folder read-only |
+| `share_home` | Browse PC: share the home folder, `download_dir`, and the Documents, Pictures, Music, and Videos folders read-only. Names that start with a dot, such as `~/.ssh`, and the Flux folders stay hidden |
 | `pause_media_on_call` | Pause desktop media during a phone call |
 | `sync_dnd` | Sync Do Not Disturb |
 | `herdr` | Show the herdr agents of the computer on the phone |
-| `herdr_control` | Let the phone send keys and prompts to herdr agents. Off by default |
+| `herdr_control` | Let the phone send keys and prompts to herdr agents, start agents, and close them. A paired device can then run any command as the user through an agent. Off by default |
+| `herdr_terminals` | Let the phone open herdr terminals and type commands in them. Needs `herdr_control`. Off by default |
 | `remote_input` | Let the phone move the pointer and type on the desktop. Off by default |
+| `remote_desktop` | Let the phone show the desktop screen. Off by default |
+| `remote_desktop_encoder` | `auto`, `gpu`, or `cpu`. Use `cpu` when the GPU encoder hangs the computer, for example on AMD Polaris |
 | `gui` | Select the enabled plugin, otherwise the Qt app |
 | `approve_timeout` | Wait 20 seconds for fingerprint approval |
 
+Each setting applies to every paired device. Flux has no setting for 1 device.
+`docs/security.md` lists what a paired device can do and which settings limit it.
+`flux-cli browse` lists the devices that browse the computer with Browse PC, and `flux-cli browse stop` ends their sessions.
+
 `download_dir`, `scan_dir`, and `photo_dir` select destination folders.
 The identity and paired-device certificates live in `~/.local/share/flux/`.
-The socket is `$XDG_RUNTIME_DIR/flux/fluxd.sock`, with `FLUX_SOCKET` as an override.
-Without `XDG_RUNTIME_DIR`, Flux uses a user-specific directory in the system temporary directory.
+`fluxd`, `flux-cli`, and both desktop hosts find the socket with the same rule:
+
+1. `$FLUX_SOCKET`, when it is set.
+2. Else `$XDG_RUNTIME_DIR/flux/fluxd.sock`.
+3. Else `/run/user/<uid>/flux/fluxd.sock`.
+
+Flux never uses the system temporary directory for the socket.
+The approval helper uses only `/run/user/<uid>/flux/fluxd.sock`.
+`fluxd` refuses a socket folder that is a symbolic link, that another user owns, or that other users can write to.
+In a shell without a login session, for example after `su`, set `XDG_RUNTIME_DIR` to a private folder of the user.
 
 Do not delete the identity or trust store to diagnose a routine connection failure.
 Their removal changes pairing identity.
@@ -166,33 +229,98 @@ herdr agent list
 journalctl --user -u fluxd --no-pager | grep herdr
 ```
 
-The `herdr` field of the state has `enabled`, `running`, `control`, and `agents`.
+The `herdr` field of the state has `enabled`, `running`, `control`, `terminals`, `bridge`, `review`, `agents`, `panes`, `workspaces`, `kinds`, and `cli`.
 `fluxd` and herdr must run as the same user.
 `HERDR_SOCKET_PATH` selects a herdr session other than the default.
 
-Replies from the phone need `herdr_control = true`.
-A reply can make an agent run commands on the computer.
+Replies, new agents, and closes from the phone need `herdr_control = true`.
+A reply can make an agent run any command as the desktop user, also with `herdr_terminals = false`.
+The setting applies to every paired device.
 Do not turn on `herdr_control` unless the user asks for replies from the phone.
+
+The **Live** key of Flux for Android also needs `herdr_control = true`.
+It also needs herdr 0.9.3 or newer for the herdr server and for the `herdr` CLI in the `PATH` of `fluxd.service`.
+`flux-cli doctor` checks `herdr_control` and both versions, and `cli` in the state shows the CLI that `fluxd` runs.
+While the version check fails, `fluxd` runs it again about once a minute, so an update of herdr needs no restart.
+`fluxd` reads the `PATH` of `fluxd.service` only when it starts, so a change of that `PATH` needs `systemctl --user restart fluxd`.
+
+`fluxd` refuses a prompt to an agent that waits for a choice, with the code `blocked`.
+The app then offers **Send as answer**, which sends the same text with `"answer": true`.
+
+Terminals from the phone need `herdr_terminals = true` as well.
+A terminal gives the phone a shell as the desktop user in each herdr pane without an agent.
+These panes include a `sudo -i` shell or an SSH session that the user opened.
+Do not turn on `herdr_terminals` unless the user asks for terminals on the phone.
 
 ## Touchpad and keyboard
 
 The phone moves the pointer and types on the desktop only with `remote_input = true`.
 The phone can then type in any window, such as a terminal.
 Do not turn on `remote_input` unless the user asks for it.
+`flux-cli input on` and `flux-cli input off` change the setting without a reload.
 Read `docs/remote-input.md` for the gestures, `wtype`, and the wire format.
+
+## Remote desktop
+
+The phone shows the desktop screen only with `remote_desktop = true`.
+The phone can then see each window. Its touches also need `remote_input = true`.
+Do not turn on `remote_desktop` unless the user asks for it.
+`flux-cli desktop on` and `flux-cli desktop off` change the setting without a reload.
+The **Access** card on the page of the device in the Flux window has the same 2 switches, as **Turn on** and **Turn off**.
+The stream needs `gpu-screen-recorder`.
+When the computer freezes or restarts at the start of the stream, set `remote_desktop_encoder = "cpu"` and reload `fluxd`.
+Flux for Android can also extend the screen: `fluxd` adds the Hyprland headless output `FLUX-1` with the size of the phone and removes it when the stream ends. The extended screen needs `wf-recorder` and the same switches.
+Read `docs/remote-desktop.md` for the gestures, the monitors, the extended screen, the lock screen, the Omarchy panel, and the stream format.
+The stream shows the lock screen. `fluxd` turns the displays on when they are off.
+The Omarchy panel runs Hyprland key bindings and workspace actions for the phone with `flux.shortcuts`. It needs `remote_input = true`.
+While the session is locked, `fluxd` refuses the bindings and the window actions with `Unlock the computer first`. Remote input and the remote desktop stay available on the lock screen.
+
+```sh
+flux-cli desktop on
+flux-cli input on
+flux-cli desktop
+flux-cli desktop stop
+flux-cli desktop off
+flux-cli input off
+```
 
 ## Fingerprint approval
 
 Read `docs/approvals.md` for setup and `docs/approve.md` for the security design.
-The root helper validates a phone signature against `/etc/flux/approve/<user>.pub`.
+Flux for Android, Flux for iOS, and Flux for macOS can approve.
+The root helper validates a device signature against `/etc/flux/approve/<user>.pub`.
 The daemon carries approval messages but does not establish trust by itself.
+During enrollment, the user types the 16-character key code from the device screen. The terminal does not show it.
 
 ```sh
 flux-cli approve
 sudo flux-cli approve setup
-sudo flux-cli approve enable polkit-1 hyprlock
+sudo flux-cli approve enable hyprlock
 sudo flux-cli approve disable
 sudo flux-cli approve remove
+```
+
+polkit gives PAM no item for the user that asks.
+So `polkit-1` works only with a setuid `polkit-agent-helper-1`.
+polkit 126 and later on Arch Linux run the agent helper as the `polkit-agent-helper@.service` system service, which cannot reach the socket of `fluxd`.
+On such a system, `sudo flux-cli approve enable polkit-1` refuses the service, and `flux-cli approve` says why.
+Do not weaken the sandbox of the polkit service to make approvals work.
+
+The Omarchy lock screen runs in `omarchy-shell` with its own PAM services, `omarchy-lock-password` and `omarchy-lock-fingerprint`.
+Flux does not change them, so the phone cannot unlock the Omarchy lock screen.
+The `hyprlock` service applies only when `hyprlock` is the lock screen.
+
+## SSH key on the phone
+
+Read `docs/ssh.md`.
+Flux for Android can keep an SSH key in the Android Keystore. `fluxd` offers it on the ssh-agent socket `$XDG_RUNTIME_DIR/flux/ssh-agent.sock`.
+Each signature needs the fingerprint or the screen lock on the phone. The user turns the key on in Flux on the phone: **Computers**, then **SSH key**.
+Do not change the SSH configuration or the Git configuration of the user unless the user asks.
+
+```sh
+flux-cli ssh
+flux-cli ssh key
+SSH_AUTH_SOCK="$(flux-cli ssh socket)" ssh-add -l
 ```
 
 Use root commands only for the requested setup or removal.
@@ -205,9 +333,9 @@ Do not change `sshd` or `login` PAM services.
 2. Inspect the user service and its logs.
 3. Check `systemctl status avahi-daemon`.
 4. Check that Flux runs on the phone.
-5. Check that the network allows communication between clients.
+5. Check that the network allows communication between clients. `fluxd` opens the connections itself, so do not add an inbound firewall rule for the Flux ports.
 6. Run `flux-cli discover` and inspect the state again.
-7. For a phone away from the local network, check `flux-cli addresses`, `tailscale ping HOST`, and the `connect to` lines in the `fluxd` log.
+7. For a phone away from the local network, check `flux-cli addresses`, `tailscale ping HOST` or `sudo zerotier-cli peers`, and the `connect to` lines in the `fluxd` log.
 
 If the plugin fails, test the Qt host with `FLUX_GUI=app flux-cli open`.
 If that succeeds, inspect the plugin install and shell logs.

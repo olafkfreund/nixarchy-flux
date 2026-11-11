@@ -40,8 +40,14 @@ fiber_manual_record+fill photo_library do_not_disturb_on screenshot
 mic+fill mic_off screen_share stop_screen_share sms
 
 fingerprint power_settings_new signature smart_toy
-light_mode dark_mode contrast
+light_mode dark_mode
 touchpad_mouse keyboard slideshow
+inbox devices expand_more star+fill
+arrow_forward expand_less difference south edit
+public menu_book bug_report alternate_email license
+touch_app brightness_auto radio_button_checked radio_button_unchecked
+volume_down edit_note chat web_asset arrow_downward
+volume_off speaker speaker_phone
 """.split()
 
 BASE = "https://raw.githubusercontent.com/google/material-design-icons/master/symbols/android"

@@ -11,6 +11,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Opens the Android installer for a Flux update that the computer sends. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -34,8 +36,15 @@
     <!-- The phone as microphone, and the screen mirror. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- The webcam and the mic keep streaming while Flux is in the background. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- The audio of the computer keeps playing while Flux is in the background. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- Approve sudo and polkit with a fingerprint. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- Android 12 and later: the pair sheet and the approval screen hide the windows of other apps. -->
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
@@ -51,6 +60,8 @@
     <application
         android:name=".FluxApp"
         android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -61,8 +72,9 @@
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
+            android:theme="@style/Theme.Flux.Main"
             android:launchMode="singleTask"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|density|fontScale|uiMode"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -86,7 +98,26 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>
+            <!-- The text selection menu of any app shows "Send to computer". -->
+            <intent-filter android:label="@string/process_text_label">
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
         </activity>
+
+        <!--
+            The clipboard sender: no UI. It takes window focus, reads the
+            clipboard, sends it to each connected paired computer, and finishes.
+            The Quick Settings tile and the service notification start it.
+        -->
+        <activity
+            android:name=".ui.ClipboardSendActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="org.omarchy.flux.clip"
+            android:theme="@style/Theme.Flux.Invisible" />
 
         <activity
             android:name=".ui.RingActivity"
@@ -97,14 +128,27 @@
             android:turnScreenOn="true"
             android:taskAffinity="org.omarchy.flux.ring" />
 
+        <!-- The fingerprint prompt must reach the same activity, so a rotation or a fold does not recreate it. -->
         <activity
             android:name=".ui.ApproveActivity"
             android:exported="false"
             android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|density|fontScale|uiMode"
             android:launchMode="singleTop"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:taskAffinity="org.omarchy.flux.approve" />
+
+        <!-- The SSH key prompt. It shows over the lock screen like the approval screen. -->
+        <activity
+            android:name=".ui.SshSignActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|density|fontScale|uiMode"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:taskAffinity="org.omarchy.flux.ssh" />
 
         <service
             android:name=".service.FluxService"
@@ -115,6 +159,24 @@
             android:name=".screen.ScreenMirrorService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!-- Keeps the webcam, the mic, and the audio of the computer running while Flux is in the background. -->
+        <service
+            android:name=".stream.StreamService"
+            android:exported="false"
+            android:foregroundServiceType="camera|microphone|mediaPlayback|connectedDevice" />
+
+        <!-- Quick Settings tile that sends the clipboard to the computers. -->
+        <service
+            android:name=".service.ClipboardTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_content_paste_go"
+            android:label="@string/clipboard_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".service.FluxNotificationListener"
@@ -137,6 +199,19 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/clipboard_paths" />
         </provider>
+
+        <!-- The agents widget on the home screen. The system sends it the widget broadcasts, so it needs no export. -->
+        <receiver
+            android:name=".widget.AgentsWidget"
+            android:exported="false"
+            android:label="@string/widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/agents_widget_info" />
+        </receiver>
 
         <receiver
             android:name=".service.BootReceiver"

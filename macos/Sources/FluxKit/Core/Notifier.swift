@@ -18,7 +18,9 @@ public final class Notifier: NSObject, UNUserNotificationCenterDelegate, @unchec
     private let categories = NIOLockedValueBox<[String: Category]>([:])
 
     private var center: UNUserNotificationCenter? {
-        Bundle.main.bundleIdentifier == nil ? nil : UNUserNotificationCenter.current()
+        // UNUserNotificationCenter needs an app bundle. The xctest tool has
+        // a bundle identifier but is no app, and the center raises there.
+        Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app" ? UNUserNotificationCenter.current() : nil
     }
 
     /// Installs the delegate and asks for permission. Call it once at launch.
@@ -41,7 +43,10 @@ public final class Notifier: NSObject, UNUserNotificationCenterDelegate, @unchec
         center?.setNotificationCategories(all)
     }
 
-    /// Shows a notification. A later post with the same id replaces it.
+    /// Shows a notification. A later post with the same id replaces it. A
+    /// time-sensitive level shows it through a Focus that allows
+    /// time-sensitive notifications, when the app has the time-sensitive
+    /// entitlement. Without it, iOS uses the active level.
     public func post(
         id: String,
         category: String,
@@ -50,9 +55,28 @@ public final class Notifier: NSObject, UNUserNotificationCenterDelegate, @unchec
         subtitle: String? = nil,
         userInfo: [String: Any] = [:],
         sound: UNNotificationSound? = .default,
-        attachment: URL? = nil
+        attachment: URL? = nil,
+        interruptionLevel: UNNotificationInterruptionLevel = .active
     ) {
         guard let center else { return }
+        let content = Self.content(category: category, title: title, body: body, subtitle: subtitle, userInfo: userInfo,
+                                   sound: sound, interruptionLevel: interruptionLevel)
+        if let attachment, let a = try? UNNotificationAttachment(identifier: "file", url: attachment) {
+            content.attachments = [a]
+        }
+        center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
+    }
+
+    /// The content of a notification.
+    static func content(
+        category: String,
+        title: String,
+        body: String,
+        subtitle: String? = nil,
+        userInfo: [String: Any] = [:],
+        sound: UNNotificationSound? = .default,
+        interruptionLevel: UNNotificationInterruptionLevel = .active
+    ) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -60,15 +84,22 @@ public final class Notifier: NSObject, UNUserNotificationCenterDelegate, @unchec
         content.categoryIdentifier = category
         content.userInfo = userInfo
         content.sound = sound
-        if let attachment, let a = try? UNNotificationAttachment(identifier: "file", url: attachment) {
-            content.attachments = [a]
-        }
-        center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
+        content.interruptionLevel = interruptionLevel
+        return content
     }
 
     public func remove(id: String) {
         center?.removeDeliveredNotifications(withIdentifiers: [id])
         center?.removePendingNotificationRequests(withIdentifiers: [id])
+    }
+
+    /// Passes the IDs of the notifications that Notification Center shows,
+    /// the oldest first, to `body` on a queue of the center. It includes
+    /// the notifications of an earlier run of Flux.
+    func deliveredIds(_ body: @escaping @Sendable ([String]) -> Void) {
+        center?.getDeliveredNotifications { notes in
+            body(notes.sorted { $0.date < $1.date }.map(\.request.identifier))
+        }
     }
 
     // MARK: UNUserNotificationCenterDelegate

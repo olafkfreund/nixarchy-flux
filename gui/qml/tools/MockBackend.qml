@@ -2,8 +2,10 @@ import QtQuick
 
 // A stand-in for a host backend that serves state from fixture.json. The
 // snapshot harness uses it. It follows the backend contract in README.md.
-// A negative "time", "lastSeen", or "mtime" value means that many seconds
-// before now. Loading the fixture needs QML_XHR_ALLOW_FILE_READ=1.
+// fixture.pairing holds sample devices with an open pairing for the view
+// tests and the snapshots.
+// A negative "time" or "lastSeen" value means that many seconds before
+// now. Loading the fixture needs QML_XHR_ALLOW_FILE_READ=1.
 QtObject {
   id: root
 
@@ -13,6 +15,10 @@ QtObject {
   property var fixture: ({})
   property bool ready: false
   property var calls: []
+  // Each call as {method, params}, for the view tests.
+  property var requests: []
+  // Errors by method name. A call of such a method gets the error.
+  property var failures: ({})
 
   readonly property var devices: state.devices || []
   readonly property var clipboard: state.clipboard || []
@@ -30,7 +36,7 @@ QtObject {
       var out = {}
       for (var k in v) {
         var x = v[k]
-        if ((k === "time" || k === "lastSeen" || k === "mtime") && typeof x === "number" && x < 0) out[k] = now + x
+        if ((k === "time" || k === "lastSeen") && typeof x === "number" && x < 0) out[k] = now + x
         else out[k] = fixTimes(x)
       }
       return out
@@ -53,10 +59,42 @@ QtObject {
 
   function call(method, params, cb) {
     calls.push(method)
+    requests.push({ method: method, params: params || {} })
+    if (Object.prototype.hasOwnProperty.call(failures, method)) {
+      var err = failures[method]
+      if (cb) Qt.callLater(function () { try { cb(err, null) } catch (e) {} })
+      return
+    }
     var result = {}
-    if (method === "browse.open") result = { roots: fixture.roots }
-    else if (method === "browse.list") result = { entries: fixTimes((fixture.dirs || {})[params.path] || []) }
-    else if (method === "sms.thread") result = { messages: fixTimes((fixture.threads || {})[String(params.thread)] || []) }
+    if (method === "sms.thread") result = { messages: fixTimes((fixture.threads || {})[String(params.thread)] || []) }
+    else if (method === "sms.send") {
+      // Like fluxd, the message waits in the outbox of the device until the
+      // phone reports it. The thread is the conversation with only the
+      // address, or -1.
+      updateDevice(params.device, function (d) {
+        var address = (params.addresses || [])[0] || ""
+        var c = (d.conversations || []).find(function (x) { return (x.addresses || []).length === 1 && x.addresses[0] === address })
+        d.outbox = (d.outbox || []).concat([{ thread: c ? c.thread : -1, address: address, body: params.body, time: Math.floor(Date.now() / 1000), outgoing: true, pending: true, failed: false }])
+        return d
+      })
+    }
+    // Like fluxd, a sent text and a sent link go to the history.
+    else if (method === "clipboard.send" && params.text) setState(function (s) {
+      s.clipboard = [{ id: "s" + Date.now(), text: params.text, dir: "out", device: params.device, deviceName: "this pc", time: Math.floor(Date.now() / 1000) }].concat(s.clipboard || [])
+    })
+    else if (method === "share.url") setState(function (s) {
+      s.clipboard = [{ id: "s" + Date.now(), text: params.url, dir: "out", device: params.device, deviceName: "this pc", source: "link", time: Math.floor(Date.now() / 1000) }].concat(s.clipboard || [])
+    })
+    else if (method === "clipboard.search") result = clipboard.filter(e => ((e.text || "") + " " + (e.deviceName || "")).toLowerCase().indexOf((params.text || "").toLowerCase()) >= 0)
+    else if (method === "clipboard.pin" || method === "clipboard.unpin") setState(function(s) { s.clipboard.forEach(e => { if (e.id === params.id) e.pinned = method === "clipboard.pin" }) })
+    else if (method === "clipboard.delete") setState(function(s) { s.clipboard = (s.clipboard || []).filter(e => e.id !== params.id) })
+    else if (method === "clipboard.clear") setState(function(s) { s.clipboard = params && params.all ? [] : (s.clipboard || []).filter(e => e.pinned) })
+    else if (method === "device.settings.set") setState(function(s) {
+      s.settings.deviceRules = s.settings.deviceRules || {}
+      s.settings.deviceRules[params.device] = s.settings.deviceRules[params.device] || {}
+      s.settings.deviceRules[params.device][params.key] = params.value
+    })
+    else if (method === "transfer.cancel") setState(function(s) { s.transfers.forEach(t => { if (t.id === params.id) t.state = "canceled" }) })
     else if (method === "notification.dismissAll") {
       var n = 0
       updateDevice(params.device, function (d) {
@@ -67,9 +105,15 @@ QtObject {
       })
       result = { dismissed: n }
     }
+    // Like fluxd, a connect by address returns the device that answered.
+    else if (method === "pair.address") result = { device: "c0ffee00000000000000000000000add", name: "Pixel by address" }
     else if (method === "webcam.stop") setState(function (s) { s.webcam = null })
     else if (method === "mic.stop") setState(function (s) { s.mic = null })
+    else if (method === "speaker.stop") setState(function (s) { s.speaker = null })
     else if (method === "screen.stop") setState(function (s) { s.screen = null })
+    else if (method === "desktop.stop") setState(function (s) { s.desktop = null })
+    else if (method === "browse.stop") setState(function (s) { s.browse = [] })
+    else if (method === "settings.set") setState(function (s) { s.settings[params.key] = params.value })
     else if (method === "webcam.config") {
       var restarts = false
       setState(function (s) {

@@ -47,8 +47,21 @@ public:
     Q_INVOKABLE void pickFiles(const QString &title, const QJSValue &cb);
     // startDaemon starts the fluxd user service. cb receives (ok, message).
     Q_INVOKABLE void startDaemon(const QJSValue &cb);
+    // retryNow connects at once when the connection is down, and starts
+    // the wait between attempts again at the shortest time.
+    Q_INVOKABLE void retryNow();
 
+    // runtimeDir returns the folder of the Flux sockets: $XDG_RUNTIME_DIR/flux,
+    // or /run/user/<uid>/flux. fluxd and flux-cli use the same folder. There
+    // is no /tmp fallback, because another user can make a folder there first.
+    static QString runtimeDir();
+    // socketPath returns $FLUX_SOCKET, or fluxd.sock in runtimeDir.
     static QString socketPath();
+    // chooserPaths reads the output of omarchy file select: 1 absolute path
+    // on each line. A file name can have a newline, so a line that does not
+    // start with "/" continues the path before it. The lines are not
+    // trimmed, because a file name can start or end with a space.
+    static QStringList chooserPaths(QString text);
 
 signals:
     void connectedChanged();
@@ -58,7 +71,9 @@ signals:
 
 private:
     void connectNow();
+    void scheduleRetry();
     void setAttempted();
+    void readLines();
     void handleLine(const QByteArray &line);
     void failPending(const QString &code, const QString &message);
     void invoke(QJSValue cb, const QJSValueList &args);
@@ -68,8 +83,12 @@ private:
     QJSEngine *m_engine;
     QLocalSocket m_socket;
     QTimer m_retry;
+    int m_retryDelay;
     bool m_attempted = false;
     QJSValue m_state;
     int m_nextId = 1;
     QHash<int, QJSValue> m_pending;
+    // m_dropLine is true while the backend drops the rest of a line above
+    // the size limit.
+    bool m_dropLine = false;
 };

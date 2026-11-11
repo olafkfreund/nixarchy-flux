@@ -1,5 +1,6 @@
 package org.omarchy.flux.core
 
+import android.app.DownloadManager
 import android.content.Intent
 import android.util.Log
 import net.schmizz.sshj.DefaultConfig
@@ -8,43 +9,72 @@ import net.schmizz.sshj.sftp.FileMode
 import net.schmizz.sshj.sftp.SFTPClient
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import org.bouncycastle.jce.provider.BouncyCastleProvider
-import org.omarchy.flux.net.LoopbackBridge
+import org.omarchy.flux.net.ConnectedSocketFactory
 import org.omarchy.flux.net.Tunnel
 import org.omarchy.flux.protocol.Packet
+import org.omarchy.flux.protocol.SftpFound
 import org.omarchy.flux.protocol.SftpOffer
 import org.omarchy.flux.protocol.Types
 import org.omarchy.flux.protocol.bodyOf
 import java.security.Security
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 private const val TAG = "FluxBrowse"
 
 /**
  * Browse PC. The phone asks the computer for an SFTP session with
- * kdeconnect.sftp.request. The computer answers with kdeconnect.sftp and the
- * address, the user, and a one-time password.
+ * flux.sftp.request. The computer answers with flux.sftp and a tunnel
+ * token, the user, and a one-time password.
  */
 object Browse {
     private var ssh: SSHClient? = null
     private var sftp: SFTPClient? = null
-    private var bridge: LoopbackBridge? = null
 
-    fun start(core: FluxCore, id: String) {
+    /**
+     * Changes with each [start] and [close]. A connect that ends after a
+     * change closes its own session, because nobody browses it.
+     */
+    @Volatile private var generation = 0
+
+    /** The folder that the next session opens in place of the first root, or null. */
+    @Volatile private var resumePath: String? = null
+
+    /** The ID of the last search. An answer to an older search does not show. */
+    private val searchIds = AtomicLong()
+
+    /** The ID of the last list of a folder. An answer to an older list does not show. */
+    private val listIds = AtomicLong()
+
+    /**
+     * Starts a session. It opens [path] when the computer shares it, else
+     * the first root. `fluxd` ends a session when the link drops, so the
+     * screen starts a new session at the same [path] after a reconnect.
+     */
+    fun start(core: FluxCore, id: String, path: String? = null) {
         val d = core.device(id) ?: return
         close()
-        core.setBrowse(BrowseState(deviceId = id, loading = true))
+        resumePath = path
+        // The search field stays while a new session of the same computer opens.
+        val canSearch = core.browseState()?.takeIf { it.deviceId == id }?.canSearch ?: false
+        core.setBrowse(BrowseState(deviceId = id, loading = true, canSearch = canSearch))
         d.send(Packet(Types.SFTP_REQUEST, bodyOf("startBrowsing" to true)))
         core.scheduler.schedule({
             val s = core.browseState()
             if (s != null && s.deviceId == id && s.loading && s.entries.isEmpty() && s.error == null) {
-                core.setBrowse(s.copy(loading = false, error = "${d.identity.deviceName} did not answer. Browse PC needs fluxd."))
+                core.setBrowse(s.copy(loading = false, error = "${d.identity.deviceName} did not answer. Get files needs fluxd."))
             }
-        }, 10, java.util.concurrent.TimeUnit.SECONDS)
+        }, 10, TimeUnit.SECONDS)
     }
 
-    /** Handles kdeconnect.sftp. The core lock is held. */
+    /** Handles flux.sftp. The core lock is held. */
     fun onCredentials(core: FluxCore, d: Device, p: Packet) {
         val state = core.browseState()
         if (state == null || state.deviceId != d.id) return
+        if (SftpFound.isAnswer(p)) {
+            SftpFound.parse(p)?.let { onFound(core, it) }
+            return
+        }
         p.string("errorMessage")?.let {
             core.setBrowse(state.copy(loading = false, error = it))
             return
@@ -55,93 +85,191 @@ object Browse {
         }
         val cert = d.certificate
         val tls = FluxCore.tls
+        val host = d.link?.address?.hostAddress ?: d.identity.deviceName
+        val gen = generation
         core.io.execute {
+            // The session until the browser keeps it. The finally block ends
+            // a session that the browser did not keep, also on the computer.
+            var client: SSHClient? = null
+            var tunnel: java.net.Socket? = null
             try {
                 ensureBouncyCastle()
-                val client = SSHClient(DefaultConfig())
-                client.addHostKeyVerifier(PromiscuousVerifier())
-                client.connectTimeout = 8_000
-                if (offer.viaTunnel) {
-                    // The computer blocks incoming connections. It connects to
-                    // this phone, and the TLS stream carries the SSH session.
-                    // sshj opens its own socket, so a loopback bridge feeds it.
-                    if (cert == null || tls == null) error("the link is not ready")
-                    val tunnel = Tunnel.accept(tls, cert, offer.tunnel!!, announce = { d.send(it) })
-                    val b = LoopbackBridge(tunnel)
-                    bridge = b
-                    client.connect(b.host, b.port)
-                } else {
-                    val ip = offer.ip ?: d.link?.address?.hostAddress ?: error("no address")
-                    client.connect(ip, offer.port)
-                }
-                client.authPassword(offer.user, offer.password)
-                ssh = client
-                sftp = client.newSFTPClient()
-                core.setBrowse(state.copy(loading = false, roots = offer.roots))
-                list(core, offer.roots.first().second)
+                val c = SSHClient(DefaultConfig()).also { client = it }
+                // The pinned TLS tunnel checks the computer, so the SSH host key needs no check.
+                c.addHostKeyVerifier(PromiscuousVerifier())
+                c.connectTimeout = 8_000
+                // The computer connects to this phone, and the TLS stream
+                // carries the SSH session. sshj takes the connected tunnel
+                // as its socket, so no other app can take the session.
+                if (cert == null || tls == null) error("the link is not ready")
+                val t = Tunnel.accept(tls, cert, offer.tunnel, announce = { d.send(it) }).also { tunnel = it }
+                if (generation != gen) return@execute
+                c.socketFactory = ConnectedSocketFactory(t)
+                c.connect(host, 22)
+                if (generation != gen) return@execute
+                c.authPassword(offer.user, offer.password)
+                if (generation != gen) return@execute
+                val s = c.newSFTPClient()
+                if (!keep(gen, c, s)) return@execute
+                client = null
+                tunnel = null
+                val first = offer.roots.first().second
+                val open = resumePath?.takeIf { p -> offer.roots.any { (_, root) -> p == root || p.startsWith(root.trimEnd('/') + "/") } } ?: first
+                resumePath = null
+                core.setBrowse(state.copy(loading = false, roots = offer.roots, canSearch = offer.search))
+                list(core, open)
             } catch (e: Exception) {
-                Log.w(TAG, "SFTP connect failed", e)
-                bridge?.close()
-                bridge = null
-                core.setBrowse(state.copy(loading = false, error = "Cannot open files on ${d.identity.deviceName}: ${e.message}"))
+                if (generation == gen) {
+                    Log.w(TAG, "SFTP connect failed", e)
+                    core.setBrowse(state.copy(loading = false, error = "Cannot open files on ${d.identity.deviceName}: ${e.message}"))
+                }
+            } finally {
+                client?.let { runCatching { it.disconnect() } }
+                tunnel?.let { runCatching { it.close() } }
             }
         }
     }
 
+    /** Keeps a new session, unless a close or a new start came after [gen]. */
+    @Synchronized
+    private fun keep(gen: Int, client: SSHClient, s: SFTPClient): Boolean {
+        if (generation != gen) return false
+        ssh = client
+        sftp = s
+        return true
+    }
+
+    /**
+     * Opens the folder [path]. Another folder shows no files until the
+     * computer answers, so the screen never shows the files of the folder
+     * before under the new path. The same folder keeps its files while it
+     * loads again. Only the answer to the last list shows, because the
+     * answers can come in another order.
+     */
     fun list(core: FluxCore, path: String) {
         val client = sftp ?: return
-        val state = core.browseState() ?: return
-        core.setBrowse(state.copy(loading = true, path = path))
+        val id = listIds.incrementAndGet()
+        core.updateBrowse { it.copy(loading = true, path = path, error = null, entries = if (it.path == path) it.entries else emptyList()) }
         core.io.execute {
-            try {
-                val entries = client.ls(path)
+            val entries = runCatching {
+                client.ls(path)
                     .filter { !it.name.startsWith(".") }
                     .map { BrowseEntry(it.name, it.path, it.attributes.type == FileMode.Type.DIRECTORY, it.attributes.size) }
                     .sortedWith(compareBy<BrowseEntry>({ !it.dir }, { it.name.lowercase() }))
-                core.setBrowse(core.browseState()?.copy(loading = false, path = path, entries = entries, error = null))
-            } catch (e: Exception) {
-                core.setBrowse(core.browseState()?.copy(loading = false, error = "Cannot open $path: ${e.message}"))
+            }
+            core.updateBrowse { s ->
+                when {
+                    id != listIds.get() || s.path != path -> s
+                    entries.isSuccess -> s.copy(loading = false, entries = entries.getOrThrow(), error = null)
+                    else -> s.copy(loading = false, error = "Cannot open $path: ${entries.exceptionOrNull()?.message}")
+                }
             }
         }
     }
 
+    /** Lists the open folder again, for example after a new file on the computer. It returns false when no folder is open. */
+    fun refresh(core: FluxCore): Boolean {
+        val path = core.browseState()?.path?.takeIf { it.isNotEmpty() } ?: return false
+        if (sftp == null) return false
+        list(core, path)
+        return true
+    }
+
+    /**
+     * Asks the computer for the files and folders whose names hold each
+     * word of [query], in [path] and its subfolders. An empty [path]
+     * searches each shared folder. An empty [query] ends the search.
+     */
+    fun search(core: FluxCore, query: String, path: String) {
+        val state = core.browseState() ?: return
+        val q = query.trim()
+        if (q.isEmpty()) {
+            if (state.search != null) core.setBrowse(state.copy(search = null))
+            return
+        }
+        val d = core.device(state.deviceId) ?: return
+        val id = searchIds.incrementAndGet()
+        core.setBrowse(state.copy(search = BrowseSearch(id, q, path)))
+        d.send(SftpFound.request(id, q, path))
+        core.scheduler.schedule({
+            val now = core.browseState()
+            val s = now?.search
+            if (s != null && s.id == id && s.loading) {
+                core.setBrowse(now.copy(search = s.copy(loading = false, error = "${d.identity.deviceName} did not answer the search.")))
+            }
+        }, 20, TimeUnit.SECONDS)
+    }
+
+    /** Shows the answer to the last search. The core lock is held. */
+    private fun onFound(core: FluxCore, found: SftpFound) {
+        val state = core.browseState() ?: return
+        val s = state.search?.takeIf { it.id == found.id } ?: return
+        val results = found.results.map { BrowseEntry(it.path.trimEnd('/').substringAfterLast('/'), it.path, it.dir, if (it.dir) 0 else it.size) }
+        core.setBrowse(state.copy(search = s.copy(loading = false, results = results, more = found.more, partial = found.partial, error = found.error)))
+    }
+
+    /** Reports whether [name] holds each word of [query], in any case. The demo searches with it. */
+    fun matches(name: String, query: String): Boolean {
+        val lower = name.lowercase()
+        val words = query.lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        return words.isNotEmpty() && words.all { it in lower }
+    }
+
+    /**
+     * Saves [entry] in Downloads, with the safe name of a received file. The
+     * rule for apps is the same as in [Share]: the notification opens the
+     * Android installer only for a newer Flux with the signing key of this
+     * app. Any other app only shows in Downloads.
+     */
     fun download(core: FluxCore, entry: BrowseEntry) {
         val client = sftp ?: return
-        core.toast("Downloading ${entry.name}")
+        val name = Share.sanitize(entry.name)
+        core.toast("Downloading $name")
         core.io.execute {
-            val mime = Android.mimeType(entry.name)
-            val dl = runCatching { Android.createDownload(core.app, entry.name, mime) }.getOrElse {
-                core.toast("Cannot save ${entry.name}")
+            val mime = Android.mimeType(name)
+            val dl = runCatching { Android.createDownload(core.app, name, mime) }.getOrElse {
+                core.toast("Cannot save $name")
                 return@execute
             }
-            val ok = runCatching {
+            val size = runCatching {
                 client.open(entry.path).use { remote ->
                     remote.RemoteFileInputStream().use { it.copyTo(dl.stream, 64 * 1024) }
                 }
-            }.onFailure { Log.w(TAG, "download failed", it) }.isSuccess
-            Android.finishDownload(core.app, dl, ok)
-            if (ok) {
-                val open = Intent(Intent.ACTION_VIEW).setDataAndType(dl.uri, mime ?: "*/*").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                Android.showEvent(core.app, "Downloaded ${entry.name}", "Saved in Downloads", open)
-                core.toast("Saved ${entry.name} in Downloads")
-            } else {
-                core.toast("Downloading ${entry.name} failed")
+            }.onFailure { Log.w(TAG, "download failed", it) }.getOrNull()
+            Android.finishDownload(core.app, dl, size != null)
+            if (size == null) {
+                core.toast("Downloading $name failed")
+                return@execute
             }
+            val open = Share.viewIntent(dl.uri, mime)
+            if (ApkCheck.isApk(name, mime)) {
+                val version = Share.updateVersion(core.app, name, size, dl.uri)
+                if (version != null) {
+                    Android.showEvent(core.app, "Downloaded Flux $version", "Tap to install the update", open)
+                    core.toast("Flux $version is in Downloads. Open its notification to install it")
+                    return@execute
+                }
+                Android.showEvent(core.app, "Downloaded $name", "Saved in Downloads. Flux does not install it.", Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
+                core.toast("Saved $name in Downloads")
+                return@execute
+            }
+            Android.showEvent(core.app, "Downloaded $name", "Saved in Downloads", open)
+            core.toast("Saved $name in Downloads")
         }
     }
 
     /** Ends the SSH session. A tunnel carries 1 session, so the next start asks for a new one. */
+    @Synchronized
     fun close() {
+        generation++
         val s = sftp
         val c = ssh
-        val b = bridge
         sftp = null
         ssh = null
-        bridge = null
         FluxCore.io.execute {
             runCatching { s?.close() }
+            // The disconnect closes the socket, which is the tunnel.
             runCatching { c?.disconnect() }
-            b?.close()
         }
     }
 

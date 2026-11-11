@@ -1,9 +1,8 @@
 @preconcurrency import AVFoundation
-import CoreMedia
 
-/// One audio input of this Mac.
+/// One audio input of this Mac, or one route of the iPhone.
 public struct MicInput: Identifiable, Hashable, Sendable {
-    /// The unique ID of the capture device.
+    /// The unique ID of the capture device, or the UID of the route.
     public let id: String
     public let name: String
 }
@@ -21,8 +20,12 @@ public enum MicPermission: Sendable {
     }
 }
 
-/// Records one audio input as 48 kHz mono s16le PCM. AVFoundation converts
-/// the format of the device. Samples arrive on a private serial queue.
+#if os(macOS)
+import CoreMedia
+
+/// Records one audio input of this Mac as 48 kHz mono s16le PCM. The capture
+/// output converts the format of the device. Samples arrive on a private
+/// serial queue.
 final class MicCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
     private let session = AVCaptureSession()
     private let output = AVCaptureAudioDataOutput()
@@ -160,3 +163,135 @@ final class MicCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, 
             && f.mFormatFlags & kAudioFormatFlagIsBigEndian == 0
     }
 }
+#else
+/// Records the input of the iPhone as 48 kHz mono s16le PCM. The audio
+/// session picks the input by its route, and AVAudioEngine records it, also
+/// while Flux is in the background with the audio background mode.
+/// MicConvert converts each buffer on the audio thread of the engine.
+final class MicCapture: @unchecked Sendable {
+    private let engine = AVAudioEngine()
+    /// Runs the blocking engine calls in order.
+    private let control = DispatchQueue(label: "org.omarchy.flux.mic.control")
+    private let onSamples: (UnsafeBufferPointer<Int16>) -> Void
+    private let onError: (String) -> Void
+    // Guarded by control.
+    private var stopped = false
+    private var running = false
+    private var observers: [NSObjectProtocol] = []
+    /// True while this capture holds the audio session.
+    private var holdsSession = false
+    /// Owned by the audio thread of the tap.
+    private var converter: AVAudioConverter?
+
+    /// onSamples gets each buffer of samples. onError gets a message for the
+    /// user when the recording fails after it started.
+    init(onSamples: @escaping (UnsafeBufferPointer<Int16>) -> Void, onError: @escaping (String) -> Void) {
+        self.onSamples = onSamples
+        self.onError = onError
+    }
+
+    /// The inputs are the routes of the audio session, because the iPhone
+    /// records from the route that the session picks. Nil keeps the list,
+    /// see `AudioSession.inputs`.
+    static func inputs() -> [MicInput]? {
+        AudioSession.inputs()
+    }
+
+    /// Starts recording from the route with the ID, or from the input that
+    /// iOS picks when the ID is empty. A capture that stopped does not start.
+    func start(route: String) async throws {
+        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
+            control.async { [self] in
+                done.resume(with: Result { try startOnControl(route: route) })
+            }
+        }
+    }
+
+    private func startOnControl(route: String) throws {
+        guard !stopped else { throw CancellationError() }
+        try AudioSession.activate(.mic)
+        holdsSession = true
+        AudioSession.prefer(route)
+        do {
+            try run()
+        } catch {
+            releaseSession()
+            throw error
+        }
+        let center = NotificationCenter.default
+        observers = [
+            // A new route, such as a headset, changes the format of the input.
+            center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
+                self?.control.async { self?.restart() }
+            },
+            center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { [weak self] n in
+                let type = (n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init)
+                if type == .began { self?.onError("The microphone stopped because another app took it") }
+            },
+        ]
+    }
+
+    /// Installs the tap in the format of the input and starts the engine.
+    private func run() throws {
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else { throw FluxError(MicPlugin.noMicrophoneText()) }
+        input.removeTap(onBus: 0)
+        // About 100 ms per buffer. The engine may pick another size.
+        input.installTap(onBus: 0, bufferSize: AVAudioFrameCount(format.sampleRate / 10), format: format) { [weak self] buffer, _ in
+            self?.convert(buffer)
+        }
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            input.removeTap(onBus: 0)
+            throw FluxError("The microphone did not start: \(error.localizedDescription)")
+        }
+        running = true
+    }
+
+    /// Starts the engine again in the new format of the input.
+    private func restart() {
+        guard !stopped, running else { return }
+        engine.stop()
+        do {
+            try run()
+        } catch {
+            running = false
+            onError(String(describing: error))
+        }
+    }
+
+    private func convert(_ buffer: AVAudioPCMBuffer) {
+        do {
+            let data = try MicConvert.s16Mono48k(buffer, converter: &converter)
+            data.withUnsafeBytes { onSamples($0.bindMemory(to: Int16.self)) }
+        } catch {
+            onError("The microphone audio cannot go to the computer: \(error)")
+        }
+    }
+
+    /// Stops recording. It does not block.
+    func stop() {
+        control.async { [self] in
+            stopped = true
+            for o in observers { NotificationCenter.default.removeObserver(o) }
+            observers = []
+            if running {
+                engine.stop()
+                engine.inputNode.removeTap(onBus: 0)
+                running = false
+            }
+            releaseSession()
+        }
+    }
+
+    /// Ends the use of the audio session, once. Runs on control.
+    private func releaseSession() {
+        guard holdsSession else { return }
+        holdsSession = false
+        AudioSession.deactivate(.mic)
+    }
+}
+#endif

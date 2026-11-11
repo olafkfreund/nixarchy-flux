@@ -1,0 +1,243 @@
+# Security
+
+[Documentation index](README.md)
+
+This page tells what a paired device can do on the computer and what the network exposes.
+It also tells which setting turns a feature off, when one exists.
+A paired device is an Android phone, an iPhone, or a Mac that you paired with `fluxd`.
+
+Global settings in `~/.config/flux/config.toml` apply to every paired device.
+The [per-device access settings](workflows.md#per-device-access) can restrict a feature for one device.
+A device restriction cannot enable a feature that the global settings disable.
+To remove all access for one device, [unpair it](#unpair-a-device).
+
+## Pair only with your own device
+
+The pairing key has 16 uppercase hex digits in 4 groups of 4, for example `5EE6 825F 974E D59A`.
+Both devices compute it from their 2 certificates and the time of the request.
+The key has 64 bits.
+So a device between the phone and the computer cannot find a certificate with the same key while the request is open.
+
+Before you accept a pair request, check these items:
+
+- You started the pairing yourself, now.
+- The request names your device.
+- All 16 characters are the same on both screens.
+
+If 1 item is not true, reject the request.
+These checks are the same for a phone that you pair by its address with `flux-cli pair --address`.
+`fluxd` takes the device ID from the certificate of the device at that address, and the key comparison authenticates the device.
+An earlier Flux app shows only 8 characters.
+Update Flux on the computer and on each phone, iPhone, and Mac before you pair, and compare all 16 characters.
+
+A pairing that the computer starts needs a confirmation on the computer too.
+After the device accepts, the Flux window, the notification, and `flux-cli pair` ask you to confirm the key.
+`fluxd` pins the device only after that step.
+So a device that copies the name of your phone cannot pair when you select it by mistake.
+Each accept and confirm names the key that you compared, and `fluxd` refuses it when the open pairing has another key.
+Without a key, `flux-cli accept` shows the key of the open pairing and asks you to compare it before it sends the key.
+When stdin is not a terminal, it accepts nothing and prints the command with the key.
+The Flux window and the notification also send the key with a reject.
+Without a key, `flux-cli reject` rejects the pairing that is open when it runs.
+
+Each host that `fluxd` finds on the network can send a pair request, and the request can copy the name of your phone.
+To refuse every pair request, set `pair_requests = false` in `~/.config/flux/config.toml`, then reload the service.
+`fluxd` then shows no request from the network, and you pair from the computer with `flux-cli pair` or the Flux window.
+
+After the pairing, `fluxd` pins the certificate of the device.
+It refuses each link that does not show that certificate.
+Each device in `flux-cli status --json` has a `fingerprint`: 16 hex digits from the public key of its certificate.
+`flux-cli status` shows the device ID and the fingerprint under each device.
+The device card on the page of the device in the Flux window shows the fingerprint under **Certificate**.
+`flux-cli pair` and `flux-cli accept` print the device ID and the key.
+`flux-cli unpair` prints the device ID and the fingerprint.
+See [pairing security](features.md#pairing-security) and [pairing and trust](architecture.md#pairing-and-trust).
+
+## What a paired device can do
+
+The table lists what a paired device can do on the computer with the default settings.
+It also tells which setting turns a feature off, when one exists.
+
+| Feature | Default | What a paired device can do | Turn it off |
+| --- | --- | --- | --- |
+| Files | On | Send files into `download_dir`, scans into `scan_dir`, and photos, screenshots, and signatures into `photo_dir`. `fluxd` also puts a signature on the clipboard. `fluxd` makes each name safe and never replaces a file. See [files, clipboard, and links](features.md#files-clipboard-and-links). | No setting. Unpair the device. |
+| Links and text | On | Open an `http` or `https` URL with a host in the browser. Each other value goes on the clipboard as text. | No setting. Unpair the device. |
+| Clipboard sync | `auto_clipboard = true` | Get each text and image that you copy on the computer, and put text and images on the clipboard of the computer. | `auto_clipboard = false` |
+| Browse PC | `share_home = true` | Read the home folder, `download_dir`, and `~/Documents`, `~/Pictures`, `~/Music`, and `~/Videos`. `fluxd` hides each name that starts with a dot, such as `~/.ssh`, and the Flux folders. Browse PC never shows a dot-folder, also through a symlinked folder or `download_dir`. The search of file names uses the same rules. The device cannot change a file. See [Browse PC](features.md#browse-pc). | `share_home = false`. It ends each session at once. |
+| Notifications | `notifications = true` | Show its notifications on the computer. | `notifications = false` |
+| Do Not Disturb | `sync_dnd = true` | Turn Do Not Disturb of the computer on and off. | `sync_dnd = false` |
+| Calls | `pause_media_on_call = true` | Pause the media players of the computer during a call. | `pause_media_on_call = false` |
+| Media | On | Play, pause, skip, seek, and set the volume of the media players of the computer. Select the default audio output, and set the volume and the mute state of each output. See [audio outputs](features.md#audio-outputs). | No setting. Unpair the device. |
+| Desktop commands | No commands | Run each command in `commands`. | `flux-cli commands remove ID` |
+| herdr agents | `herdr = true` | Read the list of the [herdr agents](herdr.md) and the recent output of each agent. Watch the live terminal of an agent pane, with no input. | `herdr = false` |
+| Agent control | `herdr_control = false` | Send keys and prompts to the agents, start agents, and close them. Control the [live terminal](herdr.md#live-terminal-on-android) of an agent pane: type, paste text and images, click at any cell, scroll, and resize the pane. An image paste replaces the clipboard of the computer, also with `auto_clipboard = false`. A click can press each button of the agent, for example an approval. An agent runs commands, so the device can run any command as your user. | `herdr_control = false` |
+| Terminals | `herdr_terminals = false` | Read and type in each herdr pane that has no agent, also a `sudo -i` shell or an SSH session that you opened. Watch and control the live terminal of such a pane. Needs `herdr_control`. | `herdr_terminals = false` |
+| Remote input | `remote_input = false` | Move the pointer and type in each window, also on the lock screen. See [touchpad and keyboard](remote-input.md). | `flux-cli input off` |
+| Remote desktop | `remote_desktop = false` | See the screen, each window, and the lock screen. Flux for Android can also add the extended screen `FLUX-1` and see it. See [remote desktop](remote-desktop.md). | `flux-cli desktop off`. It stops each stream at once. |
+| Webcam, microphone, and screen mirror | On | Stream its camera to the **Flux Camera** device, its microphone to a PipeWire source, and its screen to a window. The device starts each stream. The computer can ask the device to start its camera or its microphone, but the device asks its user first. See [camera and streams](camera.md). | No setting. `flux-cli webcam stop`, `flux-cli mic stop`, and `flux-cli screen stop` stop a stream. |
+| Phone speaker | On | Hear what the computer plays, while the stream runs, and mute the default output for the time of the stream. The computer shows a notification with **Stop** while the device plays its audio. See [phone as speaker](camera.md#phone-as-speaker). | No setting. `flux-cli speaker stop` stops the stream. |
+| Approvals | Off | Approve `sudo`, and `hyprlock` or `polkit-1` when you enable them, for the user who enrolled the device. See [fingerprint approval](approvals.md). | `sudo flux-cli approve disable` or `sudo flux-cli approve remove` |
+| SSH key | Off | Offer its SSH key on the ssh-agent socket of `fluxd`. Programs of your user can then ask the phone to sign an SSH login or an SSH signature. See [SSH key on the phone](#ssh-key-on-the-phone). | Turn off **SSH key** on the phone, or unpair the device |
+| Wake-on-LAN | On | Get the MAC address and the broadcast address of each network card of the computer, and send a magic packet that wakes the computer from sleep. A packet wakes the computer only when Wake-on-LAN is on for its network card. | Turn off Wake-on-LAN on the network card, for example with `sudo ethtool -s eno1 wol d`. |
+
+To change a setting, edit `~/.config/flux/config.toml`, then reload `fluxd`:
+
+```sh
+systemctl --user reload fluxd
+```
+
+The **Access** card of the Flux window turns remote input and the remote desktop on and off for every device, with **Turn on** and **Turn off**.
+A script can call the IPC method `settings.set`. See [IPC](ipc.md).
+See [configuration](configuration.md#settings) for each setting.
+
+The apps ask for the screen lock, Face ID, or Touch ID before the touchpad, the remote desktop, agent replies, and the live terminal.
+This check protects the app only, and `fluxd` cannot see it.
+The settings in `config.toml` are the checks that `fluxd` makes.
+So turn on `remote_input`, `remote_desktop`, `herdr_control`, and `herdr_terminals` only when you trust each paired device.
+
+## What a device sends to the computer
+
+Flux for Android has 6 switches that share data of the device with the computers.
+They are on the **Sync** screen in **Computers**:
+
+- **Text messages** lets each paired computer read your conversations and send text messages.
+- **Share notifications** sends the notifications of other apps, each with the icon of its app as a PNG of 96 × 96 pixels. `fluxd` accepts an icon of at most 256 × 256 pixels, decodes it, and encodes it again before the notification server reads it. A notification whose visibility, or whose channel lock screen visibility, is `VISIBILITY_SECRET` stays on the phone. The lock screen setting of the whole phone does not change what Flux sends. A button that needs the phone unlock also stays on the phone.
+- **Send new screenshots** and **Send new photos** send new images of the camera app and the screenshot tool.
+- **Sync clipboard** sends the text and the images that you copy while Flux is on the screen. A 1-tap path sends a copy from another app. See [send a copy from another app](features.md#send-a-copy-from-another-app).
+- **Call alerts** sends the state of calls, and with more permissions the number and the name of the caller.
+
+Each switch applies to every paired computer, not only to the computer whose page shows it.
+See [sync switches](android-setup.md#sync-switches).
+Flux for iOS and Flux for macOS send less, because their systems give apps less access.
+See [Flux for iOS](ios.md#features) and [Flux for macOS](macos.md#features).
+
+The computer can send files, links, text, and notifications to a paired device.
+Each app opens a link or a file from the computer only after a tap.
+Flux for Android installs no app that the computer sends, except a newer Flux with the signing key of the installed Flux, after your tap.
+
+The computer can ask a paired device to start its camera or its microphone, or to play the audio of the computer.
+`flux-cli webcam start`, `flux-cli mic start`, `flux-cli speaker start`, and **Start** in the Flux window send the request.
+The device never turns on its camera or its microphone without a tap on the device, also while Flux is on its screen.
+The device plays the audio of the computer only after a tap on **Play on phone**.
+The tap is the consent.
+`fluxd` sends at most 1 request of each kind to a device in 3 seconds, and the device ignores a request that comes sooner.
+See [start from the computer](camera.md#start-from-the-computer).
+
+## SSH key on the phone
+
+Flux for Android can keep an SSH key for SSH logins and Git signatures. See [SSH key on the phone](ssh.md).
+The key is off until you turn on **SSH key** on the phone.
+These rules apply while it is on:
+
+- The private key stays in the Android Keystore, in StrongBox when the phone has it. No computer and no backup gets it.
+- Each signature needs a new check on the phone: a strong biometric, or the screen lock on Android 11 and later. 1 check signs 1 request.
+- The screen lock can sign. This differs from [fingerprint approval](approve.md), where only a biometric can approve. So anyone who knows the screen lock and has the phone can approve a request.
+- The phone signs only 2 kinds of data: an SSH login request with its key, and the signed data of an SSH signature. `fluxd` and the phone both refuse each other data.
+- The phone shows what the request does, the name of the computer, and the program that asks. The phone reads the action from the data that it signs. The program name comes from `fluxd`. A program can choose its own command line, so the name is only a hint.
+- A login request does not name the server. A program can ask for a login to another server than you expect. Approve a request only right after you started the program.
+- The ssh-agent socket has mode 0600 in the runtime folder of Flux, which has mode 0700. `fluxd` accepts only processes of your user and of root.
+- Code that runs as your user can use the socket, and it can replace `fluxd`. It can send requests to the phone, but it cannot sign without your approval, and it cannot read the private key.
+- Each paired computer that runs `fluxd` can send sign requests to the phone. Unpair a computer that you do not trust.
+- With agent forwarding, `ssh -A`, the remote host can ask for signatures too. Each request still needs your approval.
+- A sign request waits at most 30 seconds. When the program stops or the link closes, the request ends on the phone.
+- When the screen lock of the phone goes away, Android makes the key invalid, and the phone deletes it.
+- If you lose the phone, remove its public key from each server and Git host.
+
+## Network ports
+
+`fluxd` listens on these ports on all network interfaces:
+
+| Port | Use |
+| --- | --- |
+| The first free TCP port from 12100 to 12108 | Links from devices |
+| UDP 12100 | Identity broadcasts from devices |
+
+`flux-cli status` shows the TCP port in its first line.
+`fluxd` also publishes the `_flux._udp` service through Avahi, and it sends its identity to UDP port 12100 of the local networks.
+For a device without `flux.tunnel`, `fluxd` listens for a payload on a TCP port from 12070 to 12099 on the local address of the link.
+Flux and KDE Connect use different ports, so both can run on the same computer at the same time.
+
+`fluxd` opens the links to the devices itself, so Flux needs no inbound firewall rule.
+The default Omarchy firewall blocks inbound traffic to the Flux ports, and it lets mDNS in.
+With this firewall, `fluxd` finds the devices through mDNS and the [extra addresses](tailscale.md).
+The UDP broadcasts of the devices reach `fluxd` only without such a firewall.
+To see the rules, run:
+
+```sh
+sudo ufw status verbose
+```
+
+Without such a firewall, each host that reaches the computer can open a link to `fluxd` and send a pair request.
+The same is true for a rule that lets in the traffic of an interface, for example `ufw allow in on tailscale0` or a rule for a ZeroTier interface.
+The [limits below](#devices-that-are-not-paired) apply to such hosts.
+
+The Android phone, the iPhone, and the Mac also listen on TCP ports 12100 to 12108 for links.
+They listen on TCP ports 12070 to 12099 for payloads, tunnels, and streams.
+Flux for Android takes a link from a computer that is not paired only while Flux is on the screen or while it scans.
+
+## Album art
+
+Besides the paired computers, the apps connect to 1 other kind of host.
+The **Media** screen loads the album art from the `https` address that a player on the computer reports.
+That host is usually a server of the music or video service, and it sees the IP address of the device.
+`fluxd` sends only `https` addresses to the devices, never a `file:` address with a local path.
+Without an address, the screen shows no art and loads nothing.
+
+## Devices that are not paired
+
+Any host on the network can send an identity and open a link.
+`fluxd` ignores each packet of a device that is not paired, except a pair request.
+It keeps these limits for such devices:
+
+- A link reads lines of at most 64 KiB.
+- `fluxd` keeps at most 8 such links, and 2 for each address. A new link closes the oldest one.
+- A link without a pair request closes after 2 minutes.
+- `fluxd` takes 1 pair request for each device in 2 seconds, shows 1 notification for each device, and keeps at most 4 open requests. At most 2 of them come from 1 address.
+- When a request of a device ends with a withdraw, a reject, a timeout, or the end of its connection, `fluxd` refuses a new request of that device for 30 seconds.
+- When `fluxd` refuses a request because too many requests are open, the Flux window shows the name and the address of the device.
+- Dials to these devices share a limit of 16 at the same time. Dials to paired devices do not count, so these devices cannot keep a paired device offline.
+
+See [limits for devices that are not paired](architecture.md#limits-for-devices-that-are-not-paired) for the complete list.
+
+## Unpair a device
+
+To unpair a device from the computer, run:
+
+```sh
+flux-cli unpair "Pixel 8"
+```
+
+A name matches only a device that is paired or connected, and a paired device comes first.
+When the name still matches more than 1 device, the command returns the `ambiguous` error with the device IDs.
+See [pair and discover](cli.md#pair-and-discover) for the match rule of each command.
+Give the device ID in place of the name.
+
+An unpair from either side ends every session of the device:
+
+- `fluxd` sends the unpair message, `pair: false`, to the device and closes the link.
+- Browse PC, the streams, the remote desktop, and remote input stop. `fluxd` drops the input that waits and releases a held button.
+- `fluxd` sends no answer of a herdr read, a reply, or a start that still runs.
+- `fluxd` removes the notifications, the messages, the battery state, and the extra addresses of the device. It closes the desktop notifications of the device, because their buttons no longer reach it.
+
+When `fluxd` cannot save `devices.json`, the command returns the `not_saved` error.
+The device is then unpaired only until `fluxd` restarts, because `~/.local/share/flux/devices.json` still has it.
+Fix the cause in the error, for example the permissions of the file.
+Then restart `fluxd` and unpair the device again:
+
+```sh
+systemctl --user restart fluxd
+flux-cli unpair "Pixel 8"
+```
+
+After an unpair, the device must send a new pair request, and you must accept it again.
+
+If you lose a device, unpair it on the computer at once.
+If the phone has an [SSH key](ssh.md), remove its public key from each server and Git host.
+If the device can approve `sudo`, also remove its key:
+
+```sh
+sudo flux-cli approve remove
+```
+
+An unpair on the Android phone, the Mac, or the iPhone deletes its approval key for that computer.
+The key file on the computer stays until you run `sudo flux-cli approve remove`.

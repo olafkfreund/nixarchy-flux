@@ -27,6 +27,16 @@ const (
 	enrollTimeout         = 120
 )
 
+// The longest signature and public key in an answer of a phone, in bytes.
+// An RSA 2048 key of Windows Hello signs with 256 bytes, and its
+// SubjectPublicKeyInfo has 294 bytes. An EC P-256 key needs at most 72 and 91
+// bytes. The helper checks the key and the signature, so these limits only
+// keep the answers small.
+const (
+	approveMaxSignature = 256
+	approveMaxPublicKey = 512
+)
+
 // waitSlice is the longest time 1 approve.wait call blocks. A longer wait
 // returns the state "pending", and the client calls again. The flux CLI
 // gives up on a call after 60 seconds.
@@ -76,6 +86,19 @@ func (b *approvalBook) add(a *approval) error {
 	a.done = make(chan struct{})
 	b.byID[a.id] = a
 	return nil
+}
+
+// pending returns the number of requests that wait for an answer.
+func (b *approvalBook) pending() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, a := range b.byID {
+		if a.result == nil && time.Now().Before(a.deadline) {
+			n++
+		}
+	}
+	return n
 }
 
 // deliver stores the answer of a phone. It accepts only an answer from the
@@ -185,7 +208,7 @@ func (d *Daemon) approveDevice(dev *Device) error {
 		return offline(dev)
 	}
 	if !dev.accepts(proto.TypeFluxApprove) {
-		return apiErr("unsupported", "Update Flux for Android on %s to approve with a fingerprint", dev.Name)
+		return apiErr("unsupported", "Update Flux on %s to approve sudo", dev.Name)
 	}
 	return nil
 }
@@ -223,7 +246,7 @@ func (d *Daemon) ApproveRequest(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	d.logf("approval: %s for %s asks %s", req.Service, req.User, dev.Name)
-	return map[string]any{"id": a.id, "timeout": timeout, "name": dev.Name}, nil
+	return approve.Started{ID: a.id, Timeout: timeout, Name: dev.Name}, nil
 }
 
 // ApproveEnroll asks a phone to make a key for approvals.
@@ -255,7 +278,29 @@ func (d *Daemon) ApproveEnroll(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	d.logf("approval: enrollment for %s asks %s", e.User, dev.Name)
-	return map[string]any{"id": a.id, "device": dev.ID, "name": dev.Name, "timeout": enrollTimeout}, nil
+	return approve.Started{ID: a.id, Device: dev.ID, Name: dev.Name, Timeout: enrollTimeout}, nil
+}
+
+// startApproval starts an approval or an enrollment. The IPC server ends
+// ctx when the connection of the helper closes, and the request then ends
+// and closes on the phone. So a helper that stops does not keep the phone
+// busy until the timeout.
+func (d *Daemon) startApproval(ctx context.Context, method string, raw json.RawMessage) (any, error) {
+	start := d.ApproveRequest
+	if method == "approve.enroll" {
+		start = d.ApproveEnroll
+	}
+	res, err := start(raw)
+	if s, ok := res.(approve.Started); ok && err == nil {
+		d.cancelOnClose(ctx, s.ID)
+	}
+	return res, err
+}
+
+// cancelOnClose ends the request id when ctx ends. After an answer, the
+// request is gone, and the cancel does nothing.
+func (d *Daemon) cancelOnClose(ctx context.Context, id string) {
+	context.AfterFunc(ctx, func() { _ = d.ApproveCancel(id) })
 }
 
 // ApproveWait waits for the answer of the phone. An expired request is
@@ -309,9 +354,9 @@ func (d *Daemon) handleApprove(dev *Device, p *proto.Packet) {
 		r = approvalResult{State: "denied"}
 	case b.Kind == "response" && b.Error != "":
 		r = approvalResult{State: "failed", Message: cleanMessage(b.Error)}
-	case b.Kind == "response" && validBase64(b.Signature, 128):
+	case b.Kind == "response" && validBase64(b.Signature, approveMaxSignature):
 		r = approvalResult{State: "approved", Signature: b.Signature}
-	case b.Kind == "enrolled" && validBase64(b.Signature, 128) && validBase64(b.PublicKey, 256):
+	case b.Kind == "enrolled" && validBase64(b.Signature, approveMaxSignature) && validBase64(b.PublicKey, approveMaxPublicKey):
 		r = approvalResult{State: "enrolled", Signature: b.Signature, PublicKey: b.PublicKey}
 	default:
 		d.logf("approval: %s sent an answer that fluxd does not know", dev.Name)

@@ -20,6 +20,11 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private let control = DispatchQueue(label: "org.omarchy.flux.camera.control")
     private let onFrame: (CVPixelBuffer, Int) -> Void
     private let onError: @Sendable (String) -> Void
+    #if os(iOS)
+    /// Runs when the camera runs again after iOS interrupted it, which
+    /// `onError` reported.
+    var onResume: (@Sendable () -> Void)?
+    #endif
 
     // Owned by the control queue.
     private var session: AVCaptureSession?
@@ -47,6 +52,10 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     /// The video devices that Flux can stream, built-in cameras first.
     static func available() -> [CameraInfo] {
+        #if os(iOS)
+        // The back and front cameras, like Flux for Android.
+        return PhoneCameras.available().map { CameraInfo(id: $0.id, uniqueID: $0.uniqueID, name: $0.name, isContinuity: false) }
+        #else
         var types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera, .external]
         // Without this Info.plist key, Continuity Camera reports itself as a
         // built-in camera and the first type finds it.
@@ -69,9 +78,10 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                 let label = n == 1 ? name : "\(name) \(n)"
                 return CameraInfo(id: label.lowercased(), uniqueID: d.uniqueID, name: label, isContinuity: d.isContinuityCamera)
             }
+        #endif
     }
 
-    /// Asks for the camera permission when macOS has not asked yet.
+    /// Asks for the camera permission when the system has not asked yet.
     static func authorize() async throws {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -81,10 +91,12 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         default:
             break
         }
-        throw FluxError(accessMessage)
+        throw FluxError(accessMessage())
     }
 
-    static let accessMessage = "Flux has no access to the camera. Allow Flux in System Settings, Privacy & Security, Camera."
+    static func accessMessage(platform: FluxPlatform = .current) -> String {
+        "Flux has no access to the camera. Allow Flux in \(platform.settingsApp), Privacy & Security, Camera."
+    }
 
     static var accessDenied: Bool {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
@@ -189,6 +201,19 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                 onError("\(name) stopped: \(error?.localizedDescription ?? "unknown error")")
             },
         ]
+        #if os(iOS)
+        // iOS takes the camera from a session, for example for another app
+        // or a call, and gives it back later. The session runs again by itself.
+        observers += [
+            NotificationCenter.default.addObserver(forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: nil) { [onError] note in
+                let reason = (note.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int).flatMap(AVCaptureSession.InterruptionReason.init)
+                onError(Self.interruptionText(reason))
+            },
+            NotificationCenter.default.addObserver(forName: AVCaptureSession.interruptionEndedNotification, object: session, queue: nil) { [weak self] _ in
+                self?.onResume?()
+            },
+        ]
+        #endif
         session.startRunning()
         let d = device.activeFormat.formatDescription.dimensions
         FluxLog.plugin.info("camera \(camera.name, privacy: .public) runs at \(d.width)x\(d.height)")
@@ -214,6 +239,18 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         onFrame(buffer, lock.withLock { rotation })
     }
+
+    #if os(iOS)
+    /// Why the camera paused, for the user.
+    static func interruptionText(_ reason: AVCaptureSession.InterruptionReason?) -> String {
+        switch reason {
+        case .videoDeviceInUseByAnotherClient: "The camera paused because another app uses it"
+        case .videoDeviceNotAvailableInBackground: "The camera paused because Flux left the screen"
+        case .videoDeviceNotAvailableDueToSystemPressure: "The camera paused because the iPhone is too hot or busy"
+        default: "The camera paused because iOS took it"
+        }
+    }
+    #endif
 
     /// The smallest format with 30 frames per second that covers shortSide,
     /// else the largest one.

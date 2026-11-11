@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.UiModeManager
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
@@ -21,8 +22,10 @@ import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import org.omarchy.flux.R
+import org.omarchy.flux.protocol.groupKey
 import org.omarchy.flux.ui.MainActivity
 import java.io.OutputStream
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Small wrappers around Android APIs that the core uses. */
 object Android {
@@ -31,15 +34,31 @@ object Android {
     const val CHANNEL_RING = "flux.ring"
     const val CHANNEL_COMPUTER = "flux.computer"
     private const val TAG_COMPUTER = "computer"
+
+    /** The most notifications that 1 computer shows at a time. A new one removes the oldest. */
+    const val MAX_COMPUTER_NOTIFICATIONS = 10
     const val CHANNEL_APPROVE = "flux.approve"
     const val CHANNEL_AGENT_INPUT = "flux.agents.input"
     const val CHANNEL_AGENT_DONE = "flux.agents.done"
+    const val CHANNEL_STREAM = "flux.stream"
+    const val CHANNEL_LIVE = "flux.live"
     private const val TAG_AGENT = "agent"
     const val ID_SERVICE = 1
     const val ID_PAIR = 2
     const val ID_RING = 3
     const val ID_APPROVE = 4
-    private var nextId = 100
+    const val ID_STREAMS = 5
+    const val ID_SSH = 6
+
+    /** The request code of the PendingIntent that opens Chats. */
+    private const val ID_OPEN_CHATS = 20
+
+    /**
+     * The ID of the next event notification. Threads share it, and it starts
+     * from the clock, so that a new process does not replace the
+     * notifications of the last one.
+     */
+    private val nextId = AtomicInteger(1000 + ((System.currentTimeMillis() / 1000) % 1_000_000_000L).toInt())
 
     fun deviceName(context: Context): String =
         Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)?.takeIf { it.isNotBlank() }
@@ -69,21 +88,58 @@ object Android {
 
     /**
      * Reads the clipboard as text. It returns null for an image. Android
-     * returns null when the app has no focus.
+     * returns null when the app has no focus. With [automatic], it reads
+     * only plain text, and it returns null for a clip that the app marks as
+     * sensitive, for example a password. A content address can stream
+     * without end, so the clipboard sync does not read it on the main thread.
      */
-    fun clipboardText(context: Context): String? {
+    fun clipboardText(context: Context, automatic: Boolean = false): String? {
         val cm = context.getSystemService(ClipboardManager::class.java) ?: return null
         val clip = cm.primaryClip ?: return null
         if (clip.itemCount == 0) return null
         val item = clip.getItemAt(0)
+        if (automatic) {
+            if (sensitive(clip.description)) return null
+            return item.text?.toString()
+        }
         // For an image, coerceToText returns the content:// address.
         if (item.text == null && item.uri != null && clip.description.hasMimeType("image/*")) return null
         return item.coerceToText(context)?.toString()
     }
 
-    fun setClipboard(context: Context, text: String) {
-        val cm = context.getSystemService(ClipboardManager::class.java) ?: return
-        cm.setPrimaryClip(ClipData.newPlainText("Flux", text))
+    /** True when the app that made the clip marks it as sensitive. Android 13 names the flag, but earlier apps set it too. */
+    private fun sensitive(desc: ClipDescription?): Boolean =
+        desc?.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true
+
+    /**
+     * True when the app that made the current clip marks it as sensitive.
+     * A manual send uses it to tell a sensitive clip from an empty clipboard.
+     */
+    fun clipboardSensitive(context: Context): Boolean {
+        val cm = context.getSystemService(ClipboardManager::class.java) ?: return false
+        return runCatching { sensitive(cm.primaryClipDescription) }.getOrDefault(false)
+    }
+
+    /**
+     * The time that ClipboardService set on the current clip, in
+     * milliseconds, or 0 when the clipboard is empty. The system sets a new
+     * time on each clip. The clipboard sync drops a clip whose time matches
+     * the last clip that Flux sent, so 1 copy goes out once.
+     */
+    fun clipTimestamp(context: Context): Long {
+        val cm = context.getSystemService(ClipboardManager::class.java) ?: return 0L
+        return runCatching { cm.primaryClipDescription?.timestamp ?: 0L }.getOrDefault(0L)
+    }
+
+    /**
+     * Puts text on the clipboard. It returns false when Android refuses the
+     * clip, for example a clip that is too large for the system.
+     */
+    fun setClipboard(context: Context, text: String): Boolean {
+        val cm = context.getSystemService(ClipboardManager::class.java) ?: return false
+        return runCatching { cm.setPrimaryClip(ClipData.newPlainText("Flux", text)) }
+            .onFailure { android.util.Log.w("FluxClipboard", "setting the clipboard failed", it) }
+            .isSuccess
     }
 
     /**
@@ -108,18 +164,20 @@ object Android {
     /** Puts the image at [uri] on the clipboard. Flux must own the address. */
     fun setClipboardImage(context: Context, uri: Uri) {
         val cm = context.getSystemService(ClipboardManager::class.java) ?: return
-        cm.setPrimaryClip(ClipData.newUri(context.contentResolver, "Flux", uri))
+        runCatching { cm.setPrimaryClip(ClipData.newUri(context.contentResolver, "Flux", uri)) }
+            .onFailure { android.util.Log.w("FluxClipboard", "setting the clipboard image failed", it) }
     }
 
     /**
      * Android 12 and later: sets the night mode of the app, so that the
      * system splash screen and the -night resources match the theme.
-     * [ThemeMode.System] removes the override.
+     * [ThemeMode.System] removes the override. [ComputerThemes.applyNightMode]
+     * gives the night mode of [ThemeMode.Computer].
      */
     fun setNightMode(context: Context, mode: ThemeMode) {
         if (Build.VERSION.SDK_INT < 31) return
         val night = when (mode) {
-            ThemeMode.System -> UiModeManager.MODE_NIGHT_AUTO
+            ThemeMode.System, ThemeMode.Computer -> UiModeManager.MODE_NIGHT_AUTO
             ThemeMode.Light -> UiModeManager.MODE_NIGHT_NO
             ThemeMode.Dark -> UiModeManager.MODE_NIGHT_YES
         }
@@ -151,9 +209,17 @@ object Android {
         nm.createNotificationChannel(NotificationChannel(CHANNEL_AGENT_DONE, "Agents that finish", NotificationManager.IMPORTANCE_DEFAULT).apply {
             description = "A coding agent in herdr on a computer finished its work"
         })
+        nm.createNotificationChannel(NotificationChannel(CHANNEL_STREAM, "Stream requests", NotificationManager.IMPORTANCE_HIGH).apply {
+            description = "A computer asks to start the webcam or the mic of this phone"
+        })
+        nm.createNotificationChannel(NotificationChannel(CHANNEL_LIVE, "Live streams", NotificationManager.IMPORTANCE_LOW).apply {
+            description = "Shows while the webcam or the mic of this phone streams to a computer"
+            setShowBadge(false)
+        })
     }
 
-    private fun openApp(context: Context): PendingIntent = PendingIntent.getActivity(
+    /** Opens Flux on its current screen. */
+    fun openApp(context: Context): PendingIntent = PendingIntent.getActivity(
         context, 0, Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
@@ -166,7 +232,7 @@ object Android {
         val n = NotificationCompat.Builder(context, CHANNEL_EVENTS)
             .setSmallIcon(R.drawable.ic_stat_flux)
             .setContentTitle("Pair with $name?")
-            .setContentText("Open Flux and check the code $key")
+            .setContentText("Open Flux and compare the key ${groupKey(key)}")
             .setContentIntent(openApp(context))
             .setAutoCancel(true)
             .setTimeoutAfter(INCOMING_TIMEOUT_SECONDS * 1000)
@@ -177,8 +243,9 @@ object Android {
     @Suppress("MissingPermission")
     fun showEvent(context: Context, title: String, text: String, intent: Intent? = null) {
         if (!canNotify(context)) return
+        val id = nextId.getAndIncrement()
         val pi = intent?.let {
-            PendingIntent.getActivity(context, nextId, it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE)
+            PendingIntent.getActivity(context, id, it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE)
         } ?: openApp(context)
         val n = NotificationCompat.Builder(context, CHANNEL_EVENTS)
             .setSmallIcon(R.drawable.ic_stat_flux)
@@ -187,16 +254,23 @@ object Android {
             .setContentIntent(pi)
             .setAutoCancel(true)
             .build()
-        NotificationManagerCompat.from(context).notify(nextId++, n)
+        NotificationManagerCompat.from(context).notify(id, n)
     }
 
+    /** The tag of the notifications from 1 computer. */
+    private fun computerTag(deviceId: String) = "$TAG_COMPUTER:$deviceId"
+
     /**
-     * Shows a notification from a computer. The notification listener
-     * skips the notifications of Flux, so it does not go back to the computer.
+     * Shows a notification from the computer [deviceId]. The notification
+     * listener skips the notifications of Flux, so it does not go back to
+     * the computer. The user can always remove it, whatever the computer
+     * asks. Each computer shows at most [MAX_COMPUTER_NOTIFICATIONS], so
+     * that a computer cannot use up the notifications of the app.
      */
     @Suppress("MissingPermission")
-    fun showFromComputer(context: Context, n: ComputerNotification) {
+    fun showFromComputer(context: Context, deviceId: String, n: ComputerNotification) {
         if (!canNotify(context)) return
+        val tag = computerTag(deviceId)
         val b = NotificationCompat.Builder(context, CHANNEL_COMPUTER)
             .setSmallIcon(R.drawable.ic_stat_flux)
             .setContentTitle(n.title)
@@ -204,19 +278,59 @@ object Android {
             .setWhen(n.time)
             .setShowWhen(true)
             .setContentIntent(openApp(context))
-            .setAutoCancel(n.clearable)
-            .setOngoing(!n.clearable)
+            .setAutoCancel(true)
         if (n.text.isNotEmpty()) {
             b.setContentText(n.text).setStyle(NotificationCompat.BigTextStyle().bigText(n.text))
         }
-        NotificationManagerCompat.from(context).notify(TAG_COMPUTER, n.notificationId, b.build())
+        runCatching {
+            val nm = context.getSystemService(NotificationManager::class.java)
+            val shown = nm.activeNotifications.filter { it.tag == tag && it.id != n.notificationId }.sortedBy { it.postTime }
+            shown.take(maxOf(0, shown.size - (MAX_COMPUTER_NOTIFICATIONS - 1))).forEach { nm.cancel(tag, it.id) }
+        }
+        NotificationManagerCompat.from(context).notify(tag, n.notificationId, b.build())
     }
 
-    fun cancelFromComputer(context: Context, n: ComputerNotification) {
-        NotificationManagerCompat.from(context).cancel(TAG_COMPUTER, n.notificationId)
+    /** Removes the notification [id] from the computer [deviceId], when the computer cancels it. */
+    fun cancelFromComputer(context: Context, deviceId: String, id: String) {
+        // The same key as ComputerNotification.notificationId.
+        NotificationManagerCompat.from(context).cancel(computerTag(deviceId), "$deviceId:$id".hashCode())
+    }
+
+    /** Removes all notifications from the computer [deviceId], for example after an unpair. */
+    fun cancelFromComputer(context: Context, deviceId: String) {
+        val tag = computerTag(deviceId)
+        runCatching {
+            val nm = context.getSystemService(NotificationManager::class.java)
+            nm.activeNotifications.filter { it.tag == tag }.forEach { nm.cancel(tag, it.id) }
+        }
     }
 
     private fun agentId(deviceId: String, pane: String) = "$deviceId|$pane".hashCode()
+
+    /**
+     * Opens the chat of the agent in [pane] on the computer [deviceId]. The
+     * agent notification and the agents widget use it. Back goes to Chats.
+     */
+    fun openAgent(context: Context, deviceId: String, pane: String): PendingIntent {
+        // The action and the identifier make this PendingIntent differ from
+        // each other PendingIntent of Flux, also when the hash of the pane
+        // is the same as another request code.
+        val open = Intent(context, MainActivity::class.java)
+            .setAction(MainActivity.ACTION_OPEN_AGENT)
+            .setIdentifier("$deviceId|$pane")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .putExtra(MainActivity.EXTRA_DEVICE, deviceId)
+            .putExtra(MainActivity.EXTRA_PANE, pane)
+        return PendingIntent.getActivity(context, agentId(deviceId, pane), open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    }
+
+    /** Opens Chats, the first destination of the app. The header of the agents widget uses it. */
+    fun openChats(context: Context): PendingIntent = PendingIntent.getActivity(
+        context, ID_OPEN_CHATS,
+        Intent(context, MainActivity::class.java).setAction(MainActivity.ACTION_OPEN_CHATS)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
 
     /**
      * Shows that a herdr agent needs input or finished. Each pane has 1
@@ -228,11 +342,7 @@ object Android {
         val id = agentId(deviceId, agent.pane)
         val blocked = agent.status == AgentStatus.Blocked
         val where = agent.project.ifEmpty { agent.workspace }.ifEmpty { agent.pane }
-        val open = Intent(context, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            .putExtra(MainActivity.EXTRA_DEVICE, deviceId)
-            .putExtra(MainActivity.EXTRA_PANE, agent.pane)
-        val pi = PendingIntent.getActivity(context, id, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val pi = openAgent(context, deviceId, agent.pane)
         val b = NotificationCompat.Builder(context, if (blocked) CHANNEL_AGENT_INPUT else CHANNEL_AGENT_DONE)
             .setSmallIcon(R.drawable.ic_stat_flux)
             .setContentTitle(if (blocked) "${agent.agent} in $where needs input" else "${agent.agent} in $where finished")

@@ -127,7 +127,11 @@ final class ApproveMessageTests: XCTestCase {
         let r = try XCTUnwrap(ApproveMessage.parse(p, computerId: "pc1", computerName: "omarchy-xps"))
         XCTAssertEqual(r.kind, .enroll)
         XCTAssertEqual(r.service, "")
+        #if os(macOS)
         XCTAssertEqual(ApproveMessage.question(r), "Use this Mac to approve sudo for user alice on host omarchy-xps?")
+        #else
+        XCTAssertEqual(ApproveMessage.question(r), "Use this iPhone to approve sudo for user alice on host omarchy-xps?")
+        #endif
     }
 
     func testFreshness() {
@@ -136,6 +140,24 @@ final class ApproveMessageTests: XCTestCase {
         XCTAssertTrue(ApproveMessage.fresh(request, now: request.time + 600))
         XCTAssertFalse(ApproveMessage.fresh(request, now: request.time + 601))
         XCTAssertFalse(ApproveMessage.fresh(request, now: request.time - 601))
+    }
+
+    /// A time near Int64.min made the subtraction trap. Such a time is not fresh.
+    func testFreshnessCannotOverflow() {
+        for time in [Int64.min, Int64.min + 1, Int64.max, 0, -1] {
+            var r = request
+            r.time = time
+            XCTAssertFalse(ApproveMessage.fresh(r, now: 1_790_000_000), "\(time)")
+        }
+        XCTAssertFalse(ApproveMessage.fresh(request, now: Int64.min))
+        XCTAssertFalse(ApproveMessage.fresh(request, now: Int64.max))
+    }
+
+    func testParseRefusesImpossibleTimes() {
+        let times: [Any] = [Int64.min, Int64(0), Int64(-1), Int64(1) << 41, "1e19", 1e300]
+        for time in times {
+            XCTAssertNil(ApproveMessage.parse(packet(["time": time]), computerId: "pc1", computerName: "pc"), "\(time)")
+        }
     }
 
     func testAnswerPackets() throws {

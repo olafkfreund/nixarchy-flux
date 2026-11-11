@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.StateFlow
 import org.omarchy.flux.core.Device
 import org.omarchy.flux.core.FluxCore
 import org.omarchy.flux.net.Payload
-import org.omarchy.flux.net.Tls
+import org.omarchy.flux.net.WrongPeerException
 import org.omarchy.flux.protocol.Packet
 import org.omarchy.flux.protocol.Types
 import java.io.OutputStream
@@ -29,11 +29,16 @@ private const val CONNECT_TIMEOUT_MS = 10_000
 object WebcamSession {
     enum class Phase { Idle, Connecting, Starting, Live, Error }
 
+    /**
+     * [device] and [label] name the video device on the computer.
+     * [deviceId] is the computer of a stream that starts or runs.
+     */
     data class Status(
         val phase: Phase = Phase.Idle,
         val message: String = "",
         val device: String = "",
         val label: String = "",
+        val deviceId: String? = null,
     ) {
         val active: Boolean get() = phase == Phase.Connecting || phase == Phase.Starting || phase == Phase.Live
     }
@@ -49,6 +54,11 @@ object WebcamSession {
 
     private val watchdog = Executors.newSingleThreadScheduledExecutor { Thread(it, "flux-webcam-watch").apply { isDaemon = true } }
     private val lock = Any()
+    /**
+     * Keeps [Listener.onConnected] and [Listener.onEnded] apart. A stop that
+     * comes while the encoder starts waits, and then frees the new encoder.
+     */
+    private val listenerLock = Any()
     private var deviceId: String? = null
     private var server: ServerSocket? = null
     private var socket: SSLSocket? = null
@@ -67,15 +77,16 @@ object WebcamSession {
             ++attempt
         }
         val name = core.device(deviceId)?.identity?.deviceName ?: "the computer"
-        _status.value = Status(Phase.Connecting, "Waiting for $name…")
+        _status.value = Status(Phase.Connecting, "Waiting for $name…", deviceId = deviceId)
         core.io.execute {
             try {
                 val d = core.device(deviceId) ?: error("$name is not known")
                 if (Types.FLUX_WEBCAM !in d.identity.incoming) error("Update Flux on $name to use this phone as a webcam")
+                if (!d.paired) error("$name is not paired")
                 val cert = d.certificate ?: error("$name is not connected")
+                val peer = d.link?.address ?: error("$name is not connected")
                 val tls = core.tls ?: error("The network is not ready")
                 val srv = Payload.openServer()
-                srv.soTimeout = CONNECT_TIMEOUT_MS
                 if (!current(id)) return@execute srv.close()
                 synchronized(lock) { server = srv }
                 if (!d.send(WebcamPackets.start(srv.localPort, width, height))) {
@@ -84,14 +95,8 @@ object WebcamSession {
                 }
                 synchronized(lock) { if (attempt == id) announced = true }
                 d.send(WebcamPackets.config(WebcamSettings.config.value, WebcamSettings.caps.value))
-                val raw = srv.accept()
-                raw.tcpNoDelay = true
-                val ssl = tls.wrap(raw, server = true)
-                val peer = Tls.peerCertificate(ssl)
-                if (peer == null || !peer.encoded.contentEquals(cert.encoded)) {
-                    runCatching { ssl.close() }
-                    error("The connection did not come from $name")
-                }
+                // Connections from other hosts or with another certificate close, and the wait goes on.
+                val ssl = Payload.acceptPinned(srv, tls, cert, peer, CONNECT_TIMEOUT_MS)
                 runCatching { srv.close() }
                 val l = synchronized(lock) {
                     if (attempt != id) null else {
@@ -100,17 +105,28 @@ object WebcamSession {
                         this.listener
                     }
                 } ?: return@execute runCatching { ssl.close() }.let { }
-                _status.value = Status(Phase.Starting, "Starting Flux Camera on $name…")
-                l.onConnected(ssl.outputStream, width, height)
+                synchronized(listenerLock) {
+                    // A stop can come before the lock. Then end() has closed the socket.
+                    if (!current(id)) return@execute
+                    _status.value = Status(Phase.Starting, "Starting Flux Camera on $name…", deviceId = deviceId)
+                    l.onConnected(ssl.outputStream, width, height)
+                }
                 watch(core, d, id)
             } catch (e: Exception) {
                 if (!current(id)) return@execute
                 Log.i(TAG, "webcam start failed: ${e.message}")
-                val message = if (e is java.net.SocketTimeoutException) "$name did not connect. Update Flux on the computer." else e.message ?: "The webcam could not start"
+                val message = when (e) {
+                    is java.net.SocketTimeoutException -> "$name did not connect. Update Flux on the computer."
+                    is WrongPeerException -> "The connection did not come from $name"
+                    else -> e.message ?: "The webcam could not start"
+                }
                 end(core, notify = true, Status(Phase.Error, message), id)
             }
         }
     }
+
+    /** True while a stream to [deviceId] runs or starts. */
+    fun runsTo(deviceId: String): Boolean = _status.value.active && synchronized(lock) { this.deviceId == deviceId }
 
     /**
      * Starts the stream again with a new frame size: "stop", then a new
@@ -135,6 +151,21 @@ object WebcamSession {
     }
 
     /**
+     * Stops the stream when [listener] runs it, and tells the computer.
+     * Without a stream, the status goes back to idle, as after [stop].
+     */
+    fun stopOwnedBy(core: FluxCore, listener: Listener) {
+        val id = synchronized(lock) { attempt.takeIf { this.listener == null || this.listener === listener } } ?: return
+        end(core, notify = true, Status(), id)
+    }
+
+    /** Stops the stream when it goes to [deviceId], for example after an unpair. */
+    fun stopFor(core: FluxCore, deviceId: String, message: String) {
+        val id = synchronized(lock) { attempt.takeIf { this.deviceId == deviceId } } ?: return
+        end(core, notify = false, Status(Phase.Error, message), id)
+    }
+
+    /**
      * Handles flux.webcam from the computer. The core lock is held, so the
      * work moves to [FluxCore.io].
      */
@@ -145,7 +176,7 @@ object WebcamSession {
         val name = d.identity.deviceName
         when (reply) {
             is WebcamReply.Live -> {
-                if (_status.value.active) _status.value = Status(Phase.Live, "Live on $name as ${reply.label}", reply.device, reply.label)
+                if (_status.value.active) _status.value = Status(Phase.Live, "Live on $name as ${reply.label}", reply.device, reply.label, d.id)
             }
             is WebcamReply.Failed -> core.io.execute { stop(core, notify = false, Status(Phase.Error, reply.message)) }
             WebcamReply.Stop -> core.io.execute { stop(core, notify = false, Status(Phase.Idle, "Stopped on $name")) }
@@ -155,12 +186,16 @@ object WebcamSession {
 
     private fun current(id: Int): Boolean = synchronized(lock) { attempt == id }
 
-    /** Checks the link every second and stops the stream when it drops. */
+    /** Checks the link every second and stops the stream when it drops or the pairing ends. */
     private fun watch(core: FluxCore, d: Device, id: Int) {
-        val future = watchdog.scheduleWithFixedDelay({
-            if (current(id) && !d.online) end(core, notify = false, Status(Phase.Error, "The connection to ${d.identity.deviceName} closed"), id)
-        }, 1, 1, TimeUnit.SECONDS)
-        synchronized(lock) { watch?.cancel(false); watch = future }
+        synchronized(lock) {
+            // An attempt that ended must not replace the watch of a newer attempt.
+            if (attempt != id) return
+            watch?.cancel(false)
+            watch = watchdog.scheduleWithFixedDelay({
+                if (current(id) && !(d.online && d.paired)) end(core, notify = false, Status(Phase.Error, "The connection to ${d.identity.deviceName} closed"), id)
+            }, 1, 1, TimeUnit.SECONDS)
+        }
     }
 
     private fun end(core: FluxCore, notify: Boolean, status: Status, id: Int) {
@@ -177,7 +212,7 @@ object WebcamSession {
             r
         }
         w?.cancel(false)
-        l?.onEnded()
+        if (l != null) synchronized(listenerLock) { l.onEnded() }
         runCatching { srv?.close() }
         runCatching { sock?.close() }
         if (notify && target != null && (sock != null || srv != null)) core.device(target)?.send(WebcamPackets.stop())
