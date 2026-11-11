@@ -25,7 +25,7 @@ A device can also connect through [ZeroTier](zerotier.md) or [Tailscale](tailsca
 | [Browser extension](browser.md) | Sending from the browser, the languages, and the native host |
 | [Everyday use](features.md) | Pair, wake the computer, share, clipboard images, SMS, media, audio outputs, calls, Do Not Disturb, automatic photo transfers, and dictation in text fields |
 | [Workflow controls](workflows.md) | Offline outbox, resumable transfers, folder archives, saved snippets, device access, notification rules, automation, agent review, and remote audio |
-| [Tailscale](tailscale.md) | Extra addresses, pairing by the Tailscale address, links away from the local network, other VPNs, and connection checks |
+| [Tailscale](tailscale.md) | Extra addresses, the built-in node on the phone, pairing by the Tailscale address, links away from the local network, other VPNs, and connection checks |
 | [ZeroTier](zerotier.md) | Extra addresses for phones, discovery of computers, pairing by the ZeroTier address, access, and connection checks |
 | [Camera and streams](camera.md) | Scans, photos, webcam settings, microphone, phone as speaker, and screen mirror |
 | [Configuration](configuration.md) | TOML settings, data paths, environment variables, and service control |
