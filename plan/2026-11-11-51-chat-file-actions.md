@@ -52,6 +52,7 @@ PR) is the session model's.
 | R3 | (Codex) create both, set `entry` | create the entry with `createTemporaryObject(entryComponent, top, { view: standIn, entry: … })`; a fresh entry per case | `view` defaults to `null`, and a fresh entry avoids reading stale `Row` widths before polish |
 | R4 | (agy) the error test in "Chat" | in "Errors" (`tst_views.qml:605`), as the spec says; `t3` is found with `mock.state.transfers.filter(…)[0]` and wrapped as `{ key: "t3", at: Date.now(), file: t3 }` | carry the spec's placement over; `transfers` is an array |
 | R5 | (agy) check "Copied to the clipboard" is absent after the error shows | also check it right after the click | the error arrives later (`Qt.callLater`); a wrong synchronous toast could be overwritten before the late check |
+| R7 | (agy diff review; implementation) the word `Row` follows the icons with the `actions` spacing of 2 px | the word `Row` gets `leftPadding: root.finished && !root.mine ? 4 : 0`; the received test checks that "Show in folder" is visible and its hit area starts after Copy, the sent test that it is hidden | `TextAction`'s `MouseArea` has `anchors.margins: -4`, so it covered the last 2 px of Copy and a click there opened the folder |
 | R6 | (agy) header height `meta + 6 + actions` | kept: 6 is `col.spacing` (line 125), the gap between the two lines; bindings inside `card` use `root.crowded` | consistent spacing; every existing binding there is `root.`-qualified |
 
 ## Steps

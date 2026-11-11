@@ -218,6 +218,8 @@ Item {
           Row {
             visible: !!root.file
             anchors.verticalCenter: parent.verticalCenter
+            // Clears the 4 px hit margin of a TextAction from the Copy icon.
+            leftPadding: root.finished && !root.mine ? 4 : 0
             spacing: 14
             TextAction {
               visible: !!root.file && root.file.state === "waiting"

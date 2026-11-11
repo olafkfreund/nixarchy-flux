@@ -1066,6 +1066,10 @@ Item {
       compare(standIn.requests[1].method, "transfer.copy")
       compare(JSON.stringify(standIn.requests[1].params), '{"id":"t3"}')
       compare(JSON.stringify(standIn.toasts), '["Copied to the clipboard"]')
+      // Show in folder follows Copy, and its hit area does not reach it.
+      var folder = findBy(entry, "text", "Show in folder")
+      verify(!!folder && folder.visible)
+      verify(folder.mapToItem(entry, 0, 0).x - 4 >= copy.mapToItem(entry, 0, 0).x + copy.width)
     }
 
     function test_sentActions() {
@@ -1075,6 +1079,7 @@ Item {
       })
       verify(findBy(entry, "objectName", "fileOpen").visible)
       verify(findBy(entry, "objectName", "fileCopy").visible)
+      verify(!findBy(entry, "text", "Show in folder").visible)
     }
 
     function test_unfinishedActions() {
