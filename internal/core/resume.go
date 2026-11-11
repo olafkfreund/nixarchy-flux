@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"syscall"
 	"time"
 
 	"flux/internal/desktop"
@@ -317,10 +318,43 @@ func pruneIncoming(dir string, before time.Time) {
 	}
 }
 
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r ctxReader) Read(b []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.r.Read(b)
+	if ctxErr := r.ctx.Err(); ctxErr != nil {
+		return n, ctxErr
+	}
+	return n, err
+}
+
 func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link, p *proto.Packet, b resumeMessage, run *resumeRun) (resumeMessage, error) {
 	ack := resumeMessage{Action: "offset", ID: b.ID}
 	if !transferHash.MatchString(b.Hash) || b.Size < 0 || b.Size > 1<<40 || safeName(b.Name) != b.Name || b.Name == "" {
 		return ack, errors.New("invalid transfer metadata")
+	}
+	checkPeer := func() error {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if !dev.Paired {
+			return errReceiveUnpaired
+		}
+		if dev.link != l {
+			return errLinkDown
+		}
+		return ctx.Err()
+	}
+	if err := checkPeer(); err != nil {
+		return ack, err
+	}
+	if err := os.MkdirAll(d.resumeDir, 0o700); err != nil {
+		return ack, err
 	}
 	key := sha256.Sum256([]byte(dev.ID + ":" + b.ID))
 	dir := filepath.Join(d.resumeDir, hex.EncodeToString(key[:]))
@@ -358,6 +392,11 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 	if offset > b.Size {
 		return ack, errors.New("partial file exceeds the transfer size")
 	}
+	if b.Action == "offer" || b.Action == "chunk" {
+		if err := checkSpace(d.resumeDir, b.Size-offset); err != nil {
+			return ack, err
+		}
+	}
 	if b.Action == "chunk" {
 		if b.Offset != offset || p.PayloadSize <= 0 || p.PayloadSize > transferChunk || p.PayloadSize > b.Size-offset {
 			return ack, errors.New("invalid transfer chunk")
@@ -373,7 +412,14 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
 			return ack, err
 		}
-		n, err := io.CopyN(f, rc, p.PayloadSize)
+		progress := d.progress(run.transfer)
+		src := &countingReader{r: rc, fn: func(n int64) { progress(offset + n) }, check: func() error {
+			if !d.stillPaired(dev) {
+				return errReceiveUnpaired
+			}
+			return nil
+		}}
+		n, err := io.CopyN(f, src, p.PayloadSize)
 		if syncErr := f.Sync(); err == nil {
 			err = syncErr
 		}
@@ -381,7 +427,6 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 			return ack, err
 		}
 		offset += n
-		d.progress(run.transfer)(offset)
 	}
 	ack.Offset = offset
 	if offset != b.Size {
@@ -391,7 +436,7 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 		return ack, err
 	}
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, ctxReader{ctx, f}); err != nil {
 		return ack, err
 	}
 	if hex.EncodeToString(h.Sum(nil)) != b.Hash {
@@ -404,45 +449,77 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return ack, err
 	}
-	f.Seek(0, io.SeekStart)
-	dest, err := os.CreateTemp(destDir, ".flux-received-*")
+	r.Path, err = uniquePath(ctx, filepath.Join(destDir, b.Name))
 	if err != nil {
 		return ack, err
 	}
-	defer os.Remove(dest.Name())
-	_, err = io.Copy(dest, f)
-	if err == nil {
-		err = dest.Sync()
+	published := false
+	defer func() {
+		if !published {
+			_ = os.Remove(r.Path)
+		}
+	}()
+	publish := func() error {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if !dev.Paired {
+			return errReceiveUnpaired
+		}
+		if dev.link != l {
+			return errLinkDown
+		}
+		if run.transfer.State == "canceled" {
+			return context.Canceled
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		run.transfer.State = "done"
+		run.transfer.Done = run.transfer.Size
+		return nil
 	}
-	if e := dest.Close(); err == nil {
-		err = e
-	}
-	if err != nil {
-		os.Remove(dest.Name())
+	if err := publish(); err != nil {
 		return ack, err
 	}
-	r.Path, err = uniquePath(d.ctx, filepath.Join(destDir, b.Name))
-	if err != nil {
-		return ack, err
-	}
-	d.mu.Lock()
-	if run.transfer.State == "canceled" {
+	err = os.Rename(part, r.Path)
+	if errors.Is(err, syscall.EXDEV) {
+		d.mu.Lock()
+		run.transfer.State = "active"
 		d.mu.Unlock()
-		_ = os.Remove(r.Path)
-		return ack, context.Canceled
+		if err := checkSpace(destDir, b.Size); err != nil {
+			return ack, err
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return ack, err
+		}
+		temp, err := os.CreateTemp(destDir, partPrefix+"*"+partSuffix)
+		if err != nil {
+			return ack, err
+		}
+		defer os.Remove(temp.Name())
+		_, err = io.Copy(&spaceWriter{w: temp, dir: destDir, left: b.Size}, ctxReader{ctx, f})
+		if err == nil {
+			err = temp.Sync()
+		}
+		if closeErr := temp.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return ack, err
+		}
+		if err := publish(); err != nil {
+			return ack, err
+		}
+		err = os.Rename(temp.Name(), r.Path)
 	}
-	run.transfer.State = "done"
-	run.transfer.Done = run.transfer.Size
-	d.mu.Unlock()
-	if err = os.Rename(dest.Name(), r.Path); err != nil {
-		os.Remove(r.Path)
+	if err != nil {
 		return ack, err
 	}
+	published = true
 	if err := saveJSON(metaPath, r); err != nil {
-		os.Remove(r.Path)
-		return ack, err
+		d.logf("save received transfer %s: %v", b.ID, err)
 	}
-	os.Remove(part)
+	_ = os.Remove(part)
 	d.mu.Lock()
 	run.transfer.Path = r.Path
 	d.mu.Unlock()
