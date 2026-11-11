@@ -211,7 +211,9 @@ let
       let
         a = hmBrowser.home.activation.fluxBrowserExtension.data;
       in
-      lib.hasInfix "/home/alice/.local/share/flux/browser-extension" a && lib.hasInfix "cp -rLT" a
+      lib.hasInfix "/home/alice/.local/share/flux" a
+      && lib.hasInfix "browser-extension-firefox" a
+      && lib.hasInfix "cp -rLT" a
     ) "HM extension activation must copy into the data home";
     assert lib.assertMsg (
       lib.elem packages.flux hmBrowser.home.packages && !(lib.elem core hmBrowser.home.packages)
@@ -238,8 +240,13 @@ packages
     test -x ${core}/bin/flux-native
     m=${core}/share/flux/browser-extension
     test -f $m/manifest.json -a -f $m/manifest.firefox.json
-    cat $m/manifest.json $m/manifest.firefox.json | grep '"version"' | grep -q '"[0-9]*\.[0-9]*\.[0-9]*"'
-    if cat $m/manifest.json $m/manifest.firefox.json | grep '"version"' | grep -q '+'; then exit 1; fi
+    f=${core}/share/flux/browser-extension-firefox
+    test -f $f/manifest.json -a ! -e $f/manifest.firefox.json
+    grep -q '"gecko"' $f/manifest.json
+    for x in $m/manifest.json $m/manifest.firefox.json $f/manifest.json; do
+      v=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' $x)
+      if ! echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then echo "bad version $v in $x"; exit 1; fi
+    done
     touch $out
   '';
 

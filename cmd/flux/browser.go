@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 
 	"flux/internal/nativemsg"
@@ -34,7 +35,8 @@ const extensionID = "jgfibbdalckcbmdcngbalobbhcbepamm"
 const geckoID = "flux@omarchy.org"
 
 // installedExtension is where `make install` puts the unpacked extension.
-const installedExtension = "/usr/share/flux/browser-extension"
+// Tests replace it.
+var installedExtension = "/usr/share/flux/browser-extension"
 
 var browserExecutable = os.Executable
 var nixHostCandidates = defaultNixHostCandidates
@@ -132,6 +134,9 @@ func browser(args []string) error {
 	return errors.New("unknown browser action. Use install or remove")
 }
 
+// extensionIDPattern is the form of a Chromium extension ID.
+var extensionIDPattern = regexp.MustCompile(`^[a-p]{32}$`)
+
 func browserInstall(args []string) error {
 	id, dry := extensionID, false
 	for i := 0; i < len(args); i++ {
@@ -146,8 +151,8 @@ func browserInstall(args []string) error {
 			return fmt.Errorf("unknown option %q. Use --id EXTENSION_ID or --dry-run", a)
 		}
 	}
-	if id == "" {
-		return errors.New("the extension ID is empty")
+	if !extensionIDPattern.MatchString(id) {
+		return fmt.Errorf("%q is not a Chromium extension ID: 32 letters from a to p", id)
 	}
 	path, err := hostPath()
 	if err != nil {
@@ -206,7 +211,8 @@ func browserInstall(args []string) error {
 	for _, t := range targets {
 		managed, err := managedHost(t)
 		if err != nil {
-			return err
+			fmt.Println("  ✗", err)
+			continue
 		}
 		if managed {
 			fmt.Println("  -", t.path, "managed by Home Manager")
@@ -251,6 +257,10 @@ func browserRemove(args []string) error {
 	removed := 0
 	for _, dir := range dirs {
 		path := filepath.Join(dir, nativemsg.Host+".json")
+		if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			fmt.Println("  -", path, "managed by Home Manager")
+			continue
+		}
 		body, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -312,6 +322,9 @@ func managedHost(t target) (bool, error) {
 		return false, nil
 	}
 	body, err := os.ReadFile(t.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("%s is managed by Home Manager but its target is missing", t.path)
+	}
 	if err != nil {
 		return false, err
 	}
@@ -320,6 +333,12 @@ func managedHost(t target) (bool, error) {
 		return false, fmt.Errorf("%s is managed by Home Manager but has invalid JSON: %w", t.path, err)
 	}
 	want := manifestFor(t)
+	// 2 spellings of the same profile file are the same host.
+	if a, err := filepath.EvalSymlinks(got.Path); err == nil {
+		if b, err := filepath.EvalSymlinks(want.Path); err == nil && a == b {
+			got.Path = want.Path
+		}
+	}
 	if !reflect.DeepEqual(got, want) {
 		return false, fmt.Errorf("%s is managed by Home Manager and differs from the requested manifest: got %+v, want %+v", t.path, got, want)
 	}
@@ -335,9 +354,25 @@ func copyNixExtension(dry bool) error {
 	if !isFile(filepath.Join(src, "manifest.json")) {
 		return fmt.Errorf("Flux extension is missing from %s", src)
 	}
-	dst := userExtension()
+	// The Chromium folder, then the Firefox one, whose manifest.json is the
+	// Gecko manifest.
+	for _, pair := range [][2]string{{src, userExtension()}, {firefoxDir(src), firefoxDir(userExtension())}} {
+		if err := copyExtensionDir(pair[0], pair[1], dry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// copyExtensionDir copies one unpacked extension folder as real files.
+func copyExtensionDir(src, dst string, dry bool) error {
+	if !isFile(filepath.Join(src, "manifest.json")) {
+		return fmt.Errorf("Flux extension is missing from %s", src)
+	}
 	if info, err := os.Lstat(dst); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		fmt.Println("  -", dst, "managed by Home Manager")
+		// Chromium saves the real path of an unpacked extension, so a
+		// link into /nix/store breaks after garbage collection.
+		fmt.Println("  !", dst, "is a symlink, and a browser would save its store path. Remove it, then run flux-cli browser install again, or enable services.flux.browser in Home Manager")
 		return nil
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -405,7 +440,11 @@ func printExtensionHelp(chromium, gecko bool) {
 	fmt.Println()
 	dir, ok := extensionDir()
 	if !ok || strings.HasPrefix(dir, "/nix/store/") {
-		fmt.Println("The Flux extension is missing. Run make install, or make browser")
+		if nixBuild() {
+			fmt.Println("Run flux-cli browser install (without --dry-run) to copy the Flux extension to", userExtension())
+		} else {
+			fmt.Println("The Flux extension is missing. Run make install, or make browser")
+		}
 		return
 	}
 	fmt.Println("Load the Flux extension from", dir)
@@ -413,14 +452,22 @@ func printExtensionHelp(chromium, gecko bool) {
 		fmt.Println("  Chromium and friends: the extensions page, then Developer mode, then Load unpacked")
 	}
 	if gecko {
-		// The folder holds a manifest per browser, and the file picker
-		// opens on the Chromium one, so the whole path is spelled out
-		// here. Loading manifest.json in Firefox or Zen fails with
-		// "background.service_worker is currently disabled".
+		// Firefox reads manifest.json from the folder of the file that is
+		// picked, so Firefox and Zen get their own folder, whose
+		// manifest.json is the Gecko manifest.
 		fmt.Println("  Firefox and Zen: about:debugging, then Load temporary add-on, then")
-		fmt.Println("   ", filepath.Join(dir, "manifest.firefox.json"))
+		if ff := firefoxDir(dir); isFile(filepath.Join(ff, "manifest.json")) {
+			fmt.Println("   ", filepath.Join(ff, "manifest.json"))
+		} else if dist := filepath.Join(dir, "..", "dist", "firefox", "manifest.json"); isFile(dist) {
+			fmt.Println("   ", filepath.Clean(dist))
+		} else {
+			fmt.Println("    run make browser, then pick browser/dist/firefox/manifest.json")
+		}
 	}
 }
+
+// firefoxDir is the Firefox and Zen folder next to the Chromium folder dir.
+func firefoxDir(dir string) string { return dir + "-firefox" }
 
 // extensionDir prefers the user copy, then the package share folder,
 // system install, or checkout.

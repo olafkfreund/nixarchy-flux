@@ -29,10 +29,11 @@ The extension needs two halves: the native messaging host, which the browser sta
    | Browser | Where |
    | --- | --- |
    | Chromium, Chrome, Brave, Edge, Vivaldi, Opera | The extensions page, then **Developer mode**, then **Load unpacked** |
-   | Firefox, Zen | `about:debugging#/runtime/this-firefox`, then **Load Temporary Add-on**, then `manifest.firefox.json` |
+   | Firefox, Zen | `about:debugging#/runtime/this-firefox`, then **Load Temporary Add-on**, then `manifest.json` in the `browser-extension-firefox` folder |
 
-   The folder holds one manifest per browser: `manifest.json` is the one for Chromium, and `manifest.firefox.json` is the one for Firefox and Zen.
-   Loading the first one there fails with *background.service_worker is currently disabled*, because a Gecko browser reads the background as a list of scripts.
+   Chromium browsers load the `browser-extension` folder, and Firefox and Zen load the `browser-extension-firefox` folder next to it.
+   Firefox reads `manifest.json` from the folder of the file that you pick, so each folder has its own `manifest.json`.
+   Loading the Chromium folder in Firefox fails with *background.service_worker is currently disabled*, because a Gecko browser reads the background as a list of scripts.
    If picking a file inside the folder is awkward, `make browser` also builds `browser/dist/flux-firefox.zip`, the same add-on as one archive, which loads the same way.
    Firefox loads an unsigned add-on only as a temporary add-on, so it lasts until a browser restart.
    Zen was tested on `1.22.3b`.
@@ -41,7 +42,8 @@ The extension needs two halves: the native messaging host, which the browser sta
 It writes the host manifest for every installed browser in one pass, with the ID that browser expects: the extension ID for Chromium, and the add-on ID for Firefox and Zen.
 That add-on ID (`flux@omarchy.org`) is fixed in `manifest.firefox.json`, so the manifest does not change from one profile to the next.
 
-The folder to load is `/usr/share/flux/browser-extension`, or `$XDG_DATA_HOME/flux/browser-extension` (`~/.local/share/flux/browser-extension`) after a user or Nix install.
+The folders to load are `/usr/share/flux/browser-extension` and `/usr/share/flux/browser-extension-firefox`, or the same names under `$XDG_DATA_HOME/flux` (`~/.local/share/flux`) after a user or Nix install.
+`flux-cli browser install` prints the one for each browser it finds.
 It is unpacked on purpose: a browser refuses an extension it cannot verify, and a folder needs no signature.
 
 ## Use it

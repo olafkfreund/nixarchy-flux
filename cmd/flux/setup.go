@@ -22,7 +22,7 @@ import (
 // system part that is missing and prints the command that adds it. It
 // returns an error when a step fails, so that the exit code is 1.
 func setup(args []string) error {
-	dry, noPlugin, browser := false, false, false
+	dry, noPlugin, withBrowser := false, false, false
 	for _, a := range args {
 		switch a {
 		case "--dry-run", "-n":
@@ -30,9 +30,9 @@ func setup(args []string) error {
 		case "--no-plugin":
 			noPlugin = true
 		case "--no-browser":
-			browser = false
+			withBrowser = false
 		case "--browser":
-			browser = true
+			withBrowser = true
 		default:
 			return fmt.Errorf("unknown option %q. Use --dry-run, --no-plugin, --browser, or --no-browser", a)
 		}
@@ -69,7 +69,7 @@ func setup(args []string) error {
 
 	fmt.Println("3. The browser extension")
 	switch {
-	case !browser:
+	case !withBrowser:
 		fmt.Println("  To send links from a browser, run: flux-cli browser install")
 	default:
 		// The browser step takes its own flags, so it gets only what it
