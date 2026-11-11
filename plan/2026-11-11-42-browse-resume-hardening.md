@@ -67,11 +67,27 @@ the #43 commit or their own.
 - B7 `incomingRecord` gains `Device`, `Canceled`. A chunk with no state →
   `error` "no offer for this transfer". New-ID offer: refuse at 16 unfinished
   records of the device (`maxPartials`), first remove the oldest finished or
-  canceled records at 64 in all (`maxRecords`). Folder time refreshed only on
+  canceled records at 64 per device (`maxRecords`, R9). Folder time refreshed only on
   accepted progress. Worker prune: only its device's folders, never an active
   run. Startup: prune all folders by age (7 days), remove every
   `.flux-*.part` and `.flux-received-*` in the download folder.
   `removeStaleParts` keeps its 1-day rule while running.
+
+## Review corrections (Codex plan review — approve or strike)
+
+These tighten or correct the approved spec; approving this plan approves them.
+
+| # | Spec said | Plan does | Why |
+| --- | --- | --- | --- |
+| R1 | A2 drops a root below another root through a dot-name, or with a dot-name in its own path when no root contains it | A2 is independent of other roots: drop a non-Home root when its real path is inside the real home with a dot-name below home, or outside home with a dot-name anywhere in the real path; also drop a root whose real path equals an earlier root's | two roots resolving to the same `/mnt/nas/.private` exempted each other (`within` includes equality, `sftp.go:469`) |
+| R2 | `d.mu` guards only the map lookup | lookup-or-create **and** the non-blocking enqueue happen under `d.mu`; a worker retires only under `d.mu` after rechecking that its queue is empty and it has no runs | otherwise a packet can be enqueued into a worker that just retired |
+| R3 | finish with `finishTransfer` unless `canceled` | a **publish point** under `d.mu`: if the record is `canceled`, take the cancel path; else set it `done` there (split `finishTransfer` into a locked part and the emit part), so a later `CancelTransfer` finds it not running; a failed rename after that sets `failed` | a check before `finishTransfer` races `CancelTransfer`, and `finishTransfer` overwrites `canceled` (`share.go:176-183`) |
+| R4 | non-blocking `cancelRun` event | the event channel (buffer 1) is only a wake-up; the worker **sweeps** its runs on every tick, before idle expiry and before retiring, and runs the cancel cleanup for every run whose context is canceled and whose record is `canceled` | a dropped event would let idle cleanup skip the tombstone and the delete |
+| R5 | per-packet context from the run context | the chunk payload keeps its 1-minute `context.WithTimeout` and the `context.AfterFunc` that closes it (`resume.go:190-198`); hashing and the copy use the run context with no timeout | otherwise a peer that stops mid-payload holds its worker forever; the ticker runs only between packets |
+| R6 | after the rename, save `Path` | if saving the state fails after the rename, **keep** the published file and log it (do not delete it, as `resume.go:257` does today); before the publish point, any failure removes the empty reserved name; the `EXDEV` copy removes its temp file and the reservation and keeps `data` | after a same-filesystem rename, the published file is the only copy |
+| R7 | `checkSpace(resumeDir, …)` on offer | `os.MkdirAll(resumeDir, 0o700)` before the first check | `checkSpace` calls `statfs` on a folder that does not exist yet on a fresh install (`share.go:538-543`) |
+| R8 | the existing outbox test keeps passing | step 2 migrates `TestOutboxRestartAndResumableDelivery` (`outbox_test.go:56-85`), which calls `receiveResumable` directly, to dispatch through `handleResumable` and read the replies | the direct call bypasses the single worker owner |
+| R9 | 64 records in all | 64 records **per device** | as approved in the spec text; made explicit |
 
 ## Steps
 
@@ -86,6 +102,8 @@ the #43 commit or their own.
    (dropped); `~/Documents → <tmp>/docs` still browses. Use `browseTree`
    (25) for the layout.
    → verify `go test -race ./internal/core/ -run 'Browse|Search' -count=1`.
+   Also test R1: two roots that both resolve to `<tmp>/.private` are both
+   dropped.
    Traps: Home (root 0) is never dropped; keep `resolve`'s longest-root rule;
    browse search relies on `visible`, do not add a second check there.
 
@@ -97,7 +115,11 @@ the #43 commit or their own.
    `runs`, ticker, events channel for `cancelRun`) and `resumeRun` types and
    the worker loop; `receiveResumable` (148) runs on the worker with a run
    and a per-packet context. Keep the reply path for `offset`/`done`/`error`
-   (106–117) unchanged.
+   (106–117) unchanged. Apply R2 (enqueue and retirement under `d.mu`), R3
+   (publish point; split `finishTransfer`, `share.go:176`, into a locked part
+   and the emit/`markDirty` part, keeping its behavior for the other
+   callers), R4 (sweep), R5 (keep the payload timeout). Migrate the outbox
+   test (R8).
    → verify `go vet ./internal/core/ && go test -race ./internal/core/ -run 'Outbox|Resum' -count=1`
    (the existing `TestOutboxRestartAndResumableDelivery`, `outbox_test.go:19`,
    must still pass).
@@ -115,6 +137,7 @@ the #43 commit or their own.
    a `partPrefix+"*"+partSuffix` temp, then save `Path`. Remove the old
    `os.CreateTemp(destDir, ".flux-received-*")` copy (233–247).
    → verify `go test -race ./internal/core/ -run 'Outbox|Resum' -count=1`.
+   Apply R6 (failure cleanup) and R7 (`MkdirAll` before the first check).
    Traps: `spaceWriter.left` starts at the full `size`; the reserved name from
    `uniquePath` is an empty file that the rename replaces (as in `saveFile`,
    `share.go:465-534`); keep `data` until the fallback copy is renamed.
@@ -145,7 +168,16 @@ the #43 commit or their own.
    user cancel deletes `data` and a retried offer gets `error`; idle ends the
    run between packets and not during a slow hash (a slow reader); same-
    filesystem completion renames (inode of `data` equals the final file's);
-   startup removes `.flux-*.part` and `.flux-received-*`.
+   startup removes `.flux-*.part` and `.flux-received-*`; and from the review:
+   a packet racing worker retirement is still delivered (R2); cancel racing
+   completion leaves exactly one final state and the tombstone (R3); cancel
+   with the event channel full and no later packet still deletes `data` (R4);
+   a peer that stalls mid-payload frees the worker after the timeout (R5);
+   state-save failure after the rename keeps the file (R6); an interrupted
+   `EXDEV` copy resumes and leaves no temp file (R6); a fresh install with no
+   `incoming` folder accepts its first offer (R7); 64-record eviction per
+   device, device isolation, active runs never pruned, aging by last
+   progress, and legacy records without `device`.
    Reuse the daemon and link helpers of `outbox_test.go` and
    `pairing_test.go` (`phonePair`, `pairDaemon`).
    → verify `go test -race ./internal/core/ -count=1` shows no new failure
