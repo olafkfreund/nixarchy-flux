@@ -61,6 +61,16 @@ Import `inputs.flux.homeManagerModules.default` in a user configuration:
   services.flux = {
     enable = true;
     plugin.enable = true;
+    browser = {
+      enable = true;
+      chromium = [
+        "chromium"
+        "google-chrome"
+        "BraveSoftware/Brave-Browser"
+      ];
+      firefox = true;
+      zen = false;
+    };
   };
 }
 ```
@@ -68,6 +78,13 @@ Import `inputs.flux.homeManagerModules.default` in a user configuration:
 The Home Manager module installs `flux`, adds the runtime tools to `home.packages`, defines the `fluxd` user service, and copies the Omarchy shell plugin into `~/.config/omarchy/plugins/flux` when that folder does not exist yet.
 `fluxd` updates the plugin files on each start.
 The module only copies the plugin; run `flux-cli setup` once to turn it on in the Omarchy shell.
+
+`services.flux.browser.enable` (default `false`) installs the [browser extension](browser.md) files and native messaging host manifests.
+It works on its own even when `services.flux.enable` is `false`, so a NixOS module user can enable only the browser option in Home Manager.
+On each activation, it copies the unpacked extension into `$XDG_DATA_HOME/flux/browser-extension` (`~/.local/share/flux/browser-extension`) as writable files, so garbage collection never removes the folder that the browser loaded.
+It writes Chromium host manifests under `$XDG_CONFIG_HOME` for each browser in `services.flux.browser.chromium` (default `[ "chromium" "google-chrome" "BraveSoftware/Brave-Browser" ]`).
+It writes Gecko host manifests in `~/.mozilla/native-messaging-hosts` when `services.flux.browser.firefox` is `true` (the default) and in `~/.zen/native-messaging-hosts` when `services.flux.browser.zen` is `true` (default `false`).
+If you ran `flux-cli browser install` earlier, run `flux-cli browser remove` before enabling `services.flux.browser.enable`, because Home Manager refuses to overwrite existing manifest files.
 
 Each user must choose one way to run `fluxd.service`.
 Use either `services.flux.users` in the NixOS module or `services.flux.enable` in the Home Manager module for a given user, not both.
@@ -78,7 +95,7 @@ When Home Manager manages the user service, leave `services.flux.users = [ ]` on
 | Output | Contents |
 | --- | --- |
 | `packages.<system>.flux` (`default`) | Combined package with `flux-core` and `flux-gui`. |
-| `packages.<system>.flux-core` | `fluxd`, `flux-cli`, static `flux-approve`, Omarchy plugin assets, udev rule, desktop entry, and icons. |
+| `packages.<system>.flux-core` | `fluxd`, `flux-cli`, `flux-native`, static `flux-approve`, browser extension, Omarchy plugin assets, udev rule, desktop entry, and icons. |
 | `packages.<system>.flux-gui` | Native Qt6 desktop window (`flux-gui`). |
 | `apps.<system>.flux-cli` | CLI target for `nix run`. |
 | `overlays.default` | Overlay that adds `flux`, `flux-core`, and `flux-gui`. |
@@ -95,7 +112,8 @@ The short name `flux` is not on `PATH` on Nix, because `fluxcd` owns it; use `fl
 
 | Command | Behavior on Nix |
 | --- | --- |
-| `flux-cli setup` | Copies and enables the Omarchy shell plugin when needed, leaves `fluxd.service` to the NixOS or Home Manager module, and prints the `services.flux` options for system features. |
+| `flux-cli setup` | Copies and enables the Omarchy shell plugin when needed, leaves `fluxd.service` to the NixOS or Home Manager module, and prints the `services.flux` options for system features. Pass `--browser` to also run `flux-cli browser install`. |
+| `flux-cli browser` | Points host manifests at `flux-native` in your Nix profile, copies the extension to `$XDG_DATA_HOME/flux/browser-extension`, and leaves manifests managed by Home Manager alone. |
 | `flux-cli update` | Refuses to install a release package and tells you to update the flake input and rebuild, while `--check` and `--phone` still work. |
 | `flux-cli approve` | `enroll`, `status`, and `remove` manage the user key in `/etc/flux/approve/<user>.pub`, while `enable` and `disable` point to `services.flux.approve.services` because the module owns PAM. |
 

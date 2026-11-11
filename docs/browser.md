@@ -21,6 +21,9 @@ The extension needs two halves: the native messaging host, which the browser sta
    flux-cli browser install
    ```
 
+   `flux-cli setup` does not write host manifests unless you pass `--browser`.
+   `flux-cli setup --browser` runs `flux-cli browser install` as part of setup.
+
 2. Load the extension, unpacked, in each browser you want it in.
 
    | Browser | Where |
@@ -31,12 +34,14 @@ The extension needs two halves: the native messaging host, which the browser sta
    The folder holds one manifest per browser: `manifest.json` is the one for Chromium, and `manifest.firefox.json` is the one for Firefox and Zen.
    Loading the first one there fails with *background.service_worker is currently disabled*, because a Gecko browser reads the background as a list of scripts.
    If picking a file inside the folder is awkward, `make browser` also builds `browser/dist/flux-firefox.zip`, the same add-on as one archive, which loads the same way.
+   Firefox loads an unsigned add-on only as a temporary add-on, so it lasts until a browser restart.
+   Zen was tested on `1.22.3b`.
 
 `flux-cli browser install` prints the folder to load.
-It writes the host manifest for every browser in one pass, with the ID that browser expects: the extension ID for Chromium, and the add-on ID for Firefox and Zen.
-That add-on ID is fixed in `manifest.firefox.json`, so the manifest does not change from one profile to the next.
+It writes the host manifest for every installed browser in one pass, with the ID that browser expects: the extension ID for Chromium, and the add-on ID for Firefox and Zen.
+That add-on ID (`flux@omarchy.org`) is fixed in `manifest.firefox.json`, so the manifest does not change from one profile to the next.
 
-The folder to load is `/usr/share/flux/browser-extension`, or `~/.local/share/flux/browser-extension` after a user install.
+The folder to load is `/usr/share/flux/browser-extension`, or `$XDG_DATA_HOME/flux/browser-extension` (`~/.local/share/flux/browser-extension`) after a user or Nix install.
 It is unpacked on purpose: a browser refuses an extension it cannot verify, and a folder needs no signature.
 
 ## Use it
@@ -57,18 +62,20 @@ With no choice yet, a send goes to the only connected phone, and with several co
 
 ```sh
 flux-cli browser remove
+flux-cli browser remove --dry-run
 ```
 
 Then remove the extension from each browser the same way you loaded it.
 The host manifests go, and nothing else does.
 
-`--dry-run` shows what a command would write or remove, which is worth doing before the first install on a machine with many browsers.
+`--dry-run` shows what `install` or `remove` would write or remove, which is worth doing before the first run on a machine with many browsers.
 
 ## How it works
 
 The extension is a plain WebExtension with no background page beyond a service worker, and it declares four permissions: `activeTab`, `contextMenus`, `nativeMessaging`, and `storage`.
 
-It never opens a socket of its own. Each message goes to the native host `org.omarchy.flux`, which is the `flux-native` binary that Flux installs next to the CLI.
+It never opens a socket of its own.
+Each message goes to the native host `org.omarchy.flux`, which is the `flux-native` binary that Flux installs next to the CLI.
 That host reads one message, asks `fluxd` over the Unix socket, and writes one reply:
 
 | Command | What it does |
@@ -76,11 +83,15 @@ That host reads one message, asks `fluxd` over the Unix socket, and writes one r
 | `{"command":"devices"}` | Lists the paired phones, so the icon can show them |
 | `{"command":"send","url":…,"device":…}` | Sends a web link to one phone |
 
-The host is the boundary that matters. The browser only ever starts `flux-native`, that binary only talks to the local socket, and the host manifest names one extension ID as the only allowed caller.
-A web page cannot reach it: the extension never opens a socket, and only a `chrome-extension://` origin with that ID may connect.
+The host is the boundary that matters.
+The browser only ever starts `flux-native`, that binary only talks to the local socket, and the host manifest names one extension ID as the only allowed caller.
+A web page cannot reach it, because the extension never opens a socket and does not expose messaging to web origins.
+Any local unpacked Chromium extension that uses the public key in `manifest.json` (`jgfibbdalckcbmdcngbalobbhcbepamm`), or any Gecko add-on with the ID `flux@omarchy.org`, can start `flux-native`.
+`flux-native` exposes only the `devices` and `send` commands, so an extension with that fixed ID can only list paired devices and send a link.
 
-The same message goes to a phone as `flux url` sends it, so `share.url` in the daemon does all the work.
-A link that is not `http` or `https` is refused before the host is started, and a link over 8 KiB is refused rather than cut, because half a link goes nowhere.
+The same message goes to a phone as `flux-cli url` sends it, so `share.url` in the daemon does all the work.
+Both the extension and `flux-native` check the URL so that only web links (`http` or `https` with a host name) can be sent.
+A link that is not `http` or `https` is refused, and a link over 8 KiB is refused rather than cut, because half a link goes nowhere.
 
 ## Troubleshooting
 
