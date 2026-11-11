@@ -26,11 +26,20 @@ the Home root's real path. Browse search uses `visible`, `resolve` and
 `openIn` (`sftp_search.go:135-247`), so it is covered too.
 
 **A2. A root that is hidden is not opened.** In `openBrowseFS`
-(`sftp.go:431-459`), after all roots are open, drop each root whose own real
-path is not visible by A1 against the other roots (a `download_dir` of
-`/var/home/u/.ssh` when home's real path is `/var/home/u`, or `~/.config`
-through any spelling). This covers the `"."` case in `resolve`
-(`sftp.go:504-506`), since a hidden root never becomes a root.
+(`sftp.go:431-459`), after all roots are open, drop each root other than
+Home (root 0) when either:
+
+- another root's real path contains it and the part below that root has a
+  dot-name (a `download_dir` of `/var/home/u/.ssh` when home's real path is
+  `/var/home/u`, or `~/.config` through any spelling), or
+- no other root contains it and its own real path has a dot-name in any
+  part (`download_dir = /mnt/nas/.private`, or
+  `~/Documents → /mnt/nas/share/.stversions`). A target such as
+  `/data/docs` keeps working.
+
+This also covers the `"."` case in `resolve` (`sftp.go:504-506`) and the
+root check in search (`sftp_search.go:135`), since a hidden root never
+becomes a root.
 
 **A3. `browseRoots` compares real paths.** Its two filters
 (`sftp.go:383-388`: "inside home" and "holds home or is in a dot-folder of
@@ -45,78 +54,124 @@ No change to `resolve`, `openIn`, `fdPath`, or the SFTP handlers.
 
 The wire format stays: `offer`, `chunk`, and the replies `offset`, `done`,
 `error` (`resumeMessage`, `resume.go:25-33`). Only fluxd sends resumable
-transfers (`sendResumable`, `resume.go:42-99`); it always offers first and
-waits for each reply, so at most 1 packet per transfer is in flight from a
-well-behaved sender.
+transfers (`sendResumable`, `resume.go:42-99`): it always offers first,
+waits for each reply, and sends the next chunk at once after an `offset`
+reply.
 
-**B1. Per-transfer state replaces the global lock.** `resumeMu`
-(`daemon.go:52`) becomes a guard for a map `d.resumeActive` of
-`key → *resumeRun` (key = the existing `sha256(dev.ID:ID)` folder name). A
-`resumeRun` holds a `sync.Mutex` for that transfer, the `*Transfer` record,
-its `context.CancelFunc`, and an idle timer. `handleResumable`
-(`resume.go:101-134`):
+**B1. One worker per device, all state on that worker.** The daemon-wide
+`resumeMu` (`daemon.go:52`) is no longer held across I/O. Instead each device
+with resumable traffic has one worker goroutine and a buffered queue
+(`resumeQueue`, 8 entries), kept in `d.resumeWorkers[dev.ID]`, guarded by
+`d.mu` only for the map lookup. `handleResumable` (`resume.go:101-134`):
 
-- takes the run's lock with `TryLock`; when it is held (a second packet for
-  the same transfer while one is processed), it replies `error`
-  ("the transfer is busy") and drops the packet. So each transfer has at
-  most 1 goroutine, and `resumeMu` is never held across I/O.
-- for a transfer that is not active yet, calls `startReceive(dev)`
-  (`share.go:378-389`). Over `maxReceives` (4) it replies `error` with the
-  same text as the ordinary receive (`share.go:277`). The slot is released
-  (`endReceive`) when the run ends: done, error, cancel, unpair, or idle.
+- decodes and validates the packet on the caller's goroutine, then does a
+  **non-blocking send** to that device's queue. When the queue is full, it
+  replies `error` ("too many transfer packets") at once. No goroutine is
+  started per packet, so a device holds at most 1 worker and 8 queued
+  packets.
+- The worker handles packets **one at a time, in order**. A sender's next
+  chunk, sent right after its `offset` reply, waits in the queue instead of
+  being refused, so an unchanged sender never sees a new `error`.
+- The worker exits after `receiveIdle` with an empty queue and no active run,
+  and removes itself from the map under `d.mu`.
 
-**B2. Visible, cancellable, idle-bounded.** On the first accepted packet of
-a run, fluxd makes the record with `newTransfer(dev, name, "", "in", size)`
-(`share.go:105`) and sets `t.cancel`. Progress uses `d.progress(t)`
-(`share.go:144`), so the record is `active` and `Busy()`
-(`daemon.go:398-405`) sees it. The idle timer is `receiveIdle` (1 min,
-`share.go:37`), reset on every accepted packet. When it fires, the run ends
-with `finishTransfer(t, errStalled)`, its slot is freed, and the partial data
-stays on disk for a later resume, which starts a new run and record.
+Because one goroutine owns every run, record and state file of a device,
+counting, pruning, idle expiry and cancel cannot race with each other inside
+that device. Different devices use different folders (the folder name is
+`sha256(dev.ID:ID)`, `resume.go:154`), so their workers do not share state.
 
-**B3. Cancel.** `CancelTransfer` (`share.go:198-222`) already calls
-`t.cancel` and sets `canceled`. The run's cancel func also marks the state
-file `canceled: true` (a new `incomingRecord` field) and removes `data`. A
-later `offer` or `chunk` with that ID finds `canceled` and gets `error`
-("the transfer was canceled"). The folder is pruned like any other.
+**B2. Runs, visibility and the receive limit.** The worker keeps
+`runs map[key]*resumeRun`. A run is one transfer that is receiving now: its
+`*Transfer`, a `lastPacket` time, and a run context. On the first accepted
+packet of a transfer, the worker:
 
-**B4. Pairing and link while it runs.** Each packet is checked after the
-lock: `d.stillPaired(dev)` (`device.go:220`) and `dev.link == l`. The chunk
-read goes through the existing `countingReader` check
-(`share.go:505-510` pattern) so an unpair stops it mid-chunk, and
-`cancelOnLinkDown` (`stream.go:44`) is registered for every packet, not only
-chunks. Before the final file is published (`os.Rename`), fluxd checks
-pairing and the run's context once more. Hashing and the fallback copy read
-through a reader that returns `ctx.Err()`, so cancel and unpair stop them.
+- calls `startReceive(dev)` (`share.go:378-389`); over `maxReceives` (4) it
+  replies `error` with the ordinary receive's text (`share.go:277`).
+- makes the record with `newTransfer(dev, name, "", "in", size)`
+  (`share.go:105`) and publishes `t.cancel` under `d.mu`. A record that is
+  already `canceled` when the cancel func is set is handled as a cancel, as
+  the ordinary receive does (`share.go:411`).
+- updates progress with `d.progress(t)` (`share.go:144`), so the record is
+  `active` and `Busy()` (`daemon.go:398-405`) counts it.
 
-**B5. Space.** Using the existing `checkSpace` (`share.go:554-566`):
+A run ends exactly once, on the worker, in `endRun(run, err)`: it calls
+`finishTransfer(t, err)` unless the record is already `canceled`
+(`finishTransfer(t, nil)` would overwrite it, `share.go:178`), calls
+`endReceive(dev)`, and deletes the run.
 
-- on `offer`: `checkSpace(resumeDir, size - offset)`.
-- on each `chunk`: `checkSpace(resumeDir, size - offset)` before writing
-  (1 `statfs` per chunk of at most 1 MiB, `transferChunk`).
-- on completion: first `os.Rename(part, tmp)` into the download folder, so a
-  same-filesystem receive needs no second copy. Only on `EXDEV` fluxd calls
-  `checkSpace(destDir, size)` and copies through `spaceWriter`
-  (`share.go:570-588`) with the context reader of B4.
-- the temporary name in the download folder becomes
-  `partPrefix + "*" + partSuffix` (`.flux-*.part`, `share.go:56-59`), so
-  `removeStaleParts` (`share.go:638-652`) removes it after a crash.
+**B3. Idle expiry.** The worker uses a ticker of `receiveIdle / 4`. Between
+packets it ends each run whose `lastPacket` is older than `receiveIdle`
+(1 min, `share.go:37`) with `errStalled`, and keeps its partial data. A
+later offer for that ID starts a new run and record from the kept offset.
+Expiry runs only between packets on the worker, so it never ends a run that
+is still hashing or copying.
 
-**B6. Bounded retained state.**
+**B4. Stop versus cancel.** Two different things:
 
-- `incomingRecord` gains `Device string` (the device ID) and `Canceled bool`.
-  Old records without `Device` count for no device and are pruned by age.
+- **Stop** (link down, unpair, idle, error): ends the packet's context and
+  the run, keeps the partial data, and the sender can resume. Each packet
+  gets its own context from the run context, with `cancelOnLinkDown`
+  (`stream.go:44`) on that packet context and a `defer cancel()`, so the
+  watcher goroutine ends with the packet.
+- **Cancel** (the user, through `CancelTransfer`, `share.go:198-222`):
+  `t.cancel` only cancels the run context and does a non-blocking send of a
+  `cancelRun` event to the worker. It takes no lock, so calling it under
+  `d.mu`, as `CancelTransfer` does, cannot deadlock. The worker, on the event
+  or when it next sees the run context canceled with the record `canceled`,
+  writes `canceled: true` in the state file (a new `incomingRecord` field),
+  deletes `data`, and ends the run. A later `offer` or `chunk` for that ID
+  gets `error` ("the transfer was canceled").
+
+**B5. Pairing and link while it runs.** For each packet the worker checks,
+under `d.mu`, that the device is still paired and `dev.link == l`
+(`stillPaired` alone does not cover the link, `device.go:220-223`). The
+chunk read goes through the existing `countingReader` with the same
+`stillPaired` check as the ordinary receive (`share.go:505-510`), so an
+unpair stops it mid-chunk. Hashing and the fallback copy read through a
+reader that returns the packet context's error, so cancel, link down and
+unpair stop them. Before the final rename, the worker checks pairing and the
+context once more; the rename itself is atomic.
+
+**B6. Space and publishing.** Using `checkSpace` (`share.go:554-566`):
+
+- on `offer` and before each `chunk`: `checkSpace(resumeDir, size - offset)`.
+  A chunk is at most 1 MiB (`transferChunk`), so this is 1 `statfs` per MiB.
+- on completion, after the hash matches: reserve the final name with
+  `uniquePath` (`share.go`, as `saveFile` does), then `os.Rename(data, final)`.
+  On one filesystem this needs no second copy and has no window in which the
+  data is under another name. On `EXDEV` only, the worker checks
+  `checkSpace(destDir, size)`, copies to a `partPrefix + "*" + partSuffix`
+  temporary file in the download folder through `spaceWriter` with
+  `left = size` (`share.go:570-588`) and the context reader of B5, renames it
+  over the reserved name, and keeps `data` until then, so an interrupted copy
+  can resume.
+- then it saves the state file with `Path`. A crash between the rename and
+  that save leaves a complete file and a state with no `Path`; the next offer
+  finds no `data`, starts at offset 0, and receives the file again under a
+  new name. This window is milliseconds and is accepted.
+
+**B7. Bounded retained state.**
+
+- `incomingRecord` gains `Device string` and `Canceled bool`. Old records
+  without `Device` belong to no device.
 - A `chunk` with no state file is refused with `error` ("no offer for this
   transfer"); only an `offer` creates state.
-- On an `offer` for a new ID, fluxd counts the state files of that device
-  that are not complete and not canceled. At 16 (`maxPartials`, a new
-  constant) it first prunes, then refuses with `error`
-  ("too many unfinished transfers from this device").
+- On an `offer` for a new ID, the worker counts that device's records. It
+  refuses with `error` ("too many unfinished transfers from this device")
+  when 16 are unfinished (no `Path`, not `canceled`) (`maxPartials`). When the
+  device has 64 records in all (`maxRecords`), it first removes its oldest
+  finished or canceled records. Counting and creating happen on the one
+  worker, so two offers cannot both pass the limit.
 - The folder time is refreshed only after accepted progress (a new state or a
   written chunk), not on every packet (`resume.go:156` moves).
-- `pruneIncoming` (`resume.go:136-146`) keeps its 7-day rule, which is now by
-  last progress because of the previous point. It also runs at daemon start,
-  so it no longer depends on the next offer.
+- Pruning (`pruneIncoming`, `resume.go:136-146`) keeps its 7-day rule, now by
+  last progress. On a worker it removes only that device's folders and never
+  a folder of an active run. At daemon start, before any worker exists, it
+  prunes every folder by age, including records without `Device`.
+- Crashed final copies: at daemon start, fluxd removes every
+  `.flux-*.part` and legacy `.flux-received-*` file in the download folder.
+  No transfer runs at that point, so age does not matter. `removeStaleParts`
+  (`share.go:638-652`) keeps its 1-day rule while fluxd runs.
 
 ### Tests (`internal/core/sftp_test.go`, `internal/core/resume_test.go`)
 
@@ -124,14 +179,21 @@ through a reader that returns `ctx.Err()`, so cancel and unpair stop them.
   a symlinked home where `download_dir` is the dot-folder through the real
   path (root dropped); `download_dir` that holds the real home (root dropped);
   a plain symlinked `~/Documents → /data/docs` still works.
+- A2: `download_dir = <tmp>/.private` outside home is dropped;
+  `~/Documents → <tmp>/share/.stversions` is dropped.
 - B: low free space refuses an offer and stops a chunk (`freeSpace` is
   already replaceable, `share.go:539`); a fifth concurrent transfer gets
-  `error`; a second packet for a busy transfer gets `error`; a chunk without
-  an offer gets `error`; the 17th unfinished offer gets `error`; an unpair
-  during a chunk stops it and writes no file; the record is `active` while
-  chunks arrive and `Busy()` reports it; cancel deletes the data and a
-  retried offer gets `error`; idle frees the slot and a later chunk resumes
-  from the kept offset; a same-filesystem completion renames without a copy.
+  `error`; a full queue gets `error` and no goroutine per packet is started;
+  a chunk sent right after an `offset` reply is accepted (the unchanged
+  sender); a chunk without an offer gets `error`; 16 unfinished offers then
+  the 17th gets `error`, and parallel offers cannot pass 16; an unpair
+  during a chunk stops it, keeps the partial, and writes no final file; a
+  link drop keeps the partial and a later offer resumes at its offset; the
+  record is `active` while chunks arrive and `Busy()` reports it; a user
+  cancel deletes the data and a retried offer gets `error`; idle ends the
+  run between packets, frees the slot, and never during a long hash; a
+  same-filesystem completion renames without a copy; startup removes
+  `.flux-*.part` and `.flux-received-*` in the download folder.
 - The existing resumable tests keep passing unchanged, as the wire format
   does not change.
 
@@ -142,6 +204,10 @@ through a reader that returns `ctx.Err()`, so cancel and unpair stop them.
   (`resolve`, "the root with the longest path wins").
 - **Keep the global `resumeMu` and add a queue limit.** One slow device would
   still block every other device's resumable receives.
+- **A lock per transfer with `TryLock`** (the first draft). Refused the
+  unchanged sender's next chunk when it raced the reply, still started a
+  goroutine per packet, and let idle expiry, cancel and counting race.
+  Rejected after the Codex review.
 - **Drop excess packets silently.** The sender then waits a minute for an
   ack (`resume.go:57`); an `error` reply fails it at once.
 - **A new `cancel` wire message.** Would change the protocol; the `error`
@@ -159,11 +225,14 @@ through a reader that returns `ctx.Err()`, so cancel and unpair stop them.
   the cleaned path, as today.
 - **Upgrade with partials on disk:** old state files have no `Device`, so they
   do not count against the new limit and age out in 7 days.
-- **The `TryLock` refusal** could hit a legitimate retry that races the reply
-  of the previous packet; the sender then fails that attempt and the outbox
-  retries the transfer later, resuming from the kept offset.
-- **Concurrency:** the run map and timers add lock-ordering risk with `d.mu`.
-  Tests run with `-race`.
+- **Serial per device:** one device's resumable transfers share one worker,
+  so its 4 transfers progress chunk by chunk, not in parallel. Throughput per
+  device stays bounded by one disk writer, which matches the current global
+  lock but no longer blocks other devices.
+- **Lock order:** the worker takes `d.mu` only for short reads and record
+  updates and never holds it across I/O; `t.cancel` takes no lock. Tests run
+  with `-race`.
+- **Crash between rename and state save** re-receives the file once (B6).
 
 ## Verification
 
