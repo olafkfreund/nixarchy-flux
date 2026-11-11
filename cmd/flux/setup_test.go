@@ -168,6 +168,42 @@ func TestNixSetup(t *testing.T) {
 	}
 }
 
+func TestSetupBrowserIsOptIn(t *testing.T) {
+	home, _ := nixBrowserFixture(t)
+	write(t, filepath.Join(home, ".nix-profile", "bin", hostBinary), "native")
+	mkdir(t, filepath.Join(home, ".config", "chromium"))
+	manifest := filepath.Join(home, ".config", "chromium", "NativeMessagingHosts", "org.omarchy.flux.json")
+	for _, args := range [][]string{{"--no-plugin"}, {"--no-plugin", "--no-browser"}} {
+		out := captureBrowserOutput(t, func() error { return setup(args) })
+		if !strings.Contains(out, "To send links from a browser, run: flux-cli browser install") {
+			t.Fatal(out)
+		}
+		if _, err := os.Stat(manifest); !os.IsNotExist(err) {
+			t.Fatalf("setup wrote a manifest without --browser: %v", err)
+		}
+	}
+	out := captureBrowserOutput(t, func() error { return setup([]string{"--no-plugin", "--browser", "--dry-run"}) })
+	if !strings.Contains(out, "would copy") || !strings.Contains(out, "would write:") {
+		t.Fatal(out)
+	}
+	if _, err := os.Stat(manifest); !os.IsNotExist(err) {
+		t.Fatalf("dry run wrote a manifest: %v", err)
+	}
+	if err := setup([]string{"--no-plugin", "--browser"}); err != nil {
+		t.Fatal(err)
+	}
+	read(t, manifest, &hostManifest{})
+}
+
+func TestSetupCountsBrowserFailure(t *testing.T) {
+	home, _ := nixBrowserFixture(t)
+	mkdir(t, filepath.Join(home, ".config", "chromium"))
+	err := setup([]string{"--no-plugin", "--browser"})
+	if err == nil || err.Error() != "1 step failed" {
+		t.Fatalf("browser failure was not counted: %v", err)
+	}
+}
+
 func TestExecPath(t *testing.T) {
 	v := "{ path=/home/u/My Code/bin/fluxd ; argv[]=/home/u/My Code/bin/fluxd ; ignore_errors=no ; start_time=[n/a] }"
 	if got := execPath(v); got != "/home/u/My Code/bin/fluxd" {

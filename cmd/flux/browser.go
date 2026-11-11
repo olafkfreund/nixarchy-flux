@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/user"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"flux/internal/nativemsg"
@@ -33,9 +36,38 @@ const geckoID = "flux@omarchy.org"
 // installedExtension is where `make install` puts the unpacked extension.
 const installedExtension = "/usr/share/flux/browser-extension"
 
-// userExtension is where `make install-user` puts it, and it must match
-// USER_PREFIX in the Makefile.
-var userExtension = filepath.Join(".local", "share", "flux", "browser-extension")
+var browserExecutable = os.Executable
+var nixHostCandidates = defaultNixHostCandidates
+
+func defaultNixHostCandidates() []string {
+	home, _ := os.UserHomeDir()
+	username := os.Getenv("USER")
+	if username == "" {
+		if current, err := user.Current(); err == nil {
+			username = current.Username
+		}
+	}
+	state := os.Getenv("XDG_STATE_HOME")
+	if state == "" {
+		state = filepath.Join(home, ".local", "state")
+	}
+	return []string{
+		filepath.Join("/etc/profiles/per-user", username, "bin"),
+		filepath.Join(home, ".nix-profile", "bin"),
+		filepath.Join(state, "nix", "profiles", "profile", "bin"),
+		filepath.Join(state, "nix", "profile", "bin"),
+		"/run/current-system/sw/bin",
+	}
+}
+
+func userExtension() string {
+	data := os.Getenv("XDG_DATA_HOME")
+	if data == "" {
+		home, _ := os.UserHomeDir()
+		data = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(data, "flux", "browser-extension")
+}
 
 // hostManifest is the file that a browser reads to find a native messaging
 // host. The two browsers disagree on the key that names the callers: a
@@ -131,6 +163,7 @@ func browserInstall(args []string) error {
 		for _, rel := range chromiumBrowsers {
 			dir := filepath.Join(config, rel)
 			if !isDir(dir) {
+				fmt.Println("  - skipped", rel, "(profile directory not found at", dir+")")
 				continue
 			}
 			chromium = true
@@ -142,7 +175,12 @@ func browserInstall(args []string) error {
 		}
 	}
 	for _, b := range geckoBrowsers {
-		if !isDir(filepath.Join(home, b.Home)) {
+		profile := filepath.Join(home, b.Home)
+		if b.Home == ".mozilla/firefox" && !isDir(profile) {
+			profile = filepath.Join(configHome(home), "mozilla", "firefox")
+		}
+		if !isDir(profile) {
+			fmt.Println("  - skipped", b.Home, "(profile directory not found)")
 			continue
 		}
 		gecko = true
@@ -160,7 +198,20 @@ func browserInstall(args []string) error {
 	if len(targets) == 0 {
 		fmt.Println("No browser found in your home directory. Flux writes the host manifest when a browser is there.")
 	}
+	if nixBuild() {
+		if err := copyNixExtension(dry); err != nil {
+			return err
+		}
+	}
 	for _, t := range targets {
+		managed, err := managedHost(t)
+		if err != nil {
+			return err
+		}
+		if managed {
+			fmt.Println("  -", t.path, "managed by Home Manager")
+			continue
+		}
 		if dry {
 			fmt.Println("  would write:", t.path)
 			continue
@@ -228,14 +279,7 @@ func browserRemove(args []string) error {
 
 // writeHost writes one host manifest for a browser to read.
 func writeHost(t target) error {
-	body, err := json.MarshalIndent(hostManifest{
-		Name:              nativemsg.Host,
-		Description:       "Flux host for the Flux browser extension",
-		Path:              t.host,
-		Type:              "stdio",
-		AllowedOrigins:    t.origins,
-		AllowedExtensions: t.extensions,
-	}, "", "  ")
+	body, err := json.MarshalIndent(manifestFor(t), "", "  ")
 	if err != nil {
 		return err
 	}
@@ -245,12 +289,122 @@ func writeHost(t target) error {
 	return os.WriteFile(t.path, append(body, '\n'), 0o644)
 }
 
+func manifestFor(t target) hostManifest {
+	return hostManifest{
+		Name:              nativemsg.Host,
+		Description:       "Flux host for the Flux browser extension",
+		Path:              t.host,
+		Type:              "stdio",
+		AllowedOrigins:    t.origins,
+		AllowedExtensions: t.extensions,
+	}
+}
+
+func managedHost(t target) (bool, error) {
+	info, err := os.Lstat(t.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return false, nil
+	}
+	body, err := os.ReadFile(t.path)
+	if err != nil {
+		return false, err
+	}
+	var got hostManifest
+	if err := json.Unmarshal(body, &got); err != nil {
+		return false, fmt.Errorf("%s is managed by Home Manager but has invalid JSON: %w", t.path, err)
+	}
+	want := manifestFor(t)
+	if !reflect.DeepEqual(got, want) {
+		return false, fmt.Errorf("%s is managed by Home Manager and differs from the requested manifest: got %+v, want %+v", t.path, got, want)
+	}
+	return true, nil
+}
+
+func copyNixExtension(dry bool) error {
+	exe, err := browserExecutable()
+	if err != nil {
+		return err
+	}
+	src := filepath.Clean(filepath.Join(filepath.Dir(exe), "..", "share", "flux", "browser-extension"))
+	if !isFile(filepath.Join(src, "manifest.json")) {
+		return fmt.Errorf("Flux extension is missing from %s", src)
+	}
+	dst := userExtension()
+	if info, err := os.Lstat(dst); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		fmt.Println("  -", dst, "managed by Home Manager")
+		return nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if dry {
+		fmt.Println("  would copy", src, "to", dst)
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(dst), ".browser-extension-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	err = filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		out := filepath.Join(tmp, rel)
+		if entry.IsDir() {
+			return os.MkdirAll(out, 0o755)
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("unsupported extension file %s", path)
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		file, err := os.OpenFile(out, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err != nil {
+			in.Close()
+			return err
+		}
+		_, copyErr := io.Copy(file, in)
+		closeErr := file.Close()
+		in.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	fmt.Println("  ✓ copied", dst)
+	return nil
+}
+
 // printExtensionHelp prints how to load the extension, which no browser
 // does on its own.
 func printExtensionHelp(chromium, gecko bool) {
 	fmt.Println()
 	dir, ok := extensionDir()
-	if !ok {
+	if !ok || strings.HasPrefix(dir, "/nix/store/") {
 		fmt.Println("The Flux extension is missing. Run make install, or make browser")
 		return
 	}
@@ -268,20 +422,22 @@ func printExtensionHelp(chromium, gecko bool) {
 	}
 }
 
-// extensionDir returns the folder to load the extension from: the copy
-// `make install` wrote, then the one `make install-user` wrote, then the
-// one in the checkout next to this flux.
+// extensionDir prefers the user copy, then the package share folder,
+// system install, or checkout.
 func extensionDir() (string, bool) {
+	if dir := userExtension(); isFile(filepath.Join(dir, "manifest.json")) {
+		return dir, true
+	}
+	exe, err := browserExecutable()
+	if err == nil {
+		share := filepath.Join(filepath.Dir(exe), "..", "share", "flux", "browser-extension")
+		if isFile(filepath.Join(share, "manifest.json")) {
+			return filepath.Clean(share), true
+		}
+	}
 	if isFile(filepath.Join(installedExtension, "manifest.json")) {
 		return installedExtension, true
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		dir := filepath.Join(home, userExtension)
-		if isFile(filepath.Join(dir, "manifest.json")) {
-			return dir, true
-		}
-	}
-	exe, err := os.Executable()
 	if err != nil {
 		return "", false
 	}
@@ -303,17 +459,33 @@ func configHomes(home string) []string {
 	return dirs
 }
 
+func configHome(home string) string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return xdg
+	}
+	return filepath.Join(home, ".config")
+}
+
 // hostPath returns the flux-native that the browser must start. A browser
 // does not read the PATH of the session that installed Flux, so the
 // manifest needs the whole path.
 func hostPath() (string, error) {
-	if exe, err := os.Executable(); err == nil {
+	home, _ := os.UserHomeDir()
+	if nixBuild() {
+		for _, dir := range nixHostCandidates() {
+			path := filepath.Join(dir, hostBinary)
+			if isFile(path) {
+				return path, nil
+			}
+		}
+		return "", errors.New("flux-native is not in a stable Nix profile. Install Flux with nix profile install, or enable its NixOS or Home Manager module")
+	}
+	if exe, err := browserExecutable(); err == nil {
 		next := filepath.Join(filepath.Dir(exe), hostBinary)
 		if isFile(next) {
 			return next, nil
 		}
 	}
-	home, _ := os.UserHomeDir()
 	for _, dir := range []string{"/usr/bin", "/usr/lib/flux/bin", filepath.Join(home, ".local", "bin")} {
 		if isFile(filepath.Join(dir, hostBinary)) {
 			return filepath.Join(dir, hostBinary), nil
