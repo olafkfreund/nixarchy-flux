@@ -3,6 +3,7 @@
 [Documentation index](README.md)
 
 The desktop targets Omarchy and Arch Linux with a Wayland session and systemd user services.
+On NixOS or with Home Manager, install Flux from the [Nix flake](nix.md).
 The Android app requires Android 10 or later.
 The macOS app requires macOS 14 or later.
 
