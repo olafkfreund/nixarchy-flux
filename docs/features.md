@@ -532,6 +532,7 @@ The switches apply to every paired computer.
 Images from before the option was enabled stay on the phone.
 An image waits while no computer is connected.
 The desktop notification includes an Open action.
+With `auto_clipboard` on, the desktop also puts each received screenshot on the clipboard as an image.
 
 Any app can put an image in a camera folder.
 So Flux sends only the images of the default camera app and of the system apps, such as the camera and the screenshot tool.
