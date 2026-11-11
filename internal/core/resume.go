@@ -52,6 +52,10 @@ const (
 )
 
 type resumePacket struct {
+	// dev is the device as it was when the packet came. A forgotten and
+	// rediscovered device is a new *Device with the same ID, so the worker
+	// must not keep the one it started with.
+	dev     *Device
 	link    *lan.Link
 	packet  *proto.Packet
 	message resumeMessage
@@ -167,7 +171,7 @@ func (d *Daemon) handleResumable(dev *Device, l *lan.Link, p *proto.Packet) {
 		go d.runResumeWorker(dev, w)
 	}
 	select {
-	case w.queue <- resumePacket{l, p, b}:
+	case w.queue <- resumePacket{dev: dev, link: l, packet: p, message: b}:
 		d.mu.Unlock()
 	default:
 		d.mu.Unlock()
@@ -183,7 +187,7 @@ func (d *Daemon) runResumeWorker(dev *Device, w *resumeWorker) {
 		select {
 		case pkt := <-w.queue:
 			d.sweepResumeRuns(dev, w)
-			d.processResumePacket(dev, w, pkt)
+			d.processResumePacket(pkt.dev, w, pkt)
 			lastWork = time.Now()
 		case <-w.events:
 			d.sweepResumeRuns(dev, w)
@@ -238,7 +242,7 @@ func (d *Daemon) processResumePacket(dev *Device, w *resumeWorker, pkt resumePac
 	cancelOnLinkDown(ctx, pkt.link, cancel)
 	reply, err := d.receiveResumable(ctx, dev, pkt.link, pkt.packet, b, run)
 	stopped := ctx.Err() != nil
-	if stopped && (err == nil || errors.Is(err, context.Canceled)) {
+	if stopped && !run.published && (err == nil || errors.Is(err, context.Canceled)) {
 		err = d.resumeStop(run)
 	}
 	cancel()
@@ -455,6 +459,10 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 		return ack, err
 	} else if b.Action != "offer" {
 		return ack, errors.New("no offer for this transfer")
+	} else if err := checkSpace(d.resumeDir, b.Size); err != nil {
+		// Before admitOffer and the record, so a refusal for space leaves
+		// nothing that counts against maxPartials.
+		return ack, err
 	} else if err := d.admitOffer(dev.ID); err != nil {
 		return ack, err
 	} else if err := saveJSON(metaPath, r); err != nil {

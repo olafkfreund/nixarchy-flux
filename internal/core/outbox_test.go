@@ -58,6 +58,9 @@ func TestOutboxRestartAndResumableDelivery(t *testing.T) {
 		resumeDir: t.TempDir(), logger: log.New(io.Discard, "", 0)}
 	replies := make(chan resumeMessage, 4)
 	go onDesk.Receive(func(p *proto.Packet) {
+		// a handles the packet first, so a reply that the test reads has
+		// already reached a's sender, and a stale one cannot arrive later.
+		a.handlePacket(dev, onDesk, p)
 		var reply resumeMessage
 		if p.Type == proto.TypeFluxTransfer && p.Decode(&reply) == nil {
 			select {
@@ -65,7 +68,6 @@ func TestOutboxRestartAndResumableDelivery(t *testing.T) {
 			default:
 			}
 		}
-		a.handlePacket(dev, onDesk, p)
 	})
 	go onPhone.Receive(func(p *proto.Packet) { b.handlePacket(peer, onPhone, p) })
 	offerReply := func(offer resumeMessage) resumeMessage {

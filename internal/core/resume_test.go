@@ -784,3 +784,63 @@ func TestResumeStateSaveFailureKeepsFile(t *testing.T) {
 		t.Fatalf("final file: %d bytes, %v", len(got), err)
 	}
 }
+
+// A link drop after the publish point leaves the published receive done.
+func TestResumeDoneSurvivesLateLinkDrop(t *testing.T) {
+	t.Cleanup(func() { renameFile = os.Rename })
+	r := newRx(t)
+	renameFile = func(old, new string) error {
+		r.onDesk.Close()
+		<-r.onPhone.Done()
+		time.Sleep(50 * time.Millisecond)
+		return os.Rename(old, new)
+	}
+	f := mkfile(7, 2000)
+	r.expect2(r.offer(f), "offset")
+	r.sendChunk(f, 0, 2000)
+	waitFor(t, "saved", func() bool { rec, _ := r.record(f); return rec.Path != "" })
+	time.Sleep(300 * time.Millisecond)
+	_, st, msg := r.find(f)
+	rec, _ := r.record(f)
+	t.Logf("state=%s err=%q recordPath=%q fileExists=%v", st, msg, rec.Path, exists(filepath.Join(r.downloads, f.name)))
+	if st != "done" {
+		t.Errorf("published file labelled %s", st)
+	}
+}
+
+// A new offer refused for space leaves no record that counts as unfinished.
+func TestResumeLowSpaceOfferLeavesNoRecord(t *testing.T) {
+	s := stubSpace(t)
+	r := newRx(t)
+	s.low.Store(true)
+	for n := 1; n <= maxPartials; n++ {
+		r.expect2(r.offer(mkfile(n, 100)), "error")
+	}
+	s.low.Store(false)
+	rep := r.offer(mkfile(99, 100))
+	t.Logf("after %d low-space refusals, a new offer gets %+v", maxPartials, rep)
+	if rep.Action != "offset" {
+		t.Errorf("low-space refusals used up the unfinished limit")
+	}
+}
+
+// A forgotten and rediscovered device is a new *Device with the same ID;
+// its packets must not be checked against the old one.
+func TestResumeWorkerUsesTheCurrentDevice(t *testing.T) {
+	r := newRx(t)
+	f := mkfile(1, 100)
+	r.expect2(r.offer(f), "offset")
+	r.b.mu.Lock()
+	old := r.peer
+	old.Paired = false
+	nd := &Device{ID: old.ID, Name: "desk", Paired: true, link: r.onPhone}
+	r.b.devices[old.ID] = nd
+	r.b.mu.Unlock()
+	g := mkfile(2, 100)
+	r.b.handleResumable(nd, r.onPhone, proto.New(proto.TypeFluxTransfer, g.msg("offer", 0)))
+	rep := r.next()
+	t.Logf("re-paired device offer: %+v", rep)
+	if rep.Action != "offset" {
+		t.Errorf("worker uses the stale device")
+	}
+}
