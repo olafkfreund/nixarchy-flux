@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 42
 author: olafkfreund
 ---
@@ -123,7 +123,10 @@ from a dotfiles setup, a moved folder, or `download_dir`.
 - Tested in `go test ./internal/core/...`, and passing inside the Nix build
   sandbox.
 
-## Open questions
+## Decisions (approved 2026-11-11)
+
+The owner approved the recommended answer to each question below.
+
 
 1. **Dot-folders outside home.** Should Browse PC also refuse dot-folders
    outside home (a root such as `/mnt/nas/.private` set as `download_dir`, or
