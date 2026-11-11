@@ -49,7 +49,7 @@ let
 
     # The PAM helper is static, so that it depends on no shared library.
     postBuild = ''
-      CGO_ENABLED=0 go build -trimpath -ldflags "$ldflags" \
+      CGO_ENABLED=0 go build -trimpath -ldflags "''${ldflags[*]}" \
         -o "$GOPATH/bin/flux-approve" ./cmd/flux-approve
     '';
 

@@ -75,6 +75,15 @@ let
     assert lib.assertMsg (
       !lib.hasInfix "PATH=" unit
     ) "the unit must not set PATH, so fluxd gets the user manager's PATH";
+    assert lib.assertMsg (lib.hasInfix "X-RestartIfChanged=false" unit)
+      "the NixOS unit must not restart on a switch";
+    # Force the package lists and the webcam module, so a renamed or
+    # unsupported package fails the check instead of a user's rebuild.
+    assert lib.assertMsg (builtins.deepSeq (map (p: p.drvPath) (
+      good.environment.systemPackages ++ good.boot.extraModulePackages ++ good.services.udev.packages
+    )) true) "packages do not evaluate";
+    assert lib.assertMsg (lib.hasInfix "options v4l2loopback devices=0" good.boot.extraModprobeConfig)
+      "webcam module options missing";
     assert lib.assertMsg (lib.any (
       p: lib.getName p == "ffmpeg"
     ) good.environment.systemPackages) "runtimePackages must be on the system path";
@@ -148,6 +157,9 @@ let
     assert lib.assertMsg (
       hm.systemd.user.services.fluxd.Service.ExecStart == "/home/alice/.nix-profile/bin/fluxd"
     ) "HM ExecStart must be the profile path";
+    assert lib.assertMsg (builtins.deepSeq (map (
+      p: p.drvPath
+    ) hm.home.packages) true) "HM packages do not evaluate";
     true;
 in
 packages
@@ -162,6 +174,7 @@ packages
 
   ldflags = pkgs.runCommand "flux-ldflags-check" { nativeBuildInputs = [ pkgs.binutils ]; } ''
     strings ${core}/bin/flux-cli | grep -qF '${core}/lib/flux/flux-approve'
+    test ! -e ${packages.flux}/bin/flux
     out_text=$(HOME=$TMPDIR ${core}/bin/flux-cli update 2>&1 || true)
     echo "$out_text" | grep -q 'installed by Nix'
     touch $out

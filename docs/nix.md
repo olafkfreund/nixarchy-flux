@@ -67,6 +67,7 @@ Import `inputs.flux.homeManagerModules.default` in a user configuration:
 
 The Home Manager module installs `flux`, adds the runtime tools to `home.packages`, defines the `fluxd` user service, and copies the Omarchy shell plugin into `~/.config/omarchy/plugins/flux` when that folder does not exist yet.
 `fluxd` updates the plugin files on each start.
+The module only copies the plugin; run `flux-cli setup` once to turn it on in the Omarchy shell.
 
 Each user must choose one way to run `fluxd.service`.
 Use either `services.flux.users` in the NixOS module or `services.flux.enable` in the Home Manager module for a given user, not both.
