@@ -67,6 +67,21 @@ type Config struct {
 	// that the user did not pick cannot show a pair request here. It is on
 	// by default.
 	PairRequests bool `toml:"pair_requests"`
+	// MotionCues lets a paired phone send its acceleration, so that the
+	// omarchy-shell plugin shows motion cues for a passenger. It is off by
+	// default.
+	MotionCues bool `toml:"motion_cues"`
+	// MotionAuto starts the motion cues when the phone detects that it is
+	// in a vehicle. It is on by default and needs MotionCues.
+	MotionAuto bool `toml:"motion_auto"`
+	// MotionSensitivity scales the motion cues: 0.5, 1, or 1.6. Zero means 1.
+	MotionSensitivity float64 `toml:"motion_sensitivity,omitempty"`
+	// MotionSize is the dot size: "small", "medium", or "large". Empty
+	// means "medium".
+	MotionSize string `toml:"motion_size,omitempty"`
+	// MotionIdle is the time in seconds without motion after which the
+	// motion cues stop, from 30 to 3600. Zero means 300.
+	MotionIdle int `toml:"motion_idle,omitempty"`
 	// CheckUpdates lets fluxd ask GitHub once a day for the latest
 	// release. It is on by default. Without a network, the check fails
 	// and Flux works as before.
@@ -137,6 +152,55 @@ func (c *Config) ClipLimit() int {
 	return c.ClipboardLimit
 }
 
+// Motion cue settings.
+var (
+	// MotionSensitivities are the allowed values of MotionSensitivity.
+	MotionSensitivities = []float64{0.5, 1, 1.6}
+	// MotionSizes are the allowed values of MotionSize.
+	MotionSizes = []string{"small", "medium", "large"}
+)
+
+const (
+	DefaultMotionIdle = 300
+	MinMotionIdle     = 30
+	MaxMotionIdle     = 3600
+)
+
+// MotionScale returns the motion sensitivity, or 1 for a value that is not
+// allowed.
+func (c *Config) MotionScale() float64 {
+	if c != nil {
+		for _, v := range MotionSensitivities {
+			if c.MotionSensitivity == v {
+				return v
+			}
+		}
+	}
+	return 1
+}
+
+// MotionDotSize returns the dot size, or "medium" for a value that is not
+// allowed.
+func (c *Config) MotionDotSize() string {
+	if c != nil {
+		for _, v := range MotionSizes {
+			if c.MotionSize == v {
+				return v
+			}
+		}
+	}
+	return "medium"
+}
+
+// MotionIdleSeconds returns the idle stop time in seconds, from 30 to 3600,
+// or 300 when it is not set.
+func (c *Config) MotionIdleSeconds() int {
+	if c == nil || c.MotionIdle <= 0 {
+		return DefaultMotionIdle
+	}
+	return min(max(c.MotionIdle, MinMotionIdle), MaxMotionIdle)
+}
+
 // ConfigDir returns ~/.config/flux, or $XDG_CONFIG_HOME/flux.
 func ConfigDir() string { return filepath.Join(xdg("XDG_CONFIG_HOME", ".config"), "flux") }
 
@@ -198,7 +262,7 @@ var mu sync.Mutex
 func Load() (*Config, error) {
 	mu.Lock()
 	defer mu.Unlock()
-	c := &Config{AutoClipboard: true, Notifications: true, ShareHome: true, PauseMediaOnCall: true, SyncDnd: true, Herdr: true, PairRequests: true, CheckUpdates: true}
+	c := &Config{AutoClipboard: true, Notifications: true, ShareHome: true, PauseMediaOnCall: true, SyncDnd: true, Herdr: true, PairRequests: true, CheckUpdates: true, MotionAuto: true}
 	data, err := os.ReadFile(Path())
 	if errors.Is(err, os.ErrNotExist) {
 		c.Commands = []Command{}

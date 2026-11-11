@@ -102,7 +102,12 @@ const (
 	// it only to a paired, connected device that lists it as incoming.
 	// docs/camera.md describes it.
 	TypeFluxStreamRequest = "flux.stream.request"
-	TypeFluxTransfer      = "flux.transfer"
+	// TypeFluxMotion carries motion cues. fluxd sends the setting, start,
+	// and stop to the phone. The phone sends acceleration samples, its
+	// sensor state, vehicle detection, and the starts and stops of its
+	// user. Both sides send it. docs/motion-cues.md describes the bodies.
+	TypeFluxMotion   = "flux.motion"
+	TypeFluxTransfer = "flux.transfer"
 
 	// TypeFluxSSH carries the SSH key of a phone and the sign requests of
 	// the ssh-agent of fluxd. fluxd asks for the key and sends the sign
@@ -137,6 +142,7 @@ var Incoming = []string{
 	TypeFluxDesktop, TypeFluxShortcuts, TypeFluxTransfer,
 	TypeFluxAudioRequest,
 	TypeFluxSSH,
+	TypeFluxMotion,
 }
 
 // Outgoing lists the packet types that Flux sends.
@@ -151,6 +157,7 @@ var Outgoing = []string{
 	TypeFluxTheme, TypeFluxStreamRequest,
 	TypeFluxAudio,
 	TypeFluxSSH,
+	TypeFluxMotion,
 }
 
 // Identity is the body of a flux.identity packet.

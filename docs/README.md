@@ -36,6 +36,8 @@ A device can also connect through [ZeroTier](zerotier.md) or [Tailscale](tailsca
 | [herdr agents](herdr.md) | Agent status, colored output, notifications, replies, new agents, and terminals on the phone and the Mac, and the live terminal and the home screen widget on Android |
 | [Touchpad and keyboard](remote-input.md) | Remote input from the phone or the Mac, gestures, typing, slides, and the wire format |
 | [Remote desktop](remote-desktop.md) | The computer screen on the phone or the Mac, the extended screen on Android, the encoder, touches, the mouse, the Omarchy panel, dictation, monitors, and the stream format |
+| [Motion cues](motion-cues.md) | Dots that move with the vehicle for a passenger, automatic start, settings, and the wire format |
+| [Remote desktop](remote-desktop.md) | The computer screen on the phone or the Mac, touches, the mouse, the Omarchy panel, dictation, monitors, and the stream format |
 | [Troubleshooting](troubleshooting.md) | Service, discovery, plugin, media, Android, and build failures |
 
 ## Develop and automate
@@ -54,6 +56,7 @@ A device can also connect through [ZeroTier](zerotier.md) or [Tailscale](tailsca
 | [iOS on the App Store](ios-app-store.md) | Store text, keywords, screenshots, review notes, privacy, and open items for the iPhone app |
 | [macOS client plan](macos-plan.md) | Decisions, phases, and checklists for the Mac app |
 | [macOS client status](macos-status.md) | Build plan, current state, and what was verified against `fluxd` |
+| [Motion cues plan](motion-cues-plan.md) | Decisions, phases, and checklists for motion cues from the phone |
 | [Marketing videos](../marketing/README.md) | Video source, phone captures, music timing, render, and mux |
 | [Website](../site/README.md) | The page on GitHub Pages, its images, and how to make them again |
 

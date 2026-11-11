@@ -594,6 +594,12 @@ To use an Android phone or tablet as a second monitor, select **Extend screen** 
 The computer adds a monitor with the size of the phone screen, and it removes that monitor when the stream stops.
 The extended screen uses the same switches and needs `wf-recorder` on the computer.
 Only Flux for Android has it. See [Extend the screen](remote-desktop.md#extend-the-screen).
+## Motion cues
+
+The phone can send its motion, so that flat dots at the edges of the screen move with the vehicle.
+They can help a passenger who reads on the laptop.
+Select **Turn on** under **Motion cues** in the **Access** card on the **Phone** page, or run `flux-cli motion on`.
+See [motion cues](motion-cues.md).
 
 ## Dictation in text fields
 

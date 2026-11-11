@@ -147,6 +147,7 @@ object Ic {
     val volumeOff = R.drawable.ic_volume_off
     val speaker = R.drawable.ic_speaker
     val speakerPhone = R.drawable.ic_speaker_phone
+    val car = R.drawable.ic_directions_car
 }
 
 /** An icon from [Ic]. It takes the content color unless [tint] is set. */

@@ -110,6 +110,15 @@ class Device(private val core: FluxCore, var identity: Identity) {
     /** The certificate from which the last [previewKey] came. */
     private var previewCertificate: X509Certificate? = null
 
+    /** The last motion cues config of the computer, or null before it tells. */
+    var motionConfig: MotionMessage.Config? = null
+
+    /** True while this phone sends motion samples to the computer. */
+    var motionRunning = false
+
+    /** The last error of the motion sensor, or null. */
+    var motionError: String? = null
+
     val online: Boolean get() = link?.isOpen == true
     val paired: Boolean get() = pairState == PairState.Paired
 
@@ -125,6 +134,18 @@ class Device(private val core: FluxCore, var identity: Identity) {
         if (!paired && p.type != Types.PAIR) return false
         val l = link ?: return false
         if (!l.isOpen) return false
+        l.send(p)
+        return true
+    }
+
+    /**
+     * Sends a packet only while the link writes at full speed: at most
+     * [maxQueued] packets wait for the writer. It returns false and drops
+     * the packet otherwise. Use it for data that goes old fast.
+     */
+    fun sendIfIdle(p: Packet, maxQueued: Int): Boolean {
+        val l = link ?: return false
+        if (!paired || !l.isOpen || l.queued > maxQueued) return false
         l.send(p)
         return true
     }
@@ -166,6 +187,14 @@ class Device(private val core: FluxCore, var identity: Identity) {
         outputsSupported = Types.FLUX_AUDIO_REQUEST in identity.incoming,
         outputs = outputs,
         speakerSupported = Types.FLUX_SPEAKER in identity.incoming,
+        motionSupported = Types.FLUX_MOTION in identity.incoming,
+        motion = MotionUi(
+            enabled = motionConfig?.enabled,
+            auto = motionConfig?.auto == true,
+            running = motionRunning,
+            error = motionError,
+            mount = MotionCues.mount(id),
+        ),
     )
 
     // ---------------------------------------------------------------- pairing
