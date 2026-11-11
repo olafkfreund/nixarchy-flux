@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -288,6 +289,42 @@ func TestResumeCompletesByRename(t *testing.T) {
 	}
 	if rec, _ := r.record(f); rec.Path != final || rec.Device != r.peer.ID {
 		t.Fatalf("record %+v", rec)
+	}
+	r.waitState(f, "done")
+}
+
+// TestResumeCompletesAcrossFileSystems makes the first rename fail with
+// EXDEV, as when incoming and the download folder are on 2 file systems.
+// The copy must complete, keep the file, and leave no temporary file.
+func TestResumeCompletesAcrossFileSystems(t *testing.T) {
+	// Registered before newRx, so it runs after the receiver's cleanup has
+	// stopped the worker that reads renameFile.
+	t.Cleanup(func() { renameFile = os.Rename })
+	renameFile = func(old, new string) error {
+		if filepath.Base(old) == "data" {
+			return &os.LinkError{Op: "rename", Old: old, New: new, Err: syscall.EXDEV}
+		}
+		return os.Rename(old, new)
+	}
+	r := newRx(t)
+	f := mkfile(3, 3000)
+	r.expect2(r.offer(f), "offset")
+	if rep := r.chunk(f, 0, 3000); rep.Action != "done" {
+		t.Fatal(rep)
+	}
+	final := filepath.Join(r.downloads, f.name)
+	got, err := os.ReadFile(final)
+	if err != nil || !bytes.Equal(got, f.data) {
+		t.Fatalf("final file: %d bytes, %v", len(got), err)
+	}
+	if rec, _ := r.record(f); rec.Path != final {
+		t.Fatalf("record %+v", rec)
+	}
+	entries, _ := os.ReadDir(r.downloads)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), partSuffix) {
+			t.Fatalf("temporary file %s left behind", e.Name())
+		}
 	}
 	r.waitState(f, "done")
 }

@@ -393,6 +393,9 @@ func (d *Daemon) admitOffer(device string) error {
 	return nil
 }
 
+// renameFile is os.Rename. Tests replace it to act as another file system.
+var renameFile = os.Rename
+
 type ctxReader struct {
 	ctx context.Context
 	r   io.Reader
@@ -562,7 +565,7 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 	if err := publish(); err != nil {
 		return ack, err
 	}
-	err = os.Rename(part, r.Path)
+	err = renameFile(part, r.Path)
 	if errors.Is(err, syscall.EXDEV) {
 		d.mu.Lock()
 		run.transfer.State = "active"
@@ -573,7 +576,10 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			return ack, err
 		}
-		temp, err := os.CreateTemp(destDir, partPrefix+"*"+partSuffix)
+		// err stays the outer error, so the result of the copy and the
+		// rename below replaces the EXDEV of the first rename.
+		var temp *os.File
+		temp, err = os.CreateTemp(destDir, partPrefix+"*"+partSuffix)
 		if err != nil {
 			return ack, err
 		}

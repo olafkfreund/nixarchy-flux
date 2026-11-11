@@ -92,6 +92,7 @@ These tighten or correct the approved spec; approving this plan approves them.
 | R11 | (agy plan review) limits on a new offer | check `maxPartials` **before** evicting old records for `maxRecords` | a refused offer must not delete tombstones and receipts |
 | R12 | (agy plan review) worker lifetime | the worker returns on `d.ctx.Done()`; `receiveIdle` becomes a `var` so tests can shorten it | no goroutine outlives the daemon; idle tests must not wait a minute |
 | R13 | (agy plan review) publish checks | recheck pairing and the context before the `EXDEV` rename too; drop the old `newTransfer` at the end of `receiveResumable` (done in step 2) | both publish paths need the same check |
+| R14 | (Codex diff review) `EXDEV` fallback | the fallback assigns the outer `err` (no `:=` shadowing); `renameFile` (= `os.Rename`) is a package var so a test can return `EXDEV` without a second file system; `TestResumeCompletesAcrossFileSystems` covers it | the shadowed `err` kept `EXDEV`, so every cross-filesystem receive failed and its cleanup deleted the delivered file |
 
 ## Steps
 
