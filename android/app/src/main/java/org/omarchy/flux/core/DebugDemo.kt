@@ -158,6 +158,16 @@ object DebugDemo {
                 remoteInput = true,
                 desktopSupported = true,
                 remoteDesktop = true,
+                extendSupported = true,
+                outputsSupported = true,
+                speakerSupported = true,
+                outputs = AudioOutputs(
+                    listOf(
+                        AudioOutput("alsa_output.speakers", "Laptop Speakers", 72, muted = false, isDefault = true),
+                        AudioOutput("alsa_output.hdmi", "HDMI Monitor", 100, muted = false, isDefault = false),
+                        AudioOutput("bluez_output.headphones", "Bluetooth Headphones", 45, muted = true, isDefault = false),
+                    ),
+                ),
                 herdr = withSessions(HerdrState(
                     enabled = true,
                     running = true,

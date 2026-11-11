@@ -39,6 +39,10 @@ flux-cli pair "Pixel 8"
 flux-cli status
 ```
 
+When the computer and the phone cannot find each other, for example on a guest Wi-Fi with client isolation, pair by the IP address of the phone.
+Type the address in the pair mode of the Flux window, or run `flux-cli pair --address 192.168.1.20`.
+See [pair by address](cli.md#pair-by-address).
+
 After the phone accepts, `flux-cli pair` asks `Does Pixel 8 show 5EE6 825F 974E D59A? [y/N]`.
 Type `y` only when the phone shows the same key.
 When stdin is not a terminal, `flux-cli pair` prints the `flux-cli accept` command with the device ID and the key. Run it after you compare the key.
@@ -85,6 +89,39 @@ flux-cli unpair DEVICE_ID
 If `devices.json` does not parse, `fluxd` moves it to `devices.json.broken-<Unix time>` in the same folder and starts without paired devices.
 The journal and a desktop notification name the moved file.
 Pair your devices again.
+
+## Wake the computer
+
+Flux for Android can wake a paired computer that sleeps, with Wake-on-LAN.
+The computer sends its network cards to the phone each time the phone connects.
+When the computer is offline, its card in **Computers** shows **Wake**.
+The long-press menu and TalkBack also offer **Wake**.
+
+The phone sends a magic packet to UDP ports 9 and 7 on these addresses:
+
+- The broadcast address of each network card of the computer.
+- The broadcast address of each network of the phone, and `255.255.255.255`.
+- The last address of the computer.
+
+The phone and the computer must be on the same local network.
+A magic packet does not go through Tailscale.
+
+The computer must allow Wake-on-LAN in its firmware and on its network card.
+Most computers wake only through a wired card.
+To turn on Wake-on-LAN for the card `eno1` until the next start, run:
+
+```sh
+sudo ethtool -s eno1 wol g
+```
+
+To keep the setting with NetworkManager, set it on the connection of the card:
+
+```sh
+nmcli connection modify "Wired connection 1" 802-3-ethernet.wake-on-lan magic
+```
+
+A computer whose `fluxd` does not send its network cards shows no **Wake**.
+Update Flux on the computer, then connect the phone to it 1 time.
 
 ## Files, clipboard, and links
 
@@ -335,6 +372,7 @@ Turn on **Text messages** in **Computers > Sync** on the phone.
 The switch applies to every paired computer: each of them can then read your conversations and send text messages.
 The phone asks for SMS access and contacts access.
 Flux needs SMS access. Contacts access adds names to the conversations.
+Without contacts access, the conversations show numbers, and **Allow contacts** shows under the switch.
 A tablet without a SIM slot does not show the switch.
 
 The desktop then shows the **Messages** page for that phone:
@@ -343,6 +381,7 @@ The desktop then shows the **Messages** page for that phone:
 - Select a conversation to read its last 100 messages and to reply.
 - Select **New message** to send a text message to a phone number.
 - A new message on the phone appears on the desktop in about 1 second.
+- A sent message shows **Sending…** until the phone reports it. When the phone does not report it in 60 seconds, it shows **Not sent** at the time that you sent it.
 - A reply goes out on the SIM of the conversation. A new message uses the default SMS SIM of the phone.
 - The list keeps the 500 newest conversations and shows the first 1 KiB of each latest message.
 - A conversation keeps up to 20 addresses and the first 256 bytes of its name. `fluxd` ignores an address that is longer than 64 bytes.
@@ -373,6 +412,56 @@ Chromium does not accept one, so the phone shows no volume control for it.
 When a player reports album art at an `https` address, the phone loads the image from that address and shows it above the controls.
 Without album art, the controls move up.
 The desktop does not show or control the players on the phone.
+
+### Audio outputs
+
+To select the output of the computer, such as its speakers, an HDMI monitor, or Bluetooth headphones, open **Media** in **Control** on the phone.
+The dock of **Media** shows the default output and its volume, also while nothing plays.
+Tap it to open **Audio outputs**:
+
+- To make an output the default, select it. Apps on the computer then play to that output.
+- To set the volume of an output, tap or drag its volume line.
+- To mute an output or to turn its sound on again, tap the speaker key next to its volume line.
+
+The list uses the rules of the Omarchy output switch, `omarchy-audio-output-switch`.
+It leaves out an output whose ports are all not available, such as headphones that are not plugged in.
+On a laptop with an Omarchy speaker tuning, it leaves out the speakers behind the tuning, because the tuning is the output to select.
+The default output always shows.
+On Omarchy, `fluxd` selects the default output with `omarchy-audio-output-set-default`, which also moves the apps that play now to that output.
+Without Omarchy, `fluxd` runs `pactl set-default-sink`.
+
+The volume line sets the loudest channel, and the other channels keep their balance.
+`fluxd` reads and changes the outputs with `pactl` from `libpulse`, which talks to the PulseAudio server of PipeWire.
+Omarchy installs both.
+To list the outputs that the phone shows, run:
+
+```sh
+pactl --format=json list sinks
+pactl get-default-sink
+```
+
+The phone asks for the outputs when **Media** opens and each 10 seconds while it shows.
+A change on the computer shows on the phone at the next request.
+Each paired device that can control the media can also change the outputs.
+To hear the computer on the phone, tap **Play on phone** next to the output key. See [phone as speaker](camera.md#phone-as-speaker).
+Only Flux for Android has **Audio outputs**.
+Flux for iOS, Flux for macOS, and Flux for Windows do not have this feature.
+
+The phone sends `flux.audio.request`, and `fluxd` answers each request with `flux.audio`:
+
+```json
+{"type":"flux.audio.request","body":{"request":true}}
+{"type":"flux.audio.request","body":{"output":"alsa_output.pci-0000_00_1f.3.hdmi-stereo","default":true}}
+{"type":"flux.audio.request","body":{"output":"alsa_output.pci-0000_00_1f.3.hdmi-stereo","volume":60}}
+{"type":"flux.audio.request","body":{"output":"alsa_output.pci-0000_00_1f.3.hdmi-stereo","mute":true}}
+{"type":"flux.audio","body":{"outputs":[{"name":"alsa_output.pci-0000_00_1f.3.hdmi-stereo","description":"HDMI Monitor","volume":60,"muted":false,"default":true}]}}
+```
+
+`volume` is a percent of the loudest channel.
+The phone sends 0 to 100, and `fluxd` accepts at most 150.
+`fluxd` changes only an output that is in the list of `flux.audio`.
+When `fluxd` cannot read or change the outputs, the answer has an `error` field, for example when `pactl` is not installed.
+A headless `fluxd` has no outputs.
 
 Add desktop commands in the **Commands** section of the **Phone** page or through the CLI:
 
@@ -443,6 +532,7 @@ The switches apply to every paired computer.
 Images from before the option was enabled stay on the phone.
 An image waits while no computer is connected.
 The desktop notification includes an Open action.
+With `auto_clipboard` on, the desktop also puts each received screenshot on the clipboard as an image.
 
 Any app can put an image in a camera folder.
 So Flux sends only the images of the default camera app and of the system apps, such as the camera and the screenshot tool.
@@ -499,6 +589,11 @@ flux-cli input on
 Then select **Remote desktop** in **Control** on the phone. The phone turns to landscape.
 In Flux for macOS, select **Remote desktop** in **Control**.
 See [Remote desktop](remote-desktop.md) for the gestures, the monitors, and the stream.
+
+To use an Android phone or tablet as a second monitor, select **Extend screen** in **Control**.
+The computer adds a monitor with the size of the phone screen, and it removes that monitor when the stream stops.
+The extended screen uses the same switches and needs `wf-recorder` on the computer.
+Only Flux for Android has it. See [Extend the screen](remote-desktop.md#extend-the-screen).
 
 ## Dictation in text fields
 

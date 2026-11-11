@@ -433,6 +433,16 @@ func (d *Daemon) receiveFile(dev *Device, l *lan.Link, p *proto.Packet, name str
 		title = "Photo from " + from
 	case destScreenshot:
 		title = "Screenshot from " + from
+		d.mu.Lock()
+		auto := d.cfg.AutoClipboard
+		d.mu.Unlock()
+		if auto {
+			if err := d.copyImage(t.Path); err != nil {
+				d.logf("copy screenshot %s: %v", t.Path, err)
+			} else {
+				body = "Copied to the clipboard. Saved as " + t.Path
+			}
+		}
 	case destSignature:
 		title = "Signature from " + from
 		if err := d.copyImage(t.Path); err != nil {

@@ -49,11 +49,13 @@ func approveSetup(device string, services []string) error {
 	if err != nil {
 		return err
 	}
-	if err := checkHelper(approve.HelperPath); err != nil {
-		return err
-	}
-	if err := checkServices(services); err != nil {
-		return err
+	if !nixBuild() {
+		if err := checkHelper(approve.HelperPath); err != nil {
+			return err
+		}
+		if err := checkServices(services); err != nil {
+			return err
+		}
 	}
 	if _, err := approve.ReadKey(approve.KeyPath(u.Name), 0); errors.Is(err, approve.ErrNoKey) {
 		if _, err := enrollKey(device); err != nil {
@@ -62,12 +64,19 @@ func approveSetup(device string, services []string) error {
 	} else if err != nil {
 		return fmt.Errorf("the key file is not safe: %v. Remove it with: sudo flux-cli approve remove", err)
 	}
+	if nixBuild() {
+		fmt.Println("Set services.flux.approve.services in NixOS to enable phone approval.")
+		return nil
+	}
 	return enablePAM(services)
 }
 
 // approveEnable adds the helper to the PAM files of services. It needs an
 // enrolled key.
 func approveEnable(services []string) error {
+	if nixBuild() {
+		return errors.New("set services.flux.approve.services in NixOS to enable phone approval")
+	}
 	u, err := sudoUser("enable")
 	if err != nil {
 		return err
@@ -122,6 +131,9 @@ func polkitSetuid(paths []string) error {
 // approveDisable removes the helper from the PAM files of services, or
 // from all of them. The package runs it before it removes Flux.
 func approveDisable(services []string) error {
+	if nixBuild() {
+		return errors.New("change services.flux.approve.services in NixOS to disable phone approval")
+	}
 	if os.Geteuid() != 0 {
 		return errors.New("run it with sudo: sudo flux-cli approve disable")
 	}
@@ -245,7 +257,12 @@ func approveStatus() error {
 	}
 	pam := approve.SystemPAM()
 	for _, s := range approve.PAMServices {
-		unsupported := checkServices([]string{s})
+		var unsupported error
+		if nixBuild() && s == "polkit-1" {
+			unsupported = errors.New("polkit-1 is not supported on Nix")
+		} else if !nixBuild() {
+			unsupported = checkServices([]string{s})
+		}
 		switch {
 		case unsupported != nil && pam.Uses(s):
 			fmt.Printf("%s runs the helper, but it cannot ask the phone: %v\n", s, unsupported)
@@ -254,7 +271,11 @@ func approveStatus() error {
 		case pam.Uses(s):
 			fmt.Printf("%s asks the phone first.\n", s)
 		default:
-			fmt.Printf("%s does not ask the phone. To turn it on, run: sudo flux-cli approve enable %s\n", s, s)
+			if nixBuild() {
+				fmt.Printf("%s does not ask the phone. To turn it on, set services.flux.approve.services in NixOS.\n", s)
+			} else {
+				fmt.Printf("%s does not ask the phone. To turn it on, run: sudo flux-cli approve enable %s\n", s, s)
+			}
 		}
 	}
 	// The helper uses a fixed socket. A fluxd with FLUX_SOCKET or another
@@ -271,7 +292,11 @@ func approveEnroll(device string) error {
 	if _, err := enrollKey(device); err != nil {
 		return err
 	}
-	fmt.Println("To turn it on for sudo, run: sudo flux-cli approve enable")
+	if nixBuild() {
+		fmt.Println("To turn it on for sudo, set services.flux.approve.services in NixOS.")
+	} else {
+		fmt.Println("To turn it on for sudo, run: sudo flux-cli approve enable")
+	}
 	return nil
 }
 
@@ -368,7 +393,15 @@ func approveRemove() error {
 		return err
 	}
 	if len(others) > 0 {
-		fmt.Printf("PAM still asks the phone first for %s. To turn it off for all users, run: sudo flux-cli approve disable\n", strings.Join(others, ", "))
+		if nixBuild() {
+			fmt.Printf("PAM still asks the phone first for %s. To turn it off for all users, change services.flux.approve.services in NixOS.\n", strings.Join(others, ", "))
+		} else {
+			fmt.Printf("PAM still asks the phone first for %s. To turn it off for all users, run: sudo flux-cli approve disable\n", strings.Join(others, ", "))
+		}
+		return nil
+	}
+	if nixBuild() {
+		fmt.Println("To turn off phone approval for all users, change services.flux.approve.services in NixOS.")
 		return nil
 	}
 	return approveDisable(nil)

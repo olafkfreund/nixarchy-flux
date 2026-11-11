@@ -47,11 +47,16 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.net.InetAddress
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import org.omarchy.flux.BuildConfig
 import org.omarchy.flux.core.DeviceUi
 import org.omarchy.flux.core.FluxCore
+import org.omarchy.flux.core.ScrollMode
+import org.omarchy.flux.core.SshKeys
 import org.omarchy.flux.core.ThemeMode
 import org.omarchy.flux.core.UiState
 import org.omarchy.flux.net.isTailscale
@@ -72,6 +77,7 @@ fun ComputersScreen(
     onPair: (DeviceUi) -> Unit,
     onUnpair: (DeviceUi) -> Unit,
     onSync: () -> Unit,
+    onSsh: () -> Unit,
     onAbout: () -> Unit,
 ) {
     val paired = state.devices.filter { it.paired }
@@ -120,7 +126,11 @@ fun ComputersScreen(
                         ListHeader("Settings")
                         val (on, total) = syncSummary(state)
                         SettingRow(Ic.sync, "Sync", "$on of $total switches on. They apply to every computer.", onClick = onSync)
+                        val ssh by SshKeys.info.collectAsStateWithLifecycle()
+                        LaunchedEffect(Unit) { withContext(Dispatchers.IO) { SshKeys.load() } }
+                        SettingRow(Ic.key, "SSH key", sshSummary(ssh), onClick = onSsh)
                         ThemeRow(state)
+                        ScrollRow(state)
                         // The row runs an action and opens no screen, so it has no chevron. A dialog asks first.
                         SettingRow(Ic.power, "Turn off Flux", "This phone stops all connections until you turn Flux on again.", chevron = false) { turningOff = true }
                         SettingRow(Ic.info, "About Flux", aboutVersion(BuildConfig.VERSION_NAME, BuildConfig.DEBUG), onClick = onAbout)
@@ -213,6 +223,14 @@ private fun ComputerCard(d: DeviceUi, onWifi: Boolean, inScope: Boolean, onScope
                                 true
                             }
                         },
+                        if (d.online || !d.canWake) {
+                            null
+                        } else {
+                            CustomAccessibilityAction("Wake ${d.name}") {
+                                FluxCore.wake(d.id)
+                                true
+                            }
+                        },
                     )
                 }
                 .padding(horizontal = 14.dp, vertical = 12.dp),
@@ -234,6 +252,7 @@ private fun ComputerCard(d: DeviceUi, onWifi: Boolean, inScope: Boolean, onScope
                 val ip = listOfNotNull(d.ip.takeIf { it.isNotBlank() }, battery).joinToString(" · ")
                 if (ip.isNotEmpty()) T(ip, size = 12, color = Tn.sub, family = Mono, maxLines = 1)
                 if (!d.online) T("Check that Flux runs on ${d.name}, and that both are on the same Wi-Fi.", size = 13, color = Tn.sub, lineHeight = 1.35f)
+                if (!d.online && d.canWake) WakeButton(d)
             }
         }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -243,11 +262,39 @@ private fun ComputerCard(d: DeviceUi, onWifi: Boolean, inScope: Boolean, onScope
                     FluxCore.rediscover()
                 })
             }
+            if (!d.online && d.canWake) {
+                DropdownMenuItem(text = { Text("Wake") }, leadingIcon = { Sym(Ic.power) }, onClick = {
+                    menu = false
+                    FluxCore.wake(d.id)
+                })
+            }
             DropdownMenuItem(text = { Text("Unpair") }, leadingIcon = { Sym(Ic.unlink) }, onClick = {
                 menu = false
                 onUnpair()
             })
         }
+    }
+}
+
+/**
+ * Wake for a paired computer that is offline and sent its network cards.
+ * It sends a Wake-on-LAN magic packet. It is 36 dp high and takes taps on
+ * 48 dp.
+ */
+@Composable
+private fun WakeButton(d: DeviceUi) {
+    val shape = RoundedCornerShape(18.dp)
+    Row(
+        Modifier.padding(top = 4.dp).overhang(6.dp).clip(shape)
+            .clickable(onClickLabel = "Wake ${d.name}", role = Role.Button) { FluxCore.wake(d.id) }
+            .padding(vertical = 6.dp).height(36.dp).clip(shape)
+            .background(Tn.tile).border(1.dp, Tn.line, shape)
+            .padding(start = 11.dp, end = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Sym(Ic.power, null, tint = Tn.blue, size = 18.dp)
+        T("Wake", size = 13, weight = FontWeight.Medium, maxLines = 1)
     }
 }
 
@@ -361,6 +408,42 @@ private fun SettingRow(@DrawableRes icon: Int, title: String, detail: String, ch
     }
 }
 
+/** 1 choice of a [ChoiceGroup]. [detail] shows under the label. */
+private class Choice(val label: String, @DrawableRes val icon: Int, val selected: Boolean, val detail: String?, val onSelect: () -> Unit)
+
+/** A setting with 1 choice of [choices], as radio rows under [title]. */
+@Composable
+private fun ChoiceGroup(title: String, choices: List<Choice>) {
+    Column(
+        Modifier.fillMaxWidth().clip(TileShape).background(Tn.tile).border(1.dp, Tn.line, TileShape).padding(vertical = 6.dp),
+    ) {
+        T(
+            title, Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 4.dp).semantics { heading() },
+            size = 15, weight = FontWeight.SemiBold,
+        )
+        Column(Modifier.selectableGroup()) {
+            for (c in choices) {
+                val tint = if (c.selected) Tn.blue else Tn.sub
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 52.dp)
+                        .selectable(selected = c.selected, role = Role.RadioButton, onClick = c.onSelect)
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Sym(c.icon, tint = tint, size = 22.dp)
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        T(c.label, size = 15, weight = if (c.selected) FontWeight.SemiBold else FontWeight.Normal)
+                        c.detail?.let { T(it, size = 13, color = Tn.sub, lineHeight = 1.3f) }
+                    }
+                    // The row takes the tap and gives the state to TalkBack, so the mark only shows it.
+                    Sym(if (c.selected) Ic.radioOn else Ic.radioOff, tint = tint, size = 22.dp)
+                }
+            }
+        }
+    }
+}
+
 /**
  * The theme of the app, as 1 choice of [ThemeChoices]. The Computer choice
  * names the theme that it draws now and the computer that sent it.
@@ -368,33 +451,25 @@ private fun SettingRow(@DrawableRes icon: Int, title: String, detail: String, ch
 @Composable
 private fun ThemeRow(state: UiState) {
     val computerLine = computerThemeLine(state, isSystemInDarkTheme())
-    Column(
-        Modifier.fillMaxWidth().clip(TileShape).background(Tn.tile).border(1.dp, Tn.line, TileShape).padding(vertical = 6.dp),
-    ) {
-        T(
-            "Theme", Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 4.dp).semantics { heading() },
-            size = 15, weight = FontWeight.SemiBold,
-        )
-        Column(Modifier.selectableGroup()) {
-            for ((mode, label, icon) in ThemeChoices) {
-                val selected = mode == state.theme
-                val tint = if (selected) Tn.blue else Tn.sub
-                Row(
-                    Modifier.fillMaxWidth().heightIn(min = 52.dp)
-                        .selectable(selected = selected, role = Role.RadioButton, onClick = { FluxCore.setTheme(mode) })
-                        .padding(horizontal = 14.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Sym(icon, tint = tint, size = 22.dp)
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        T(label, size = 15, weight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
-                        if (mode == ThemeMode.Computer) T(computerLine, size = 13, color = Tn.sub, lineHeight = 1.3f)
-                    }
-                    // The row takes the tap and gives the state to TalkBack, so the mark only shows it.
-                    Sym(if (selected) Ic.radioOn else Ic.radioOff, tint = tint, size = 22.dp)
-                }
-            }
-        }
-    }
+    ChoiceGroup(
+        "Theme",
+        ThemeChoices.map { (mode, label, icon) ->
+            Choice(label, icon, mode == state.theme, if (mode == ThemeMode.Computer) computerLine else null) { FluxCore.setTheme(mode) }
+        },
+    )
+}
+
+/** The scroll direction of the touchpad screen, see [ScrollMode]. */
+@Composable
+private fun ScrollRow(state: UiState) {
+    fun choice(mode: ScrollMode, label: String, @DrawableRes icon: Int, detail: String) =
+        Choice(label, icon, mode == state.touchpadScroll, detail) { FluxCore.setTouchpadScroll(mode) }
+    ChoiceGroup(
+        "Touchpad scrolling",
+        listOf(
+            choice(ScrollMode.Computer, "Computer", Ic.desktop, "Scrolls like the touchpad of the computer."),
+            choice(ScrollMode.Natural, "Natural", Ic.touchApp, "The content moves with the fingers."),
+            choice(ScrollMode.Traditional, "Traditional", Ic.south, "Fingers down scroll down, like a scroll wheel."),
+        ),
+    )
 }

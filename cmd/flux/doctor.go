@@ -108,6 +108,14 @@ func doctor() {
 	_, pwErr := exec.LookPath("pw-cat")
 	check(pwErr == nil, "pw-cat is installed, so the phone can be a microphone",
 		"The phone as microphone needs pw-cat. Install it with: sudo pacman -S pipewire")
+	// The phone as speaker needs pw-record. The audio outputs on the phone
+	// and the mute of the phone speaker need pactl.
+	_, recErr := exec.LookPath("pw-record")
+	check(recErr == nil, "pw-record is installed, so the phone can play the audio of this computer",
+		"The phone as speaker needs pw-record. Install it with: sudo pacman -S pipewire")
+	_, pactlErr := exec.LookPath("pactl")
+	check(pactlErr == nil, "pactl is installed, so the phone can select the audio output of this computer",
+		"The audio outputs on the phone need pactl. Install it with: sudo pacman -S libpulse")
 	_, mpvErr := exec.LookPath("mpv")
 	_, ffplayErr := exec.LookPath("ffplay")
 	check(mpvErr == nil || ffplayErr == nil, "mpv or ffplay is installed, so the phone screen can show here",
@@ -123,7 +131,9 @@ func doctor() {
 	check(gsrErr == nil || wfErr == nil, "gpu-screen-recorder is installed, so the phone can show this screen",
 		"The remote desktop needs gpu-screen-recorder. Install it with: sudo pacman -S gpu-screen-recorder")
 	if wfErr == nil {
-		fmt.Println("✓ wf-recorder is installed, so the remote desktop also works on a GPU that gpu-screen-recorder does not support")
+		fmt.Println("✓ wf-recorder is installed, so a phone or a tablet can extend this screen, and the remote desktop also works on a GPU that gpu-screen-recorder does not support")
+	} else {
+		fmt.Println("- To extend this screen to a phone or a tablet, install wf-recorder: sudo pacman -S wf-recorder")
 	}
 	if gsrErr == nil {
 		kms := filepath.Join(filepath.Dir(gsr), "gsr-kms-server")
