@@ -85,6 +85,7 @@ details; approving this plan approves them.
 | C16 | (agy plan review) step 1 fixes the test with `net.Listen` | use master's `ipc.Listen(path)` (`internal/ipc/ipc.go:59`) and pass its listener to `ipc.Serve`; step 1's check runs `go test ./cmd/flux-native/ ./internal/nativemsg/ -count=1` without a `-run` filter | the draft's `-run` pattern matched no test in `cmd/flux-native`, and `net.Listen` skips master's socket setup |
 | C17 | (agy plan review) step order | steps 2 and 3 both edit `cmd/flux/browser.go`, so they run one after the other on the same Codex member; step 4 starts after step 3; step 5 may run beside steps 2–4 | parallel edits of one file conflict |
 | C18 | (agy plan review) step 4 constants | the HM manifests use these literals: `name = "org.omarchy.flux"`, `description = "Flux host for the Flux browser extension"`, Chromium origin `chrome-extension://jgfibbdalckcbmdcngbalobbhcbepamm/`, Gecko ID `flux@omarchy.org` | the coder must not guess them; key order in JSON does not matter to browsers or to `browserRemove` |
+| C19 | (implementation) the browser option adds the core to `home.packages` | only when `services.flux.enable` is off; with it on, `cfg.package` already holds the core. The module's `config` is an `lib.mkMerge` of 2 `mkIf` blocks | 2 copies of each file in the profile risk a `buildEnv` collision |
 
 ## Steps
 

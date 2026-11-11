@@ -130,13 +130,26 @@ let
           type = lib.types.str;
           default = "/home/alice/.config";
         };
+        xdg.dataHome = lib.mkOption {
+          type = lib.types.str;
+          default = "/home/alice/.local/share";
+        };
+        xdg.configFile = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = { };
+        };
+        home.file = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = { };
+        };
         systemd.user.services = lib.mkOption {
           type = lib.types.attrsOf lib.types.anything;
           default = { };
         };
       };
     };
-  hm =
+  evalHm =
+    extra:
     (lib.evalModules {
       specialArgs.lib = hmLib;
       modules = [
@@ -146,8 +159,24 @@ let
           _module.args.pkgs = pkgs;
           services.flux.enable = true;
         }
+        extra
       ];
     }).config;
+  hm = evalHm { };
+  hmBrowser = evalHm { services.flux.browser.enable = true; };
+  hmOnlyBrowser = evalHm {
+    services.flux.enable = lib.mkForce false;
+    services.flux.browser.enable = true;
+  };
+  chromiumFile = hmBrowser.xdg.configFile."chromium/NativeMessagingHosts/org.omarchy.flux.json";
+  geckoFile = hmBrowser.home.file.".mozilla/native-messaging-hosts/org.omarchy.flux.json";
+  hostPath = "/home/alice/.nix-profile/bin/flux-native";
+  hostBase = {
+    name = "org.omarchy.flux";
+    description = "Flux host for the Flux browser extension";
+    path = hostPath;
+    type = "stdio";
+  };
   hmChecked =
     assert lib.assertMsg (
       hm.systemd.user.services.fluxd.Unit.X-RestartIfChanged == false
@@ -160,6 +189,39 @@ let
     assert lib.assertMsg (builtins.deepSeq (map (
       p: p.drvPath
     ) hm.home.packages) true) "HM packages do not evaluate";
+    assert lib.assertMsg (
+      builtins.fromJSON chromiumFile.text
+      == hostBase // { allowed_origins = [ "chrome-extension://jgfibbdalckcbmdcngbalobbhcbepamm/" ]; }
+    ) "HM Chromium manifest differs from the CLI's";
+    assert lib.assertMsg (
+      builtins.fromJSON geckoFile.text == hostBase // { allowed_extensions = [ "flux@omarchy.org" ]; }
+    ) "HM Gecko manifest differs from the CLI's";
+    assert lib.assertMsg (
+      builtins.attrNames hmBrowser.xdg.configFile == [
+        "BraveSoftware/Brave-Browser/NativeMessagingHosts/org.omarchy.flux.json"
+        "chromium/NativeMessagingHosts/org.omarchy.flux.json"
+        "google-chrome/NativeMessagingHosts/org.omarchy.flux.json"
+      ]
+    ) "HM Chromium manifests are not the 3 defaults";
+    assert lib.assertMsg (
+      builtins.attrNames hmBrowser.home.file
+      == [ ".mozilla/native-messaging-hosts/org.omarchy.flux.json" ]
+    ) "HM must write only the Firefox manifest by default";
+    assert lib.assertMsg (
+      let
+        a = hmBrowser.home.activation.fluxBrowserExtension.data;
+      in
+      lib.hasInfix "/home/alice/.local/share/flux/browser-extension" a && lib.hasInfix "cp -rLT" a
+    ) "HM extension activation must copy into the data home";
+    assert lib.assertMsg (
+      lib.elem packages.flux hmBrowser.home.packages && !(lib.elem core hmBrowser.home.packages)
+    ) "with services.flux.enable, HM browser must not add the core a second time";
+    assert lib.assertMsg (
+      hmOnlyBrowser.systemd.user.services == { } && lib.elem core hmOnlyBrowser.home.packages
+    ) "HM browser alone must work without services.flux.enable";
+    assert lib.assertMsg (
+      hm.xdg.configFile == { } && hm.home.file == { } && !(hm.home.activation ? fluxBrowserExtension)
+    ) "HM browser off must write no manifest and no extension step";
     true;
 in
 packages
@@ -170,6 +232,15 @@ packages
 
   hm-module = pkgs.runCommand "flux-hm-module-check" { } ''
     echo ${lib.boolToString hmChecked} > $out
+  '';
+
+  browser-extension = pkgs.runCommand "flux-browser-extension-check" { } ''
+    test -x ${core}/bin/flux-native
+    m=${core}/share/flux/browser-extension
+    test -f $m/manifest.json -a -f $m/manifest.firefox.json
+    cat $m/manifest.json $m/manifest.firefox.json | grep '"version"' | grep -q '"[0-9]*\.[0-9]*\.[0-9]*"'
+    if cat $m/manifest.json $m/manifest.firefox.json | grep '"version"' | grep -q '+'; then exit 1; fi
+    touch $out
   '';
 
   ldflags = pkgs.runCommand "flux-ldflags-check" { nativeBuildInputs = [ pkgs.binutils ]; } ''
