@@ -14,38 +14,56 @@ confirmed bugs that are now on master.
 
 **#35: the tailnet forwarder leaks** (`android/tsnet/forward.go`).
 
-- `forward` (lines 30–51) copies both ways. When the local side closes
-  first, the main copy ends, but `forward` then waits on `<-done` for the
-  other copy, which still reads the tailnet connection. A peer that keeps its
-  side open leaves one goroutine and 2 file descriptors behind for each
-  connection, for as long as that peer lives.
+- `forward` (lines 30–51) copies both ways and can hang either way. When the
+  local side closes first, `forward` waits on `<-done` while the inner copy
+  still reads the tailnet connection: 2 goroutines and both connections stay
+  open. When the tailnet side closes first, the inner copy half-closes the
+  local socket and ends, but the outer copy can keep reading a local service
+  that keeps its side open. Either way the connection lives as long as the
+  other end does.
 - `serve` (lines 14–28) starts a goroutine per accepted connection with no
-  limit, so a peer can open connections without end.
+  limit, and `main.go:81` starts one `serve` per port. Its cancellation
+  watcher stays when `Accept` fails first, and a cancel closes only the
+  listener: open connections and their 5-second dial get no signal (the
+  process exits at `main.go:89`, which reclaims them).
 
 **#38: the webcam can show a black image** (`android/app/src/main/java/org/omarchy/flux/webcam/CameraSource.kt`).
 
 - `repeat` (around lines 204–228) builds a capture request for one physical
   lens with `createCaptureRequest(TEMPLATE_RECORD, setOf(physicalId))` and
   sets `SCALER_CROP_REGION` with `setPhysicalCameraKey`, without checking
-  that the camera lists that key in `availablePhysicalCameraRequestKeys`.
-  On a camera that does not, the call throws, the exception is only logged
-  (line 226), no repeating request runs, and the stream stays black.
-- `startSession` (lines 286–320) falls back to the logical camera when
-  `isSessionConfigurationSupported` says no, but `onConfigureFailed`
-  (line 303) only reports a failure, so a lens that the phone cannot stream
-  alone still ends the webcam.
+  that the logical camera lists that key in
+  `availablePhysicalCameraRequestKeys` (API 28+, may be null). Any exception
+  before the first repeating request is only logged (line 226), so no
+  request runs and the stream stays black. Whether this exact setter throws
+  on such a camera is not shown by the code; the missing check and the
+  swallowed error are.
+- `startSession` (lines 286–320) falls back to the logical camera only when
+  `isSessionConfigurationSupported` says no (an exception there counts as
+  yes, line 309). `onConfigureFailed` (line 303) and a throwing
+  `createCaptureSession` (lines 315–318) only report a failure.
+- The fallback (line 313) clears only `physicalId` and `activeArray`, so it
+  keeps the physical lens's size, orientation and zoom limits, and at line
+  161 a size the logical camera does not list can survive.
 
 ## Proposed outcome
 
-- A tailnet connection whose one side closes ends both directions, so no
-  goroutine or file descriptor is left behind, whichever side closes first.
-- The forwarder holds a bounded number of connections at once and refuses or
-  drops the rest.
+- A tailnet connection never outlives both ends: whichever side closes
+  first, the forwarder finishes the other direction within a bounded time and
+  closes both, without cutting a response that the other side is still
+  sending.
+- At most 64 tailnet connections are forwarded at once across all ports of
+  the process; more are closed at once, and capacity returns as connections
+  end.
+- Cancelling the node closes the listeners and every open connection, and
+  `serve` leaves no goroutine behind.
 - A webcam stream with a lens that the camera cannot control alone keeps
   running: it either drops the per-lens crop (no zoom on that lens) or falls
   back to the logical camera, instead of going black.
-- A lens session that fails to configure falls back to the logical camera,
-  as the `isSessionConfigurationSupported` path already does.
+- A lens session that fails to configure, or whose creation throws, is
+  retried once with the logical camera, using a configuration that is valid
+  for the logical camera (its sizes, orientation and zoom); if that fails
+  too, the webcam reports the error.
 - Both fixes have tests where this host can run them: Go tests for the
   forwarder; for the camera, the logic that decides "use the physical keys or
   not" is a pure function with a JVM unit test, and CI compiles the app.
@@ -69,9 +87,9 @@ confirmed bugs that are now on master.
 
 ## Open questions
 
-1. **Connection limit.** How many tailnet connections at once? Recommended:
-   64, refusing (closing at once) the ones over it, since fluxd needs only a
-   few per device.
+1. **Connection limit.** How many tailnet connections at once, and counted
+   how? Recommended: 64 across all ports of the process, closing the ones
+   over it at once.
 2. **Lens without physical keys.** Keep the chosen lens without zoom, or fall
    back to the logical camera (zoom works, but the lens may not be the one
    picked)? Recommended: keep the lens and drop the per-lens zoom, since the
