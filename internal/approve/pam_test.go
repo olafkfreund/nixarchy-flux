@@ -16,13 +16,25 @@ session		include		system-auth
 session		optional	pam_systemd.so class=none
 `
 
+func TestPAMLineHelperPath(t *testing.T) {
+	if got := PAMLine(); got != "auth sufficient pam_exec.so quiet stdout /usr/lib/flux/flux-approve" {
+		t.Fatalf("default PAM line = %q", got)
+	}
+	original := HelperPath
+	HelperPath = "/nix/store/flux/lib/flux/flux-approve"
+	t.Cleanup(func() { HelperPath = original })
+	if got := PAMLine(); got != "auth sufficient pam_exec.so quiet stdout "+HelperPath {
+		t.Fatalf("custom PAM line = %q", got)
+	}
+}
+
 func TestAddPAMLine(t *testing.T) {
 	out, changed, err := AddPAMLine(archSudo)
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
 	}
 	lines := strings.Split(out, "\n")
-	if lines[0] != "#%PAM-1.0" || lines[1] != pamComment || lines[2] != PAMLine || !strings.HasPrefix(lines[3], "auth\t\tinclude") {
+	if lines[0] != "#%PAM-1.0" || lines[1] != pamComment || lines[2] != PAMLine() || !strings.HasPrefix(lines[3], "auth\t\tinclude") {
 		t.Fatalf("the line must come before the first auth rule:\n%s", out)
 	}
 	// A second run changes nothing.
@@ -42,7 +54,7 @@ func TestAddPAMLineKeepsACommentedHelper(t *testing.T) {
 	// A commented line does not run the helper, so Flux adds its rule.
 	in := "#auth sufficient pam_exec.so " + HelperPath + "\nauth include system-auth\n"
 	out, changed, err := AddPAMLine(in)
-	if err != nil || !changed || strings.Count(out, PAMLine) != 1 {
+	if err != nil || !changed || strings.Count(out, PAMLine()) != 1 {
 		t.Fatalf("changed=%v err=%v\n%s", changed, err, out)
 	}
 }
