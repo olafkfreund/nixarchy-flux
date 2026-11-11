@@ -138,7 +138,7 @@ func TestDevicesListsPairedPhones(t *testing.T) {
 
 func TestSendURL(t *testing.T) {
 	d := start(t)
-	rep := ask(t, map[string]any{"command": "send", "url": "https://omarchy.org"})
+	rep := ask(t, map[string]any{"command": "send", "url": "  https://example.com/a?b  "})
 	if !rep.OK || rep.Error != nil {
 		t.Fatalf("reply: %+v", rep)
 	}
@@ -146,8 +146,38 @@ func TestSendURL(t *testing.T) {
 	if len(sent) != 1 || sent[0].Method != "share.url" {
 		t.Fatalf("fluxd got %+v", sent)
 	}
-	if sent[0].Params["url"] != "https://omarchy.org" {
+	if sent[0].Params["url"] != "https://example.com/a?b" {
 		t.Errorf("url param is %v", sent[0].Params["url"])
+	}
+}
+
+func TestSendRefusesNonWebLinks(t *testing.T) {
+	for _, link := range []string{
+		"javascript:alert(1)", "file:///etc/passwd", "intent://x",
+		"https://", "https://:443/", "https://[broken",
+	} {
+		t.Run(link, func(t *testing.T) {
+			d := start(t)
+			rep := ask(t, map[string]any{"command": "send", "url": link})
+			if rep.OK || rep.Error == nil || rep.Error.Message != "only web links can be sent" {
+				t.Fatalf("reply: %+v", rep)
+			}
+			if got := d.sent(); len(got) != 0 {
+				t.Errorf("fluxd got %+v, want no IPC request", got)
+			}
+		})
+	}
+}
+
+func TestSendLimitUsesTrimmedLink(t *testing.T) {
+	d := start(t)
+	link := "https://example.com/" + strings.Repeat("a", maxURL-len("https://example.com/"))
+	rep := ask(t, map[string]any{"command": "send", "url": " " + link + " "})
+	if !rep.OK || rep.Error != nil {
+		t.Fatalf("reply: %+v", rep)
+	}
+	if got := d.sent(); len(got) != 1 || got[0].Params["url"] != link {
+		t.Errorf("fluxd got %+v, want the trimmed link", got)
 	}
 }
 

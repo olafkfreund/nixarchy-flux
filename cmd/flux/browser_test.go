@@ -239,6 +239,37 @@ func TestBrowserRemove(t *testing.T) {
 	}
 }
 
+func TestBrowserRemoveDryRun(t *testing.T) {
+	home := installable(t)
+	mkdir(t, filepath.Join(home, ".config", "chromium"))
+	if err := browser([]string{"install"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".config", "chromium", "NativeMessagingHosts", nativemsg.Host+".json")
+	before := read(t, path, nil)
+	for _, flag := range []string{"--dry-run", "-n"} {
+		if err := browser([]string{"remove", flag}); err != nil {
+			t.Fatal(err)
+		}
+		if got := read(t, path, nil); got != before {
+			t.Errorf("%s changed the manifest", flag)
+		}
+	}
+}
+
+func TestBrowserRemoveBadOption(t *testing.T) {
+	home := installable(t)
+	mkdir(t, filepath.Join(home, ".config", "chromium"))
+	if err := browser([]string{"install"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".config", "chromium", "NativeMessagingHosts", nativemsg.Host+".json")
+	if err := browser([]string{"remove", "--all"}); err == nil {
+		t.Error("an unknown option was accepted")
+	}
+	read(t, path, nil)
+}
+
 // installable gives the test a home directory with a flux-native that
 // hostPath can find, so that the install runs without an installed Flux.
 func installable(t *testing.T) string {

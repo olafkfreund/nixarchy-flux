@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 
@@ -127,8 +128,12 @@ func send(req request) (reply, error) {
 	if link == "" {
 		return reply{}, errors.New("there is no link to send")
 	}
-	if len(req.URL) > maxURL {
-		return reply{}, fmt.Errorf("the link is %d bytes, over the %d limit", len(req.URL), maxURL)
+	if len(link) > maxURL {
+		return reply{}, fmt.Errorf("the link is %d bytes, over the %d limit", len(link), maxURL)
+	}
+	u, err := url.Parse(link)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return reply{}, errors.New("only web links can be sent")
 	}
 	if err := call("share.url", map[string]any{"device": req.Device, "url": link}, nil); err != nil {
 		return fail(err), nil

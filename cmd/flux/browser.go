@@ -95,7 +95,7 @@ func browser(args []string) error {
 	case "install":
 		return browserInstall(args[1:])
 	case "remove", "uninstall":
-		return browserRemove()
+		return browserRemove(args[1:])
 	}
 	return errors.New("unknown browser action. Use install or remove")
 }
@@ -174,7 +174,16 @@ func browserInstall(args []string) error {
 	return nil
 }
 
-func browserRemove() error {
+func browserRemove(args []string) error {
+	dry := false
+	for _, a := range args {
+		switch a {
+		case "--dry-run", "-n":
+			dry = true
+		default:
+			return fmt.Errorf("unknown option %q. Use --dry-run", a)
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -198,6 +207,11 @@ func browserRemove() error {
 		// Leave a file of another program alone, even with the same name.
 		var m hostManifest
 		if json.Unmarshal(body, &m) != nil || m.Name != nativemsg.Host {
+			continue
+		}
+		if dry {
+			fmt.Println("  would remove", path)
+			removed++
 			continue
 		}
 		if err := os.Remove(path); err != nil {
