@@ -1,4 +1,4 @@
-// Package proto implements the KDE Connect packet format, the identity,
+// Package proto implements the Flux packet format, the identity,
 // and the certificate helpers that the LAN backend needs.
 package proto
 
@@ -10,14 +10,18 @@ import (
 	"time"
 )
 
-// ProtocolVersion is the KDE Connect protocol version that Flux speaks.
+// ProtocolVersion is the protocol version that Flux speaks.
 const ProtocolVersion = 8
 
 // MaxPacketSize is the largest packet that Flux reads. Larger lines drop
 // the link. SMS threads with many messages are the largest packets.
 const MaxPacketSize = 16 << 20
 
-// Packet is one KDE Connect network packet.
+// maxTypeSize is the longest packet type that Flux reads. The longest type
+// of the protocol has less than 40 characters.
+const maxTypeSize = 128
+
+// Packet is one Flux network packet.
 type Packet struct {
 	ID                  PacketID        `json:"id"`
 	Type                string          `json:"type"`
@@ -29,8 +33,8 @@ type Packet struct {
 // TransferInfo tells the receiver where to fetch the payload.
 type TransferInfo struct {
 	Port int `json:"port,omitempty"`
-	// Tunnel is set instead of Port by the Flux tunnel extension. The
-	// receiver then listens, and the sender connects.
+	// Tunnel is set instead of Port for a tunnel payload. The receiver
+	// then listens, and the sender connects.
 	Tunnel string `json:"tunnel,omitempty"`
 }
 
@@ -86,6 +90,9 @@ func Unmarshal(line []byte) (*Packet, error) {
 	}
 	if p.Type == "" {
 		return nil, fmt.Errorf("packet has no type")
+	}
+	if len(p.Type) > maxTypeSize {
+		return nil, fmt.Errorf("packet type has %d bytes, more than %d", len(p.Type), maxTypeSize)
 	}
 	if len(p.Body) == 0 || string(p.Body) == "null" {
 		p.Body = []byte("{}")

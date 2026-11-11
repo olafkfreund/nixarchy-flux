@@ -39,18 +39,28 @@ struct TextModeView: View {
 
     private var result: some View {
         VStack(spacing: 12) {
-            if scan.text.isEmpty {
+            if !scan.found {
                 Text("No text found. Move closer or add light.")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
             } else {
-                TextEditor(text: $scan.text)
-                    .font(.body)
-                    .frame(minHeight: 120, maxHeight: 220)
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.4)))
+                // A dictation adds its words at the end of the text.
+                VoiceBar(language: window.app.dictationLanguage, onText: { spoken in
+                    scan.text = DictationText.insert(scan.text, start: scan.text.utf16.count, end: scan.text.utf16.count, spoken: spoken).text
+                }) {
+                    TextEditor(text: $scan.text)
+                        .font(.body)
+                        .frame(minHeight: 120, maxHeight: 220)
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.4)))
+                }
             }
             HStack {
+                if scan.found {
+                    Button("Clear", systemImage: "xmark.circle") { scan.text = "" }
+                        .disabled(scan.text.isEmpty)
+                        .help("Clear the text")
+                }
                 Spacer()
                 Button("Retake", systemImage: "arrow.counterclockwise", action: scan.retake)
                 if !scan.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

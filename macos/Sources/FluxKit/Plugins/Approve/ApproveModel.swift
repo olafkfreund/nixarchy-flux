@@ -15,6 +15,8 @@ public enum ApproveOutcome: Sendable, Equatable {
     case cancelled
     /// The wait of the computer ended.
     case expired
+    /// This device or the computer ended the pairing.
+    case unpaired
 
     public var text: String {
         switch self {
@@ -26,6 +28,7 @@ public enum ApproveOutcome: Sendable, Equatable {
         case .refused(let m): return "Refused: \(m)"
         case .cancelled: return "Cancelled by the computer"
         case .expired: return "Timed out"
+        case .unpaired: return "Ended by the unpair"
         }
     }
 }
@@ -40,6 +43,19 @@ public struct ApproveRecord: Sendable, Identifiable, Equatable {
     public var summary: String
     public var received: Date
     public var outcome: ApproveOutcome
+    /// The request, for the chat. It is nil for a request that is not valid.
+    public var request: ApproveRequest? = nil
+    /// When the request ended, or nil while it is open.
+    public var resolved: Date? = nil
+}
+
+/// Whether this device can approve.
+public enum ApproveAvailability: Sendable, Equatable {
+    case ready
+    /// The device has no Secure Enclave, such as the simulator. Nothing fixes it.
+    case noSecureEnclave(String)
+    /// The biometry is not set up, locked, or not available now.
+    case biometry(String)
 }
 
 /// The state of the approval prompt.
@@ -86,5 +102,6 @@ public final class ApproveModel {
     func resolve(_ requestId: String, _ outcome: ApproveOutcome) {
         guard let i = history.firstIndex(where: { $0.requestId == requestId && $0.outcome == .open }) else { return }
         history[i].outcome = outcome
+        history[i].resolved = Date()
     }
 }

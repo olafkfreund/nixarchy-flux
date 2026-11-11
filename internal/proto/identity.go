@@ -3,41 +3,47 @@ package proto
 import (
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"unicode"
 )
+
+// TypeOldIdentity is the identity type of the apps and daemons from before
+// Flux 0.8. They cannot link with this version.
+const TypeOldIdentity = "kdeconnect.identity"
 
 // Packet types that Flux uses.
 const (
-	TypeIdentity            = "kdeconnect.identity"
-	TypePair                = "kdeconnect.pair"
-	TypePing                = "kdeconnect.ping"
-	TypeBattery             = "kdeconnect.battery"
-	TypeClipboard           = "kdeconnect.clipboard"
-	TypeClipboardConnect    = "kdeconnect.clipboard.connect"
-	TypeShare               = "kdeconnect.share.request"
-	TypeShareUpdate         = "kdeconnect.share.request.update"
-	TypeNotification        = "kdeconnect.notification"
-	TypeNotificationRequest = "kdeconnect.notification.request"
-	TypeNotificationReply   = "kdeconnect.notification.reply"
-	TypeNotificationAction  = "kdeconnect.notification.action"
-	TypeFindMyPhone         = "kdeconnect.findmyphone.request"
-	TypeRunCommand          = "kdeconnect.runcommand"
-	TypeRunCommandRequest   = "kdeconnect.runcommand.request"
-	TypeMpris               = "kdeconnect.mpris"
-	TypeMprisRequest        = "kdeconnect.mpris.request"
-	TypeSftp                = "kdeconnect.sftp"
-	TypeSftpRequest         = "kdeconnect.sftp.request"
-	TypeSmsMessages         = "kdeconnect.sms.messages"
-	TypeSmsRequest          = "kdeconnect.sms.request"
-	TypeSmsConversations    = "kdeconnect.sms.request_conversations"
-	TypeSmsConversation     = "kdeconnect.sms.request_conversation"
-	TypeConnectivity        = "kdeconnect.connectivity_report"
-	TypeTelephony           = "kdeconnect.telephony"
+	TypeIdentity            = "flux.identity"
+	TypePair                = "flux.pair"
+	TypePing                = "flux.ping"
+	TypeBattery             = "flux.battery"
+	TypeClipboard           = "flux.clipboard"
+	TypeClipboardConnect    = "flux.clipboard.connect"
+	TypeShare               = "flux.share.request"
+	TypeShareUpdate         = "flux.share.request.update"
+	TypeNotification        = "flux.notification"
+	TypeNotificationRequest = "flux.notification.request"
+	TypeNotificationReply   = "flux.notification.reply"
+	TypeNotificationAction  = "flux.notification.action"
+	TypeFindMyPhone         = "flux.findmyphone.request"
+	TypeRunCommand          = "flux.runcommand"
+	TypeRunCommandRequest   = "flux.runcommand.request"
+	TypeMpris               = "flux.mpris"
+	TypeMprisRequest        = "flux.mpris.request"
+	TypeSftp                = "flux.sftp"
+	TypeSftpRequest         = "flux.sftp.request"
+	TypeSmsMessages         = "flux.sms.messages"
+	TypeSmsRequest          = "flux.sms.request"
+	TypeSmsConversations    = "flux.sms.request_conversations"
+	TypeSmsConversation     = "flux.sms.request_conversation"
+	TypeTelephony           = "flux.telephony"
 	// TypeMousepadRequest moves the pointer, clicks, scrolls, and types on
 	// this computer. The phone sends it. docs/remote-input.md describes
 	// the body.
-	TypeMousepadRequest = "kdeconnect.mousepad.request"
+	TypeMousepadRequest = "flux.mousepad.request"
 
 	// TypeFluxTunnel carries the port of a listener that a Flux phone opens,
 	// so that fluxd can connect out for payloads and Browse PC. The phone
@@ -68,9 +74,55 @@ const (
 	// while its clipboard sync is on.
 	TypeFluxClipboardImage = "flux.clipboard.image"
 	// TypeFluxInput tells the phone whether this computer accepts remote
-	// input, {"enabled": bool}. fluxd sends it after the link starts and
-	// after the setting changes.
+	// input and whether it shows its screen on the phone, {"enabled":
+	// bool, "desktop": bool, "keyRepeat": true, "naturalScroll": bool,
+	// "extend": bool}. keyRepeat tells that a special key can have a repeat
+	// count. naturalScroll is the scroll direction of the Hyprland
+	// touchpads, and it is missing without Hyprland. extend tells that the
+	// phone can extend the screen of this computer. fluxd sends it after
+	// the link starts and after a setting changes.
 	TypeFluxInput = "flux.input"
+	// TypeFluxDesktop starts and stops the stream of this screen to the
+	// phone. Both sides send it.
+	TypeFluxDesktop = "flux.desktop"
+	// TypeFluxShortcuts carries the Hyprland key bindings and workspaces to
+	// the phone, and runs a binding or a workspace action for it. Both
+	// sides send it.
+	TypeFluxShortcuts = "flux.shortcuts"
+	// TypeFluxTheme carries the active Omarchy theme of this computer to
+	// the phone: the name, the mode, the colors, and the Hyprland active
+	// border. fluxd sends it after the link starts and after the theme
+	// changes, only to a device that lists it as incoming. docs/omarchy.md
+	// describes the body.
+	TypeFluxTheme = "flux.theme"
+	// TypeFluxStreamRequest asks a device to start its camera or its
+	// microphone for this computer, {"kind": "webcam"} or {"kind": "mic"}.
+	// The packet only asks. The device starts the stream with flux.webcam
+	// or flux.mic only after its user taps start on the device. fluxd sends
+	// it only to a paired, connected device that lists it as incoming.
+	// docs/camera.md describes it.
+	TypeFluxStreamRequest = "flux.stream.request"
+	TypeFluxTransfer      = "flux.transfer"
+
+	// TypeFluxSSH carries the SSH key of a phone and the sign requests of
+	// the ssh-agent of fluxd. fluxd asks for the key and sends the sign
+	// requests. The phone sends its key and the signatures. docs/ssh.md
+	// describes the body.
+	TypeFluxSSH = "flux.ssh"
+)
+
+// Packet types of the audio outputs of this computer.
+const (
+	// TypeFluxAudio carries the audio outputs of this computer to the
+	// phone: the name, the description, the volume, and the mute state of
+	// each output, and which output is the default. fluxd sends it as the
+	// answer to each flux.audio.request. docs/features.md describes the
+	// body.
+	TypeFluxAudio = "flux.audio"
+	// TypeFluxAudioRequest asks for the audio outputs, selects the default
+	// output, or sets the volume or the mute state of 1 output. The phone
+	// sends it.
+	TypeFluxAudioRequest = "flux.audio.request"
 )
 
 // Incoming lists the packet types that Flux accepts. The phone enables a
@@ -78,10 +130,13 @@ const (
 var Incoming = []string{
 	TypePing, TypeBattery, TypeClipboard, TypeClipboardConnect,
 	TypeShare, TypeShareUpdate, TypeNotification, TypeRunCommandRequest,
-	TypeMprisRequest, TypeSftp, TypeSftpRequest,
-	TypeSmsMessages, TypeConnectivity, TypeTelephony,
+	TypeMprisRequest, TypeSftpRequest,
+	TypeSmsMessages, TypeTelephony,
 	TypeFluxTunnel, TypeFluxWebcam, TypeFluxDnd, TypeFluxMic, TypeFluxScreen,
 	TypeFluxApprove, TypeFluxHerdr, TypeFluxClipboardImage, TypeMousepadRequest,
+	TypeFluxDesktop, TypeFluxShortcuts, TypeFluxTransfer,
+	TypeFluxAudioRequest,
+	TypeFluxSSH,
 }
 
 // Outgoing lists the packet types that Flux sends.
@@ -89,13 +144,16 @@ var Outgoing = []string{
 	TypePing, TypeBattery, TypeClipboard, TypeClipboardConnect, TypeShare,
 	TypeNotification, TypeNotificationRequest, TypeNotificationReply, TypeNotificationAction,
 	TypeFindMyPhone, TypeRunCommand, TypeMpris,
-	TypeSftpRequest, TypeSmsRequest, TypeSmsConversations,
+	TypeSmsRequest, TypeSmsConversations,
 	TypeSmsConversation, TypeSftp, TypeFluxWebcam, TypeFluxDnd,
 	TypeFluxMic, TypeFluxScreen, TypeFluxApprove, TypeFluxHerdr,
-	TypeFluxClipboardImage, TypeFluxInput,
+	TypeFluxClipboardImage, TypeFluxInput, TypeFluxDesktop, TypeFluxShortcuts, TypeFluxTransfer,
+	TypeFluxTheme, TypeFluxStreamRequest,
+	TypeFluxAudio,
+	TypeFluxSSH,
 }
 
-// Identity is the body of a kdeconnect.identity packet.
+// Identity is the body of a flux.identity packet.
 type Identity struct {
 	DeviceID             string   `json:"deviceId"`
 	DeviceName           string   `json:"deviceName"`
@@ -104,6 +162,12 @@ type Identity struct {
 	IncomingCapabilities []string `json:"incomingCapabilities"`
 	OutgoingCapabilities []string `json:"outgoingCapabilities"`
 	TCPPort              int      `json:"tcpPort,omitempty"`
+	// App and AppVersion name the Flux program that sends the identity
+	// and its version: "fluxd", "android", "android-debug", "ios", or
+	// "macos", and a version such as "0.7.0". An earlier Flux app sends
+	// neither.
+	App        string `json:"app,omitempty"`
+	AppVersion string `json:"appVersion,omitempty"`
 	// TargetDeviceID and TargetProtocolVersion go only in the plain-text
 	// identity that the connecting side writes before TLS. The receiver
 	// closes the socket when they do not match its own identity.
@@ -129,12 +193,15 @@ var (
 	nameInvalidChars = regexp.MustCompile(`["',;:.!?()\[\]<>]`)
 )
 
-// ValidDeviceID reports whether id has the KDE Connect device ID format.
+// ValidDeviceID reports whether id has the Flux device ID format.
 func ValidDeviceID(id string) bool { return deviceIDRe.MatchString(id) }
 
-// CleanName removes the characters that KDE Connect does not allow in a
-// device name and limits the name to 32 characters.
+// CleanName removes the characters that Flux does not allow in a
+// device name, control characters, and bidi controls. It limits the name to
+// 32 characters. A name then cannot move the cursor of a terminal, add a
+// line to a log, or change the order of the text around it.
 func CleanName(name string) string {
+	name = strings.Map(dropControl, name)
 	name = strings.TrimSpace(nameInvalidChars.ReplaceAllString(name, ""))
 	if r := []rune(name); len(r) > 32 {
 		name = strings.TrimSpace(string(r[:32]))
@@ -145,9 +212,59 @@ func CleanName(name string) string {
 	return name
 }
 
+// IsControl reports whether r is a control character or a bidi control:
+// C0, DEL, C1, and the marks, embeddings, overrides, and isolates that
+// change the direction of text. A terminal or a text view does not show
+// them as text.
+func IsControl(r rune) bool {
+	switch {
+	case unicode.IsControl(r):
+		return true
+	case r == 0x061c, r == 0x200e, r == 0x200f:
+		return true
+	case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
+}
+
+func dropControl(r rune) rune {
+	if IsControl(r) {
+		return -1
+	}
+	return r
+}
+
+// CleanText removes control characters and bidi controls from s and
+// limits it to max characters. Flux uses it for short text from the
+// network, such as the app version of a device.
+func CleanText(s string, max int) string {
+	s = strings.TrimSpace(strings.Map(dropControl, s))
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max])
+	}
+	return s
+}
+
+// deviceTypes are the device types that Flux knows.
+var deviceTypes = []string{"phone", "tablet", "desktop", "laptop", "tv"}
+
+// CleanType returns t when it is a device type that Flux knows, and ""
+// for any other value. The UI shows "" as a phone.
+func CleanType(t string) string {
+	if slices.Contains(deviceTypes, t) {
+		return t
+	}
+	return ""
+}
+
 // DeviceType returns "laptop" when the machine has a battery and "desktop"
-// when it does not.
-func DeviceType() string {
+// when it does not. It reads sysfs on the first call only.
+func DeviceType() string { return deviceType() }
+
+var deviceType = sync.OnceValue(readDeviceType)
+
+func readDeviceType() string {
 	if b, err := os.ReadFile("/sys/class/dmi/id/chassis_type"); err == nil {
 		switch strings.TrimSpace(string(b)) {
 		case "8", "9", "10", "11", "14", "30", "31", "32":

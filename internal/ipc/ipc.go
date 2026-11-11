@@ -1,5 +1,6 @@
 // Package ipc is the JSON lines protocol between fluxd and its clients on
-// the Unix socket $XDG_RUNTIME_DIR/flux/fluxd.sock.
+// a Unix socket. config.SocketPath gives the path: $FLUX_SOCKET, else
+// $XDG_RUNTIME_DIR/flux/fluxd.sock, else /run/user/<uid>/flux/fluxd.sock.
 package ipc
 
 import (
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -50,69 +52,210 @@ type Handler interface {
 // maxSocketPath is the longest Unix socket path that Linux accepts.
 const maxSocketPath = 107
 
-// Serve listens on the socket path until ctx ends.
-func Serve(ctx context.Context, path string, h Handler) error {
+// Listen makes the socket of fluxd. The folder of the socket must be a
+// folder of this user that no other user can write to, as OwnDir checks.
+// Listen fails when another fluxd answers on the socket, so fluxd can call
+// it before it starts the network.
+func Listen(path string) (net.Listener, error) {
 	if len(path) > maxSocketPath {
-		return fmt.Errorf("the socket path has %d bytes, and the limit is %d: %s", len(path), maxSocketPath, path)
+		return nil, fmt.Errorf("the socket path has %d bytes, and the limit is %d: %s", len(path), maxSocketPath, path)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	if _, err := OwnDir(filepath.Dir(path)); err != nil {
+		return nil, err
 	}
 	if c, err := net.DialTimeout("unix", path, 500*time.Millisecond); err == nil {
 		c.Close()
-		return fmt.Errorf("fluxd already runs on %s", path)
+		return nil, fmt.Errorf("fluxd already runs on %s", path)
 	}
-	_ = os.Remove(path)
+	// A socket that nobody answers on is left from a fluxd that stopped.
+	if st, err := os.Lstat(path); err == nil {
+		if st.Mode().Type() != fs.ModeSocket {
+			return nil, fmt.Errorf("%s exists and is not a socket", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, err
+		}
+	}
 	ln, err := net.Listen("unix", path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		ln.Close()
-		return err
+		return nil, err
 	}
-	go func() {
-		<-ctx.Done()
-		ln.Close()
-		os.Remove(path)
-	}()
+	return ln, nil
+}
+
+// Serve answers the clients on ln until ctx ends. Then it closes ln, which
+// also removes the socket file. A failed Accept does not stop fluxd: Serve
+// waits a moment and accepts again.
+func Serve(ctx context.Context, ln net.Listener, h Handler) error {
+	stop := context.AfterFunc(ctx, func() { ln.Close() })
+	defer stop()
+	var wait time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
 			}
-			return err
+			// For example, fluxd has no free file descriptor. A client
+			// that goes away frees one.
+			wait = min(max(2*wait, 5*time.Millisecond), time.Second)
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return nil
+			}
+			continue
 		}
+		wait = 0
 		go serveConn(ctx, conn, h)
 	}
 }
 
-func serveConn(ctx context.Context, conn net.Conn, h Handler) {
-	defer conn.Close()
-	var wmu sync.Mutex
-	write := func(m Message) {
-		b, err := json.Marshal(m)
-		if err != nil {
+// maxQueued is the number of messages that can wait for a slow client. A
+// client that falls further behind loses its connection.
+const maxQueued = 256
+
+// writeTimeout is the time that 1 write to a client can take. A client that
+// reads nothing for this time loses its connection.
+const writeTimeout = 5 * time.Second
+
+// writer sends the messages of 1 connection from 1 goroutine, so a slow
+// client does not block fluxd. It keeps only the newest state event.
+type writer struct {
+	conn  net.Conn
+	queue chan []byte
+	mu    sync.Mutex
+	state []byte
+	wake  chan struct{}
+	done  chan struct{}
+	once  sync.Once
+
+	// flush closes when the client sends no more requests. The writer
+	// then sends the queued messages and closes the connection.
+	flush     chan struct{}
+	flushOnce sync.Once
+}
+
+func newWriter(conn net.Conn) *writer {
+	w := &writer{
+		conn:  conn,
+		queue: make(chan []byte, maxQueued),
+		wake:  make(chan struct{}, 1),
+		done:  make(chan struct{}),
+		flush: make(chan struct{}),
+	}
+	go w.run()
+	return w
+}
+
+func (w *writer) run() {
+	for {
+		var b []byte
+		select {
+		case <-w.done:
+			return
+		case b = <-w.queue:
+		case <-w.wake:
+			w.mu.Lock()
+			b, w.state = w.state, nil
+			w.mu.Unlock()
+			if b == nil {
+				continue
+			}
+		case <-w.flush:
+			select {
+			case b = <-w.queue:
+			default:
+				w.close()
+				return
+			}
+		}
+		_ = w.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		if _, err := w.conn.Write(b); err != nil {
+			w.close()
 			return
 		}
-		wmu.Lock()
-		defer wmu.Unlock()
-		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		_, _ = conn.Write(append(b, '\n'))
 	}
+}
+
+// close stops the writer and closes the connection, which also ends the
+// read loop of serveConn.
+func (w *writer) close() {
+	w.once.Do(func() {
+		close(w.done)
+		w.conn.Close()
+	})
+}
+
+// finish sends the queued messages, then closes the connection.
+func (w *writer) finish() {
+	w.flushOnce.Do(func() { close(w.flush) })
+}
+
+// reply queues a response. It waits while the queue is full.
+func (w *writer) reply(m Message) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	select {
+	case w.queue <- append(b, '\n'):
+	case <-w.done:
+	}
+}
+
+// event queues an event without a wait. A new state event replaces a state
+// event that is not sent yet. When the queue is full, the client loses its
+// connection.
+func (w *writer) event(m Message) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	b = append(b, '\n')
+	if m.Event == "state" {
+		w.mu.Lock()
+		w.state = b
+		w.mu.Unlock()
+		select {
+		case w.wake <- struct{}{}:
+		default:
+		}
+		return
+	}
+	select {
+	case w.queue <- b:
+	case <-w.done:
+	default:
+		w.close()
+	}
+}
+
+// serveConn reads the requests of 1 client. Each call gets a context that
+// ends when the client closes the connection, so an approval ends when its
+// helper stops. A client that only closes its write side, for example
+// with shutdown(SHUT_WR), still gets the answers to its requests.
+func serveConn(ctx context.Context, conn net.Conn, h Handler) {
+	ctx, cancelCalls := context.WithCancel(ctx)
+	defer cancelCalls()
+	w := newWriter(conn)
 	var cancel func()
 	defer func() {
 		if cancel != nil {
 			cancel()
 		}
 	}()
+	var calls sync.WaitGroup
 	s := bufio.NewScanner(conn)
 	s.Buffer(make([]byte, 64<<10), 16<<20)
 	for s.Scan() {
 		var req Request
 		if err := json.Unmarshal(s.Bytes(), &req); err != nil {
-			write(Message{Error: &Error{Code: "bad_request", Message: err.Error()}})
+			w.reply(Message{Error: &Error{Code: "bad_request", Message: err.Error()}})
 			continue
 		}
 		if req.Method == "subscribe" {
@@ -120,27 +263,37 @@ func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 				cancel = h.Subscribe(func(event string, data any) {
 					raw, err := marshal(data)
 					if err == nil {
-						write(Message{Event: event, Data: raw})
+						w.event(Message{Event: event, Data: raw})
 					}
 				})
 			}
-			write(Message{ID: req.ID, Result: json.RawMessage("{}")})
+			w.reply(Message{ID: req.ID, Result: json.RawMessage("{}")})
 			continue
 		}
+		calls.Add(1)
 		go func(req Request) {
+			defer calls.Done()
 			res, err := h.Call(ctx, req.Method, req.Params)
 			if err != nil {
-				write(Message{ID: req.ID, Error: toError(err)})
+				w.reply(Message{ID: req.ID, Error: toError(err)})
 				return
 			}
 			raw, err := marshal(res)
 			if err != nil {
-				write(Message{ID: req.ID, Error: toError(err)})
+				w.reply(Message{ID: req.ID, Error: toError(err)})
 				return
 			}
-			write(Message{ID: req.ID, Result: raw})
+			w.reply(Message{ID: req.ID, Result: raw})
 		}(req)
 	}
+	if s.Err() != nil || peerClosed(conn) {
+		// The client is gone, or the writer closed the connection.
+		cancelCalls()
+		w.close()
+		return
+	}
+	calls.Wait()
+	w.finish()
 }
 
 func marshal(v any) (json.RawMessage, error) {
@@ -170,10 +323,18 @@ type Client struct {
 	done    chan struct{}
 }
 
-// Dial connects to fluxd.
+// Dial connects to fluxd. The folder of the socket, the socket, and the
+// process that answers must belong to this user.
 func Dial(path string) (*Client, error) {
+	if err := CheckSocket(path, os.Getuid()); err != nil {
+		return nil, err
+	}
 	conn, err := net.DialTimeout("unix", path, 2*time.Second)
 	if err != nil {
+		return nil, err
+	}
+	if err := CheckPeer(conn, os.Getuid()); err != nil {
+		conn.Close()
 		return nil, err
 	}
 	c := &Client{conn: conn, pending: map[int64]chan Message{}, events: make(chan Message, 16), done: make(chan struct{})}

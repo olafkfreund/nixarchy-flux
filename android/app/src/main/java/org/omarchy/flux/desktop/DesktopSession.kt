@@ -1,0 +1,336 @@
+package org.omarchy.flux.desktop
+
+import android.os.SystemClock
+import android.util.Log
+import android.view.Surface
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import org.omarchy.flux.core.Device
+import org.omarchy.flux.core.FluxCore
+import org.omarchy.flux.protocol.Packet
+import org.omarchy.flux.protocol.Types
+import org.omarchy.flux.stream.PinnedStream
+import java.net.ServerSocket
+import java.net.Socket
+
+private const val TAG = "FluxDesktop"
+private const val CONNECT_TIMEOUT_MS = 15_000
+
+/** The time after the first frame in a decoder until the phone counts the decoder as stalled. A decoder shows a frame in less than 1 second. */
+private const val STALL_MS = 3_000L
+
+/**
+ * The screen of a computer on this phone. The session opens a listener,
+ * the computer connects and streams 1 monitor, and a [VideoDecoder] shows
+ * the frames on the surface of the screen. 1 session runs at a time. For
+ * the extended screen, the computer adds a monitor with the size of this
+ * phone and streams that monitor.
+ */
+object DesktopSession {
+    enum class Phase { Idle, Connecting, Live, Error }
+
+    data class Status(
+        val phase: Phase = Phase.Idle,
+        val message: String = "",
+        val deviceId: String? = null,
+        val monitor: String = "",
+        val monitors: List<String> = emptyList(),
+        /** The size of the video, or 0 before the computer tells it. */
+        val width: Int = 0,
+        val height: Int = 0,
+    ) {
+        val active: Boolean get() = phase == Phase.Connecting || phase == Phase.Live
+    }
+
+    private val _status = MutableStateFlow(Status())
+    val status: StateFlow<Status> = _status
+    private val _audio = MutableStateFlow(false)
+    val audio: StateFlow<Boolean> = _audio
+    private val _volume = MutableStateFlow(1f)
+    val volume: StateFlow<Float> = _volume
+    private var previousVolume = 1f
+
+    fun setVolume(value: Float) {
+        if (!value.isFinite()) return
+        _volume.value = value.coerceIn(0f, 1f)
+        if (_volume.value > 0f) previousVolume = _volume.value
+    }
+    fun toggleMute() { setVolume(if (_volume.value == 0f) previousVolume else 0f) }
+    fun setAudio(core: FluxCore, deviceId: String, enabled: Boolean, extend: ExtendSize? = null) {
+        _audio.value = enabled
+        start(core, deviceId, _status.value.monitor.ifEmpty { null }, extend)
+    }
+
+    private val lock = Any()
+    private var run: Run? = null
+    private var surface: Surface? = null
+
+    // The longest side that the phone asks each computer for, after the decoder could not show a larger stream.
+    private val limits = mutableMapOf<String, Int>()
+
+    /**
+     * Starts the stream from [deviceId]. A running stream stops first. [monitor] selects a monitor of the computer.
+     * With [extend], the computer adds a monitor of that size and streams it.
+     */
+    fun start(core: FluxCore, deviceId: String, monitor: String? = null, extend: ExtendSize? = null) {
+        // The added monitor has the size of the phone, so that each of its pixels is 1 pixel of the phone.
+        val full = extend?.let { minOf(DesktopPackets.MAX_EXTEND_SIZE, maxOf(it.width, it.height)) }
+        val size = synchronized(lock) { limits[deviceId] } ?: full ?: DesktopPackets.MAX_SIZE
+        val next = Run(core, deviceId, monitor, _audio.value, size, extend)
+        val old = synchronized(lock) {
+            val old = run
+            run = next
+            next.surface = surface
+            old
+        }
+        old?.stop(notify = true)
+        val name = core.device(deviceId)?.identity?.deviceName ?: "the computer"
+        _status.value = Status(Phase.Connecting, "Waiting for $name…", deviceId, monitor ?: "")
+        next.thread.start()
+    }
+
+    /** Stops the stream. With [notify], the computer gets "stop". */
+    fun stop(notify: Boolean = true, status: Status = Status()) {
+        val old = synchronized(lock) {
+            val old = run
+            run = null
+            old
+        }
+        old?.stop(notify)
+        _status.value = status
+    }
+
+    /** Stops the stream when it comes from [deviceId], for example after an unpair. */
+    fun stopFor(deviceId: String, message: String) {
+        val old = synchronized(lock) {
+            run?.takeIf { it.deviceId == deviceId }?.also { run = null }
+        } ?: return
+        old.stop(notify = false)
+        _status.value = Status(Phase.Error, message, deviceId)
+    }
+
+    /** Sets the surface that shows the video, or null when the view goes. */
+    fun attach(s: Surface?) {
+        synchronized(lock) {
+            surface = s
+            run?.surface = s
+        }
+    }
+
+    /** Handles flux.desktop from the computer. The core lock is held, so the work moves to [FluxCore.io]. */
+    fun onPacket(core: FluxCore, d: Device, p: Packet) {
+        if (p.string("state") == "audio" && _status.value.deviceId == d.id) {
+            p.string("message")?.let { core.toast(it) }
+            return
+        }
+        val reply = DesktopReply.parse(p) ?: return
+        if (_status.value.deviceId != d.id) return
+        val name = d.identity.deviceName
+        when (reply) {
+            is DesktopReply.Live -> {
+                val s = _status.value
+                // A computer that does not know the extended screen streams a monitor that exists.
+                val asked = synchronized(lock) { run?.takeIf { it.deviceId == d.id }?.extend }
+                if (asked != null && !reply.extend) {
+                    core.io.execute { stop(notify = true, Status(Phase.Error, "Update Flux on $name to extend its screen", d.id)) }
+                    return
+                }
+                if (s.active) {
+                    _status.value = s.copy(
+                        phase = Phase.Live, message = "Shows $name", monitor = reply.monitor, monitors = reply.monitors,
+                        width = if (s.width > 0) s.width else reply.width, height = if (s.height > 0) s.height else reply.height,
+                    )
+                    // A decoder of a low H.264 level cannot show a large stream, for example 1920 × 1200.
+                    val r = synchronized(lock) { run?.takeIf { it.deviceId == d.id } }
+                    if (r != null) {
+                        core.io.execute {
+                            val supports = DecoderLimit.avc ?: return@execute
+                            DecoderLimit.smaller(reply.width, reply.height, supports)?.let { shrink(r, it) }
+                        }
+                    }
+                }
+            }
+            is DesktopReply.Failed -> core.io.execute { stop(notify = false, Status(Phase.Error, reply.message, d.id)) }
+            DesktopReply.Stop -> core.io.execute { stop(notify = false, Status(Phase.Idle, "Stopped on $name", d.id)) }
+        }
+    }
+
+    /** Sets the video size that the stream or the decoder reports. */
+    private fun setSize(r: Run, w: Int, h: Int) {
+        synchronized(lock) { if (run !== r) return }
+        val s = _status.value
+        if (s.width != w || s.height != h) _status.value = s.copy(width = w, height = h)
+    }
+
+    /** Starts [r] again with the smaller longest side [size], when [r] still runs. */
+    private fun shrink(r: Run, size: Int) {
+        synchronized(lock) {
+            if (run !== r) return
+            limits[r.deviceId] = size
+        }
+        Log.i(TAG, "the decoder cannot show the stream, asks for $size pixels")
+        start(r.core, r.deviceId, _status.value.monitor.ifEmpty { null }, r.extend)
+    }
+
+    /** The decoder of [r] showed no frame of the stream [w] × [h]. The stream starts again smaller, or ends with an error. */
+    private fun stalled(r: Run, w: Int, h: Int) {
+        synchronized(lock) { if (run !== r) return }
+        val next = DecoderLimit.afterStall(w, h)
+        r.core.io.execute {
+            if (next != null) {
+                shrink(r, next)
+            } else if (synchronized(lock) { run === r }) {
+                stop(notify = true, Status(Phase.Error, "This phone cannot show a stream of $w × $h.", r.deviceId))
+            }
+        }
+    }
+
+    /** Ends a run that the computer or the network ended. */
+    private fun ended(r: Run, message: String) {
+        val current = synchronized(lock) {
+            if (run === r) {
+                run = null
+                true
+            } else {
+                false
+            }
+        }
+        if (current) _status.value = Status(Phase.Error, message, r.deviceId)
+    }
+
+    /**
+     * 1 stream: its thread, its sockets, and its decoder. [maxSize] is the longest side that the phone asks for.
+     * [extend] is the size of the monitor that the computer adds, or null for a monitor that exists.
+     */
+    private class Run(val core: FluxCore, val deviceId: String, val monitor: String?, val wantsAudio: Boolean, val maxSize: Int, val extend: ExtendSize?) {
+        val thread = Thread(::work, "flux-desktop").apply { isDaemon = true }
+        @Volatile var stopped = false
+        @Volatile var surface: Surface? = null
+        @Volatile private var server: ServerSocket? = null
+        @Volatile private var socket: Socket? = null
+
+        // The decoder and its surface belong to the thread.
+        private var decoder: VideoDecoder? = null
+        private var decoderSurface: Surface? = null
+        private var audio: DesktopAudio? = null
+        private var audioFailed = false
+
+        // A decoder that gets frames and shows none after STALL_MS cannot show the stream.
+        @Volatile private var shown = false
+        private var fedAt = 0L
+
+        // True after the phone asked for a smaller stream. The frames until the stop go nowhere.
+        private var restarting = false
+
+        fun stop(notify: Boolean) {
+            if (stopped) return
+            stopped = true
+            runCatching { server?.close() }
+            runCatching { socket?.close() }
+            // The link sends in order, so a stop goes out before the start of a next run.
+            if (notify) core.device(deviceId)?.send(DesktopPackets.stop())
+        }
+
+        private fun work() {
+            val d = core.device(deviceId)
+            val name = d?.identity?.deviceName ?: "The computer"
+            try {
+                if (d == null) error("$name is not known")
+                if (Types.FLUX_DESKTOP !in d.identity.incoming) error("Update Flux on $name to show its screen")
+                if (extend != null && !d.extendSupported) error("Update Flux on $name to extend its screen")
+                val ssl = PinnedStream.accept(core, d, CONNECT_TIMEOUT_MS, { srv ->
+                    if (stopped) runCatching { srv.close() } else server = srv
+                }) { port -> DesktopPackets.start(port, monitor, maxSize, audio = wantsAudio, extend = extend) }
+                server = null
+                socket = ssl
+                if (stopped) {
+                    runCatching { ssl.close() }
+                    return
+                }
+                read(FrameReader(ssl.inputStream))
+                if (!stopped) ended(this, "$name stopped the stream")
+            } catch (e: Exception) {
+                if (!stopped) {
+                    Log.i(TAG, "stream ended: ${e.message}")
+                    ended(this, e.message ?: "The connection to $name closed")
+                }
+            } finally {
+                runCatching { audio?.close() }
+                decoder?.release()
+                decoder = null
+                runCatching { socket?.close() }
+            }
+        }
+
+        /** Releases the decoder. The time of the stall check starts again with the next decoder. */
+        private fun dropDecoder() {
+            decoder?.release()
+            decoder = null
+            decoderSurface = null
+            fedAt = 0L
+        }
+
+        /** Reads frames until the end of the stream and shows them. */
+        private fun read(frames: FrameReader) {
+            var size = 0 to 0
+            var config: Pair<ByteArray, ByteArray>? = null
+            while (!stopped) {
+                val f = frames.next() ?: return
+                // The pairing can end while the stream runs.
+                if (core.device(deviceId)?.paired != true) error("The computer is no longer paired")
+                when {
+                    f.isAudio -> {
+                        if (wantsAudio && !audioFailed) {
+                            try {
+                                if (audio == null) audio = DesktopAudio()
+                                audio?.feed(f.data, f.length, _volume.value)
+                            } catch (e: Exception) {
+                                audioFailed = true
+                                core.toast("Desktop audio failed: ${e.message}")
+                            }
+                        }
+                    }
+                    f.isFormat -> f.size()?.let {
+                        size = it
+                        setSize(this, it.first, it.second)
+                    }
+                    f.isConfig -> config = codecConfig(f.data, f.length)
+                    restarting -> continue
+                    else -> {
+                        // A new surface needs a new decoder, which starts at a key frame.
+                        val s = surface
+                        if (s !== decoderSurface) dropDecoder()
+                        val c = config
+                        if (decoder == null && s != null && s.isValid && c != null && f.isKey) {
+                            decoder = try {
+                                VideoDecoder(s, size.first.coerceAtLeast(16), size.second.coerceAtLeast(16), c, { shown = true }) { w, h -> setSize(this, w, h) }
+                            } catch (e: Exception) {
+                                // A decoder can refuse a size that it cannot show.
+                                if (size.first <= 0 || DecoderLimit.afterStall(size.first, size.second) == null) {
+                                    throw IllegalStateException("This phone cannot show the stream: ${e.message}", e)
+                                }
+                                Log.i(TAG, "the decoder refused ${size.first} × ${size.second}: ${e.message}")
+                                restarting = true
+                                stalled(this, size.first, size.second)
+                                continue
+                            }
+                            decoderSurface = s
+                        }
+                        try {
+                            if (decoder?.feed(f.data, f.length, f.isKey) == true && fedAt == 0L) fedAt = SystemClock.elapsedRealtime()
+                            if (!shown && fedAt > 0 && SystemClock.elapsedRealtime() - fedAt > STALL_MS && size.first > 0) {
+                                restarting = true
+                                dropDecoder()
+                                stalled(this, size.first, size.second)
+                            }
+                        } catch (e: Exception) {
+                            // For example, the surface went away. The next key frame starts a new decoder.
+                            Log.i(TAG, "decoder failed: ${e.message}")
+                            dropDecoder()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

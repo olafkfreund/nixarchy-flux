@@ -3,14 +3,37 @@ package org.omarchy.flux.core
 /** The pairing state of one device. */
 enum class PairState { None, Requested, Incoming, Paired }
 
-/** The color theme of the app. [System] follows the dark theme setting of the phone. */
+/**
+ * The color theme of the app. [Computer], the default, follows the
+ * Omarchy theme of the computer in scope. Without a theme from a computer,
+ * it follows the phone like [System]. [System] follows the dark theme
+ * setting of the phone. [Light] and [Dark] are Tokyo Night Day and Tokyo
+ * Night.
+ */
 enum class ThemeMode(val key: String) {
+    Computer("computer"),
     System("system"),
     Light("light"),
     Dark("dark");
 
     companion object {
-        fun fromKey(key: String?): ThemeMode = entries.firstOrNull { it.key == key } ?: System
+        fun fromKey(key: String?): ThemeMode = entries.firstOrNull { it.key == key } ?: Computer
+    }
+}
+
+/**
+ * The scroll direction of the touchpad of this phone. [Computer] uses the
+ * touchpad setting of the computer, and [Natural] when the computer does
+ * not tell it. [Natural] moves the content with the fingers. [Traditional]
+ * scrolls down when the fingers move down, as a scroll wheel does.
+ */
+enum class ScrollMode(val key: String) {
+    Computer("computer"),
+    Natural("natural"),
+    Traditional("traditional");
+
+    companion object {
+        fun fromKey(key: String?): ScrollMode = entries.firstOrNull { it.key == key } ?: Computer
     }
 }
 
@@ -28,6 +51,8 @@ data class PlayerState(
     val canGoPrevious: Boolean = true,
     /** The volume from 0 to 100, or null when the player takes no volume. */
     val volume: Int? = null,
+    /** The https address of the album art, or empty when the player has none. See [albumArtUrl]. */
+    val artUrl: String = "",
     /** The time of the position value, from SystemClock.elapsedRealtime. */
     val updatedAt: Long = 0,
 )
@@ -38,7 +63,10 @@ data class RemoteCommand(val key: String, val name: String, val command: String)
 /** One entry of a folder on the PC. */
 data class BrowseEntry(val name: String, val path: String, val dir: Boolean, val size: Long)
 
-/** The state of the Browse PC screen. */
+/**
+ * The state of the Browse PC screen. [canSearch] tells that the computer
+ * answers a search. [search] is the search that shows, or null.
+ */
 data class BrowseState(
     val deviceId: String,
     val loading: Boolean = true,
@@ -46,6 +74,25 @@ data class BrowseState(
     val roots: List<Pair<String, String>> = emptyList(),
     val path: String = "",
     val entries: List<BrowseEntry> = emptyList(),
+    val canSearch: Boolean = false,
+    val search: BrowseSearch? = null,
+)
+
+/**
+ * A search of the Browse PC screen. [path] is the folder that the search
+ * reads with its subfolders, or empty for each shared folder. [more] tells
+ * that more names match than [results] holds. [partial] tells that the
+ * search stopped at its time limit.
+ */
+data class BrowseSearch(
+    val id: Long,
+    val query: String,
+    val path: String,
+    val loading: Boolean = true,
+    val results: List<BrowseEntry> = emptyList(),
+    val more: Boolean = false,
+    val partial: Boolean = false,
+    val error: String? = null,
 )
 
 /** A snapshot of one device for the UI. */
@@ -54,7 +101,6 @@ data class DeviceUi(
     val name: String,
     val type: String,
     val ip: String,
-    val isFlux: Boolean,
     val paired: Boolean,
     val online: Boolean,
     val pairState: PairState,
@@ -71,14 +117,44 @@ data class DeviceUi(
     val herdrSupported: Boolean = false,
     /** The herdr agents, or null before the first agent list. */
     val herdr: HerdrState? = null,
+    /** The time that each agent got its status, by pane, in milliseconds since the epoch. See [AgentClock]. */
+    val agentSince: Map<String, Long> = emptyMap(),
     /** The output of the pane on the agent screen. */
     val herdrOutput: HerdrOutput? = null,
     /** The last reply from the agent screen. */
     val herdrReply: HerdrReply? = null,
+    /** The last new agent, new terminal, or close from this phone. */
+    val herdrAction: HerdrAction? = null,
+    /** The terminal session of the pane that this phone streams. */
+    val herdrTerminal: HerdrTerminalSession? = null,
     /** True when the computer can take the touchpad and the keyboard of this phone. */
     val inputSupported: Boolean = false,
     /** True when remote input is on at the computer, or null before it tells. */
     val remoteInput: Boolean? = null,
+    /** True when the computer reads repeat with a special key, see RemoteInput.keys. */
+    val keyRepeat: Boolean = false,
+    /** The scroll direction of the touchpads of the computer, or null when the computer does not tell it. */
+    val naturalScroll: Boolean? = null,
+    /** True when the computer can stream its screen to this phone. */
+    val desktopSupported: Boolean = false,
+    /** True when the remote desktop is on at the computer, or null before it tells. */
+    val remoteDesktop: Boolean? = null,
+    /** True when the computer can add a monitor that this phone shows, the extended screen. */
+    val extendSupported: Boolean = false,
+    /** True when the computer runs its Hyprland key bindings for this phone. */
+    val shortcutsSupported: Boolean = false,
+    /** The key bindings and workspaces of the computer, or null before the first answer. */
+    val shortcuts: ShortcutsState? = null,
+    /** The time that the last link to the computer ended, in milliseconds since the epoch, or 0 when no link ended while the app ran. */
+    val lastSeen: Long = 0,
+    /** True when the computer sent the network cards that can wake it. See [Wake]. */
+    val canWake: Boolean = false,
+    /** True when the computer lists its audio outputs and changes them for this phone. */
+    val outputsSupported: Boolean = false,
+    /** The audio outputs of the computer, or null before the first answer. */
+    val outputs: AudioOutputs? = null,
+    /** True when the computer can play its audio on this phone. */
+    val speakerSupported: Boolean = false,
 )
 
 /** A snapshot of the whole app for the UI. */
@@ -106,6 +182,8 @@ data class UiState(
     val smsSync: Boolean = false,
     val smsAccess: Boolean = false,
     val smsSupported: Boolean = false,
+    /** Flux may read the contacts. The computers then show names in place of numbers. */
+    val contactsAccess: Boolean = false,
     /** Notify when a herdr agent on a computer needs input. */
     val agentInputAlerts: Boolean = true,
     /** Notify when a herdr agent on a computer finishes. */
@@ -113,7 +191,30 @@ data class UiState(
     val ringingFrom: String? = null,
     val browse: BrowseState? = null,
     val listeningUdp: Boolean = true,
+    /** True while the phone looks for computers. See [FluxCore.scan]. */
+    val scanning: Boolean = false,
+    /** The end time of the last scan in milliseconds since the epoch, or 0 before the first scan. */
+    val lastScan: Long = 0,
+    /**
+     * True for [CONNECT_GRACE_MS] after the network starts or the phone
+     * sends its identity again. A paired computer that is not online then
+     * counts as connecting, not as not reachable.
+     */
+    val connecting: Boolean = false,
     /** False while the user has turned Flux off. */
     val enabled: Boolean = true,
-    val theme: ThemeMode = ThemeMode.System,
+    val theme: ThemeMode = ThemeMode.Computer,
+    /** The scroll direction of the touchpad screen. */
+    val touchpadScroll: ScrollMode = ScrollMode.Computer,
+    /**
+     * The theme that [ThemeMode.Computer] draws. With a [themeScope], it is
+     * the theme of that computer. Without a scope, it is the theme that
+     * changed most recently. It is null when that computer, or each
+     * computer, sent no theme.
+     */
+    val computerTheme: ComputerTheme? = null,
+    /** The computer whose theme the app follows, or null for all computers. See [ComputerThemes.setScope]. */
+    val themeScope: String? = null,
+    /** The name of the theme of each computer that sent one, by device ID. */
+    val computerThemes: Map<String, String> = emptyMap(),
 )

@@ -1,19 +1,23 @@
 package approve
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
 )
 
-// The same vectors are in the Android test ApproveMessageTest, so that
-// both sides build the same bytes.
+// The same vectors are in the Android test ApproveMessageTest.kt and in the
+// Apple test ApproveMessageTests.swift, so that every side builds the same
+// bytes.
 const testNonce = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 
 var testRequest = Request{
@@ -66,6 +70,29 @@ func TestFieldRules(t *testing.T) {
 	for i, r := range bad {
 		if _, err := r.Message(); err == nil {
 			t.Errorf("request %d: want an error", i)
+		}
+	}
+}
+
+// The apps refuse a time that is not in 1 to 2^40, so fluxd does not send
+// one. An older app can stop on it.
+func TestTimeRange(t *testing.T) {
+	for _, tm := range []int64{math.MinInt64, -1, 0, 1 << 41, math.MaxInt64} {
+		r := testRequest
+		r.Time = tm
+		if _, err := r.Message(); err == nil {
+			t.Errorf("request time %d: want an error", tm)
+		}
+		e := Enrollment{Host: "omarchy-xps", User: "alice", Time: tm, Nonce: testNonce}
+		if _, err := e.Message(nil); err == nil {
+			t.Errorf("enrollment time %d: want an error", tm)
+		}
+	}
+	for _, tm := range []int64{1, 1 << 40} {
+		r := testRequest
+		r.Time = tm
+		if _, err := r.Message(); err != nil {
+			t.Errorf("request time %d: %v", tm, err)
 		}
 	}
 }
@@ -176,5 +203,127 @@ func TestParsePublicKeyRefusesOtherCurves(t *testing.T) {
 	spki, _ := x509.MarshalPKIXPublicKey(&priv.PublicKey)
 	if _, err := ParsePublicKey(spki); err == nil {
 		t.Fatal("a P-384 key must fail")
+	}
+}
+
+func TestSameCode(t *testing.T) {
+	code := "5EE6 825F 974E D59A"
+	for typed, want := range map[string]bool{
+		"5EE6 825F 974E D59A": true,
+		"5ee6825f974ed59a":    true,
+		"5ee6-825f-974e-d59a": true,
+		" 5EE6825F974ED59A ":  true,
+		"5EE6 825F":           false,
+		"5EE6 825F 974E D59B": false,
+		"":                    false,
+	} {
+		if got := SameCode(typed, code); got != want {
+			t.Errorf("%q: got %v, want %v", typed, got, want)
+		}
+	}
+}
+
+// windowsKey is a Windows Hello key: RSA 2048, which signs the SHA-256 of
+// a message with RSASSA-PKCS1-v1_5.
+type windowsKey struct {
+	priv *rsa.PrivateKey
+	spki []byte
+}
+
+func newWindowsKey(t *testing.T, bits int) windowsKey {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, bits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return windowsKey{priv, spki}
+}
+
+func (w windowsKey) sign(t *testing.T, msg []byte) []byte {
+	t.Helper()
+	sum := sha256.Sum256(msg)
+	sig, err := rsa.SignPKCS1v15(rand.Reader, w.priv, crypto.SHA256, sum[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sig
+}
+
+func TestWindowsHelloKeySignsApprovalsAndEnrollments(t *testing.T) {
+	w := newWindowsKey(t, 2048)
+	pub, err := ParsePublicKey(w.spki)
+	if err != nil {
+		t.Fatalf("an RSA 2048 key: %v", err)
+	}
+	now := time.Unix(testRequest.Time+4, 0)
+	msg, err := testRequest.Message()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := w.sign(t, msg)
+	if err := Verify(testRequest, sig, pub, now, 30*time.Second); err != nil {
+		t.Fatalf("a valid signature: %v", err)
+	}
+	changed := testRequest
+	changed.User = "bob"
+	if err := Verify(changed, sig, pub, now, 30*time.Second); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("a changed field: %v", err)
+	}
+	if err := Verify(testRequest, sig[:len(sig)-1], pub, now, 30*time.Second); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("a short signature: %v", err)
+	}
+	if err := Verify(testRequest, nil, pub, now, 30*time.Second); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("an empty signature: %v", err)
+	}
+	// A PSS signature of the same key is not the scheme of Windows Hello.
+	sum := sha256.Sum256(msg)
+	pss, err := rsa.SignPSS(rand.Reader, w.priv, crypto.SHA256, sum[:], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(testRequest, pss, pub, now, 30*time.Second); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("a PSS signature: %v", err)
+	}
+	// An ECDSA signature does not pass for the RSA key.
+	if err := Verify(testRequest, newPhone(t).signRequest(t, testRequest), pub, now, 30*time.Second); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("an ECDSA signature for an RSA key: %v", err)
+	}
+
+	e := Enrollment{Host: testRequest.Host, User: testRequest.User, Time: testRequest.Time, Nonce: testNonce}
+	proof, err := e.Message(w.spki)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := VerifyEnrollment(e, w.spki, w.sign(t, proof), now, time.Minute)
+	if err != nil {
+		t.Fatalf("a valid enrollment: %v", err)
+	}
+	if !w.priv.PublicKey.Equal(got) {
+		t.Fatal("the enrollment gave another key")
+	}
+	if _, err := VerifyEnrollment(e, w.spki, sig, now, time.Minute); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("an approval passed as an enrollment proof: %v", err)
+	}
+}
+
+func TestParsePublicKeyRefusesOtherRSAKeys(t *testing.T) {
+	for _, bits := range []int{1024, 3072} {
+		if _, err := ParsePublicKey(newWindowsKey(t, bits).spki); err == nil {
+			t.Fatalf("an RSA %d key must fail", bits)
+		}
+	}
+	w := newWindowsKey(t, 2048)
+	odd := w.priv.PublicKey
+	odd.E = 3
+	spki, err := x509.MarshalPKIXPublicKey(&odd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParsePublicKey(spki); err == nil {
+		t.Fatal("an RSA key with the exponent 3 must fail")
 	}
 }

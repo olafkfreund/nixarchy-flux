@@ -40,7 +40,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -83,26 +83,30 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.PI
+import kotlin.math.exp
+import kotlin.math.sin
+import kotlin.random.Random
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import org.omarchy.flux.ui.Ic
 import org.omarchy.flux.ui.Mono
+import org.omarchy.flux.ui.Spinner
 import org.omarchy.flux.ui.Sym
 import org.omarchy.flux.ui.T
 import org.omarchy.flux.ui.TileGap
 import org.omarchy.flux.ui.TileLabel
 import org.omarchy.flux.ui.TileShape
 import org.omarchy.flux.ui.Tn
-import kotlin.math.PI
-import kotlin.math.exp
-import kotlin.math.sin
-import kotlin.random.Random
 
 /** A press on the mic key that lasts this long is push to talk. The release then stops the dictation. */
 private const val HOLD_MS = 350L
 
 /** The size of the mic key and the send key. */
 private val KeySize = 56.dp
+
+/** The size of the round mic key of the agent composer. */
+private val RoundKeySize = 48.dp
 
 /** The inner margin of the listening panel. The stop key sits this far from its corner. */
 private val PanelPad = 14.dp
@@ -115,12 +119,14 @@ private const val FADE_PART = 0.35f
 
 /**
  * The reply bar with dictation. At rest it shows [field], the mic key, and
- * [send]. While the phone listens, 1 panel takes the full width: the time,
- * the live wave, the words, and the stop key in its corner. The mic key is
- * the same element in both layouts and slides into the panel, so a long
- * press keeps working while the panel opens. [onStart] asks for the
- * microphone and starts the dictation. It returns false when the dictation
- * did not start.
+ * [send] when it is set. While the phone listens, 1 panel takes the full
+ * width: the time, the live wave, the words, and the stop key in its
+ * corner. The mic key is the same element in both layouts and slides into
+ * the panel, so a long press keeps working while the panel opens.
+ * [onStart] asks for the microphone and starts the dictation. It returns
+ * false when the dictation did not start. With [round], the mic key is a
+ * circle of 48 dp in the tonal fill, as in the composer of the agent
+ * screen.
  */
 @Composable
 fun DictationBar(
@@ -128,11 +134,13 @@ fun DictationBar(
     canDictate: Boolean,
     onStart: () -> Boolean,
     field: @Composable (Modifier) -> Unit,
-    send: @Composable () -> Unit,
     modifier: Modifier = Modifier,
+    send: (@Composable () -> Unit)? = null,
     onLanguage: (() -> Unit)? = null,
+    round: Boolean = false,
 ) {
     val active = d.phase != Dictation.Phase.Idle
+    val keySize = if (round) RoundKeySize else KeySize
     Box(modifier.fillMaxWidth()) {
         AnimatedContent(
             active,
@@ -149,17 +157,18 @@ fun DictationBar(
                 Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(TileGap)) {
                     field(Modifier.weight(1f))
                     // The mic key lies over this place.
-                    if (canDictate) Spacer(Modifier.size(KeySize))
-                    send()
+                    if (canDictate) Spacer(Modifier.size(keySize))
+                    send?.invoke()
                 }
             }
         }
         if (canDictate) {
             val spring = spring<Dp>(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow)
-            val x = animateDpAsState(if (active) -PanelPad else -(KeySize + TileGap), spring, label = "micX")
+            val rest = if (send == null) 0.dp else -(keySize + TileGap)
+            val x = animateDpAsState(if (active) -PanelPad else rest, spring, label = "micX")
             val y = animateDpAsState(if (active) -PanelPad else 0.dp, spring, label = "micY")
             MicKey(
-                d, onStart,
+                d, onStart, round,
                 Modifier.align(Alignment.BottomEnd).offset { IntOffset(x.value.roundToPx(), y.value.roundToPx()) },
             )
         }
@@ -169,18 +178,21 @@ fun DictationBar(
 /**
  * The key that starts and stops a dictation. A tap starts it, and the next
  * tap stops it. A long press is push to talk: the dictation stops when the
- * finger leaves the key. While the phone listens, the key is red and sends
- * rings out with the voice.
+ * finger leaves the key. While the phone listens, the key is green, as the
+ * privacy dot of Android for a live microphone, and sends rings out with
+ * the voice. Red is only for what needs the user and for errors.
  */
 @Composable
-private fun MicKey(d: Dictation, onStart: () -> Boolean, modifier: Modifier = Modifier) {
+private fun MicKey(d: Dictation, onStart: () -> Boolean, round: Boolean, modifier: Modifier = Modifier) {
     val haptic = LocalHapticFeedback.current
     val start by rememberUpdatedState(onStart)
     val listening = d.phase == Dictation.Phase.Listening
     val finishing = d.phase == Dictation.Phase.Finishing
-    val red = Tn.red
-    val fill by animateColorAsState(if (listening) Tn.red else if (finishing) Tn.tile else Tn.tile, tween(200), label = "micFill")
-    val edge by animateColorAsState(if (listening) Tn.red else Tn.line, tween(200), label = "micEdge")
+    val live = Tn.green
+    val rest = if (round) Tn.line else Tn.tile
+    val shape = if (round) CircleShape else TileShape
+    val fill by animateColorAsState(if (listening) live else rest, tween(200), label = "micFill")
+    val edge by animateColorAsState(if (listening) live else Tn.line, tween(200), label = "micEdge")
     val voice by animateFloatAsState(if (listening) d.level else 0f, tween(110), label = "micLevel")
     val rings = rememberInfiniteTransition(label = "micRings")
     val ring = rings.animateFloat(0f, 1f, infiniteRepeatable(tween(1500, easing = LinearEasing)), label = "micRing")
@@ -191,7 +203,7 @@ private fun MicKey(d: Dictation, onStart: () -> Boolean, modifier: Modifier = Mo
     }
 
     Box(
-        modifier.size(KeySize)
+        modifier.size(if (round) RoundKeySize else KeySize)
             // The rings draw before the clip, so they spread past the key.
             .drawBehind {
                 if (!listening) return@drawBehind
@@ -200,10 +212,10 @@ private fun MicKey(d: Dictation, onStart: () -> Boolean, modifier: Modifier = Mo
                     val p = (ring.value + k * 0.5f) % 1f
                     val grow = p * reach
                     drawRoundRect(
-                        color = red.copy(alpha = (1f - p) * (0.3f + 0.6f * voice)),
+                        color = live.copy(alpha = (1f - p) * (0.3f + 0.6f * voice)),
                         topLeft = Offset(-grow, -grow),
                         size = Size(size.width + grow * 2, size.height + grow * 2),
-                        cornerRadius = CornerRadius(12.dp.toPx() + grow),
+                        cornerRadius = CornerRadius((if (round) size.width / 2 else 12.dp.toPx()) + grow),
                         style = Stroke(2.dp.toPx()),
                     )
                 }
@@ -213,9 +225,9 @@ private fun MicKey(d: Dictation, onStart: () -> Boolean, modifier: Modifier = Mo
                 scaleX = s
                 scaleY = s
             }
-            .clip(TileShape)
+            .clip(shape)
             .background(fill)
-            .border(1.dp, edge, TileShape)
+            .border(1.dp, edge, shape)
             .semantics {
                 role = Role.Button
                 contentDescription = if (listening) "Stop dictation" else "Dictate"
@@ -253,9 +265,9 @@ private fun MicKey(d: Dictation, onStart: () -> Boolean, modifier: Modifier = Mo
             label = "micIcon",
         ) { phase ->
             when (phase) {
-                Dictation.Phase.Idle -> Sym(Ic.mic, tint = Tn.sub, size = 24.dp)
+                Dictation.Phase.Idle -> Sym(Ic.mic, tint = if (round) Tn.text else Tn.sub, size = if (round) 22.dp else 24.dp)
                 Dictation.Phase.Listening -> Sym(Ic.stop, tint = Tn.onAccent, size = 24.dp)
-                Dictation.Phase.Finishing -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Tn.magenta)
+                Dictation.Phase.Finishing -> Spinner(Modifier.size(20.dp), color = Tn.magenta)
             }
         }
     }
@@ -310,15 +322,16 @@ private fun ListeningPanel(d: Dictation, onCancel: () -> Unit, onLanguage: (() -
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.size(8.dp).graphicsLayer { alpha = if (listening) blink.value else 1f }.clip(CircleShape).background(if (listening) Tn.red else Tn.magenta))
-            TileLabel(if (listening) "listening" else "transcribing", color = if (listening) Tn.red else Tn.magenta)
+            Box(Modifier.size(8.dp).graphicsLayer { alpha = if (listening) blink.value else 1f }.clip(CircleShape).background(if (listening) Tn.green else Tn.magenta))
+            TileLabel(if (listening) "Listening" else "Transcribing", color = if (listening) Tn.green else Tn.magenta)
             if (onLanguage != null) LanguageChip(d.language, onLanguage) else if (d.language.isNotEmpty()) TileLabel(d.language)
             Spacer(Modifier.weight(1f))
             T(DictationText.clock(now - d.startedAt), size = 12, color = Tn.sub, family = Mono, maxLines = 1)
             Box(
-                Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).clickable(onClickLabel = "Cancel dictation", onClick = onCancel),
+                Modifier.minimumInteractiveComponentSize().size(32.dp).clip(RoundedCornerShape(8.dp))
+                    .clickable(onClickLabel = "Cancel dictation", role = Role.Button, onClick = onCancel),
                 contentAlignment = Alignment.Center,
-            ) { Sym(Ic.close, "Cancel dictation", tint = Tn.dim, size = 18.dp) }
+            ) { Sym(Ic.close, "Cancel dictation", tint = Tn.sub, size = 18.dp) }
         }
         VoiceWave(d, Modifier.fillMaxWidth().height(40.dp).padding(end = 6.dp))
         Row(verticalAlignment = Alignment.Bottom) {
@@ -329,19 +342,19 @@ private fun ListeningPanel(d: Dictation, onCancel: () -> Unit, onLanguage: (() -
     }
 }
 
-/** The language of the dictation. A tap opens the language picker. */
+/** The language of the dictation: a small chip that takes taps on 48 dp. A tap opens the language picker. */
 @Composable
 private fun LanguageChip(tag: String, onClick: () -> Unit) {
     val shape = RoundedCornerShape(6.dp)
     Row(
-        Modifier.height(26.dp).clip(shape).background(Tn.tile).border(1.dp, Tn.line, shape)
-            .clickable(onClickLabel = "Choose the dictation language", onClick = onClick)
+        Modifier.minimumInteractiveComponentSize().heightIn(min = 28.dp).clip(shape).background(Tn.tile).border(1.dp, Tn.line, shape)
+            .clickable(onClickLabel = "Choose the dictation language", role = Role.Button, onClick = onClick)
             .padding(start = 8.dp, end = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(1.dp),
     ) {
-        TileLabel(tag.ifEmpty { "language" }, color = Tn.sub)
-        Sym(Ic.chevron, null, Modifier.graphicsLayer { rotationZ = 90f }, tint = Tn.dim, size = 16.dp)
+        TileLabel(tag.ifEmpty { "Language" }, color = Tn.sub)
+        Sym(Ic.chevron, null, Modifier.graphicsLayer { rotationZ = 90f }, tint = Tn.sub, size = 16.dp)
     }
 }
 
@@ -368,7 +381,7 @@ private fun Transcript(d: Dictation, modifier: Modifier = Modifier) {
     val empty = settled.isEmpty() && pending.isEmpty()
     val text = buildAnnotatedString {
         if (empty) {
-            withStyle(SpanStyle(color = Tn.dim)) {
+            withStyle(SpanStyle(color = Tn.sub)) {
                 append(if (d.onDevice) "Speak now. This phone transcribes on the device." else "Speak now.")
             }
         } else {
@@ -378,7 +391,7 @@ private fun Transcript(d: Dictation, modifier: Modifier = Modifier) {
                 withStyle(SpanStyle(color = Tn.sub)) { append(pending) }
             }
         }
-        if (listening) withStyle(SpanStyle(color = if (caret) Tn.magenta else Tn.magenta.copy(alpha = 0f))) { append(" ▍") }
+        if (listening) withStyle(SpanStyle(color = if (caret) Tn.green else Tn.green.copy(alpha = 0f))) { append(" ▍") }
     }
     Box(
         modifier

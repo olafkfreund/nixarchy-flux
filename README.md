@@ -1,37 +1,55 @@
 # Flux
 
-Connect your Omarchy desktop to an Android phone or a Mac over your local network, or through Tailscale when you are away.
+Connect your Omarchy desktop to an Android phone, an iPhone, or a Mac over your local network, or through Tailscale when you are away.
 Share files, clipboard text, and clipboard images, read phone notifications, control media, and use your phone as a camera or microphone.
 
-Flux includes a CLI, a background daemon, a native Qt window, an Omarchy shell plugin, a native Android app, and a native macOS app.
-The desktop opens the network connections, so the default Omarchy firewall needs no new inbound rule.
+Flux includes a CLI, a background daemon, a native Qt window, an Omarchy shell plugin, a native Android app, a native iOS app, and a native macOS app.
+`fluxd` listens on 1 TCP port from 12100 to 12108 and on UDP port 12100, and it also opens the connections to the devices itself.
+So Flux works with the default Omarchy firewall, which blocks inbound traffic, and needs no new inbound rule.
+See [security](docs/security.md) for what a paired device can do and which settings limit it.
 
 
 https://github.com/user-attachments/assets/4b8445fe-6734-4100-b200-92f57e1b353a
 
 
-**[Install locally](docs/install.md)** · **[Set up Android](docs/android.md)** · **[Set up macOS](docs/macos.md)** · **[Read the docs](docs/README.md)** · **[Use with agents](docs/agents.md)**
+**[Website](https://bjarneo.github.io/flux/)** · **[Install locally](docs/install.md)** · **[Set up Android](docs/android.md)** · **[Set up iOS](docs/ios.md)** · **[Set up macOS](docs/macos.md)** · **[Read the docs](docs/README.md)** · **[Use with agents](docs/agents.md)**
 
 ## What you can do
 
 | Task | Guide |
 | --- | --- |
 | Send files, clipboard text and images, and links between devices | [Everyday use](docs/features.md) |
+| Queue files offline, send folder archives, and save clipboard snippets | [Workflow controls](docs/workflows.md) |
+| Set device access, notification rules, and local automation for device, call, notification, and agent events | [Workflow controls](docs/workflows.md#per-device-access) |
 | Read notifications, send SMS, control media, and run desktop commands from your phone | [CLI reference](docs/cli.md) |
 | Sync Do Not Disturb and pause media during calls | [Phone integration](docs/features.md#calls) |
-| Scan text, send photos, and use the phone as a webcam or microphone | [Camera and streams](docs/camera.md) |
+| Scan text, send photos, and use the phone as a webcam, a microphone, or a speaker of the computer | [Camera and streams](docs/camera.md) |
 | Show the phone screen in a desktop window | [Screen mirror](docs/camera.md#screen-mirror) |
-| Use the phone as a touchpad and keyboard | [Touchpad and keyboard](docs/remote-input.md) |
+| Use the phone or the Mac as a touchpad and keyboard | [Touchpad and keyboard](docs/remote-input.md) |
+| Show and control the computer screen on the phone or the Mac | [Remote desktop](docs/remote-desktop.md) |
+| Use an Android phone or tablet as a second monitor | [Extend the screen](docs/remote-desktop.md#extend-the-screen) |
 | Approve sudo with the phone's fingerprint sensor | [Fingerprint approval](docs/approvals.md) |
+| Log in with SSH and sign Git commits with a key on the Android phone | [SSH key on the phone](docs/ssh.md) |
+| Pair a phone by its IP address when discovery finds nothing | [Pair by address](docs/cli.md#pair-by-address) |
+| Wake a sleeping computer from the Android phone with Wake-on-LAN | [Wake the computer](docs/features.md#wake-the-computer) |
 | Reach your phone away from home through Tailscale | [Connect through Tailscale](docs/tailscale.md) |
-| See herdr coding agents on the phone, read their output, and answer them | [herdr agents](docs/herdr.md) |
+| See herdr coding agents on the phone or the Mac, read their output, and answer them. On Android, also see them in a home screen widget | [herdr agents](docs/herdr.md) |
+| Update Flux on the computer and send the new app to the phone | [Update](docs/install.md#update) |
 
 Flux for Android requires Android 10 or later.
 Flux for Android is the supported phone app.
 
+Flux for iOS requires iOS 17 or later.
+It connects an iPhone in the place of the Android phone and offers the features that iOS allows.
+Install it with Xcode. See [Flux for iOS](docs/ios.md) for the feature list and the limits of iOS.
+
 Flux for macOS requires macOS 14 or later.
 It connects a Mac in the place of a phone and offers the features that macOS allows.
 See [Flux for macOS](docs/macos.md) for the feature list.
+
+Flux for Windows requires Windows 10 version 2004 or later.
+It connects a Windows computer in the place of a phone, as the Mac app does. It is new and has a part of the Mac features.
+See [Flux for Windows](docs/windows.md) for the feature list.
 
 ## Clone and install
 
@@ -57,6 +75,8 @@ Run `flux-cli setup` as your desktop user after installation.
 The short name `flux` also works when no other program, such as `fluxcd`, uses that name.
 
 The [install guide](docs/install.md) covers dependencies, source builds, user-only installation, updates, and removal.
+On NixOS or Home Manager, see the [Nix flake guide](docs/nix.md).
+Flux checks for a new release once a day. To install it, run `flux-cli update`.
 
 ## Connect your phone
 
@@ -64,8 +84,13 @@ The [install guide](docs/install.md) covers dependencies, source builds, user-on
 2. Connect the phone and desktop to the same local network.
 3. Open the desktop window with `flux-cli open`.
 4. Select **+ Pair new device**.
-5. Compare the 8-character verification key on both screens.
+5. Compare the 16-character verification key on both screens, for example `5EE6 825F 974E D59A`.
 6. Accept the matching request on the phone.
+7. Select **Confirm** in the Flux window or in the notification on the desktop. The desktop pins the phone only after this step.
+
+Each step waits at most 30 seconds.
+Compare all 16 characters.
+Earlier Flux apps show only 8 characters, so update Flux on each phone, iPhone, and Mac before you pair.
 
 You can also start the pair request from a terminal:
 
@@ -73,7 +98,12 @@ You can also start the pair request from a terminal:
 flux-cli pair "Pixel 8"
 ```
 
+After the phone accepts, `flux-cli pair` asks whether the phone shows the same key.
+Type `y` to confirm.
+
+To connect an iPhone, install the app with Xcode and follow [Pair an iPhone](docs/ios.md#pair-an-iphone).
 To connect a Mac, build the app and follow [Pair a Mac](docs/macos.md#pair-a-mac).
+To connect a Windows computer, build the app and follow [Pair a Windows computer](docs/windows.md#pair-a-windows-computer).
 
 ## Use it from your terminal
 
@@ -101,8 +131,9 @@ make build test vet
 make android
 ```
 
-GitHub Actions builds the complete Arch package and Android APKs for pull requests and the `main` branch.
-Stable version tags produce a signed APK, an Arch package, an AUR recipe, and checksums.
+GitHub Actions builds the complete Arch package, the Android APKs, and the macOS and iOS apps for each push to the `master` branch.
+Pull requests run no build.
+Stable version tags produce a signed APK, an Arch package, an AUR recipe, an ad hoc signed macOS app, an unsigned iOS app for sideload tools, and checksums.
 The optional AUR job publishes the tested recipe after the GitHub release succeeds.
 
 On a Mac with Xcode and XcodeGen, test, build, and install the macOS app:
@@ -112,7 +143,13 @@ make test-macos macos
 make install-macos
 ```
 
-GitHub Actions does not build the macOS app.
+To build the iOS app and run its tests in a simulator:
+
+```sh
+make ios test-ios
+```
+
+GitHub Actions also tests FluxKit, builds the macOS and iOS apps, and runs the iOS tests in a simulator.
 
 See [development](docs/development.md) for local checks and [releases](docs/releasing.md) for keys, secrets, tags, and artifacts.
 
@@ -120,9 +157,12 @@ See [development](docs/development.md) for local checks and [releases](docs/rele
 
 - [Install and update](docs/install.md)
 - [Android build and setup](docs/android.md)
+- [iOS build and setup](docs/ios.md)
 - [macOS build and setup](docs/macos.md)
+- [Windows build and setup](docs/windows.md)
 - [CLI reference](docs/cli.md)
 - [Configuration and data paths](docs/configuration.md)
+- [Security and paired devices](docs/security.md)
 - [Everyday use](docs/features.md)
 - [Camera, microphone, and screen](docs/camera.md)
 - [Omarchy shell integration](docs/omarchy.md)
@@ -131,3 +171,7 @@ See [development](docs/development.md) for local checks and [releases](docs/rele
 - [Agent skill](docs/agents.md)
 
 The [documentation index](docs/README.md) lists all topics.
+
+## License
+
+Flux uses the [MIT license](LICENSE).

@@ -26,6 +26,9 @@ type node struct {
 	client  *ipc.Client
 	log     *syncBuffer
 	udpPort int
+	// env sets or clears variables for the process. An empty value
+	// clears the variable.
+	env []string
 }
 
 // syncBuffer collects the process output. The test reads it while the
@@ -52,13 +55,17 @@ type state struct {
 		TCPPort int `json:"tcpPort"`
 	} `json:"self"`
 	Devices []struct {
-		ID        string   `json:"id"`
-		Name      string   `json:"name"`
-		Addresses []string `json:"addresses"`
-		Online    bool     `json:"online"`
-		Paired    bool     `json:"paired"`
-		PairState string   `json:"pairState"`
-		PairKey   string   `json:"pairKey"`
+		ID         string   `json:"id"`
+		Name       string   `json:"name"`
+		App        string   `json:"app"`
+		AppVersion string   `json:"appVersion"`
+		Addresses  []string `json:"addresses"`
+		Online     bool     `json:"online"`
+		Paired     bool     `json:"paired"`
+		PairState  string   `json:"pairState"`
+		PairKey    string   `json:"pairKey"`
+		// Fingerprint identifies the certificate of the device.
+		Fingerprint string `json:"fingerprint"`
 		// Notifications are the notifications that the device sent.
 		Notifications []struct {
 			App   string `json:"app"`
@@ -109,6 +116,15 @@ func freePort(t *testing.T, network string) int {
 
 func start(t *testing.T, bin, name string, udpPort, tcpPort int) *node {
 	t.Helper()
+	n := newNode(t, name)
+	n.udpPort = udpPort
+	n.launch(t, bin, tcpPort)
+	return n
+}
+
+// newNode makes the folders and the configuration of a daemon.
+func newNode(t *testing.T, name string) *node {
+	t.Helper()
 	dir := t.TempDir()
 	n := &node{name: name, dir: dir, log: &syncBuffer{}}
 	cfgDir := filepath.Join(dir, "config", "flux")
@@ -120,8 +136,6 @@ func start(t *testing.T, bin, name string, udpPort, tcpPort int) *node {
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	n.udpPort = udpPort
-	n.launch(t, bin, tcpPort)
 	return n
 }
 
@@ -129,12 +143,21 @@ func (n *node) launch(t *testing.T, bin string, tcpPort int) {
 	t.Helper()
 	sock := filepath.Join(n.dir, "fluxd.sock")
 	n.cmd = exec.Command(bin, "-headless", "-udp-port", fmt.Sprint(n.udpPort), "-tcp-port", fmt.Sprint(tcpPort))
-	n.cmd.Env = append(os.Environ(),
-		"XDG_CONFIG_HOME="+filepath.Join(n.dir, "config"),
-		"XDG_DATA_HOME="+filepath.Join(n.dir, "data"),
-		"XDG_CACHE_HOME="+filepath.Join(n.dir, "cache"),
-		"FLUX_SOCKET="+sock,
-	)
+	env := append([]string{
+		"XDG_CONFIG_HOME=" + filepath.Join(n.dir, "config"),
+		"XDG_DATA_HOME=" + filepath.Join(n.dir, "data"),
+		"XDG_CACHE_HOME=" + filepath.Join(n.dir, "cache"),
+		"XDG_RUNTIME_DIR=" + filepath.Join(n.dir, "run"),
+		"FLUX_SOCKET=" + sock,
+	}, n.env...)
+	n.cmd.Env = os.Environ()
+	for _, kv := range env {
+		key := kv[:strings.Index(kv, "=")+1]
+		n.cmd.Env = slices.DeleteFunc(n.cmd.Env, func(e string) bool { return strings.HasPrefix(e, key) })
+		if !strings.HasSuffix(kv, "=") {
+			n.cmd.Env = append(n.cmd.Env, kv)
+		}
+	}
 	n.cmd.Stdout, n.cmd.Stderr = n.log, n.log
 	if err := n.cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -253,20 +276,43 @@ func TestTwoDaemons(t *testing.T) {
 
 	// Discovery: each daemon broadcasts on start, so they find each other.
 	alpha.wait(t, "beta online", func(s state) bool { _, on, _, _, _ := device(s, "beta"); return on })
+	// The identity names the program and its version.
+	for _, d := range alpha.state(t).Devices {
+		if d.Name == "beta" && (d.App != "fluxd" || d.AppVersion == "") {
+			t.Fatalf("beta has app %q and version %q", d.App, d.AppVersion)
+		}
+	}
 	beta.wait(t, "alpha online", func(s state) bool { _, on, _, _, _ := device(s, "alpha"); return on })
 
-	// Pairing: both sides must show the same verification key.
-	alpha.call(t, "pair.request", map[string]any{"device": "beta"}, nil)
+	// Pairing: both sides must show the same verification key of 16 hex
+	// digits. The answer of pair.request names the device and the key.
+	var req struct {
+		Device string `json:"device"`
+		Key    string `json:"key"`
+	}
+	alpha.call(t, "pair.request", map[string]any{"device": "beta"}, &req)
 	sa := alpha.wait(t, "request state", func(s state) bool { _, _, _, ps, _ := device(s, "beta"); return ps == "requested" })
 	sb := beta.wait(t, "incoming request", func(s state) bool { _, _, _, ps, _ := device(s, "alpha"); return ps == "incoming" })
-	_, _, _, _, keyA := device(sa, "beta")
+	betaID, _, _, _, keyA := device(sa, "beta")
 	_, _, _, _, keyB := device(sb, "alpha")
-	if keyA == "" || keyA != keyB {
-		t.Fatalf("verification keys differ: %q and %q", keyA, keyB)
+	if len(keyA) != 16 || strings.ToUpper(keyA) != keyA || keyA != keyB {
+		t.Fatalf("verification keys: %q and %q", keyA, keyB)
 	}
-	beta.call(t, "pair.accept", map[string]any{"device": "alpha"}, nil)
-	alpha.wait(t, "paired", func(s state) bool { _, _, p, _, _ := device(s, "beta"); return p })
+	if req.Device != betaID || req.Key != keyA {
+		t.Fatalf("pair.request returned %+v", req)
+	}
+	beta.call(t, "pair.accept", map[string]any{"device": "alpha", "key": keyB}, nil)
+	// alpha started the pairing, so its user confirms the key too. The
+	// answer of beta pins nothing on alpha.
+	alpha.wait(t, "confirm state", func(s state) bool { _, _, p, ps, k := device(s, "beta"); return !p && ps == "confirm" && k == keyA })
+	alpha.call(t, "pair.accept", map[string]any{"device": "beta", "key": keyA}, nil)
+	sa = alpha.wait(t, "paired", func(s state) bool { _, _, p, _, _ := device(s, "beta"); return p })
 	beta.wait(t, "paired", func(s state) bool { _, _, p, _, _ := device(s, "alpha"); return p })
+	for _, d := range sa.Devices {
+		if d.Name == "beta" && len(d.Fingerprint) != 16 {
+			t.Fatalf("beta has fingerprint %q", d.Fingerprint)
+		}
+	}
 
 	// Clipboard.
 	alpha.call(t, "clipboard.send", map[string]any{"device": "beta", "text": "yay -S flux-git"}, nil)
@@ -329,7 +375,7 @@ func TestTwoDaemons(t *testing.T) {
 	if res.Device != "beta" || !slices.Equal(res.Addresses, []string{"localhost"}) {
 		t.Fatalf("addresses.add returned %+v", res)
 	}
-	if err := alpha.client.Call("addresses.add", map[string]any{"device": "beta", "address": "localhost:1716"}, nil); err == nil {
+	if err := alpha.client.Call("addresses.add", map[string]any{"device": "beta", "address": "localhost:12100"}, nil); err == nil {
 		t.Fatal("addresses.add accepted an address with a port")
 	}
 	alpha.stop()
@@ -356,9 +402,16 @@ func TestTwoDaemons(t *testing.T) {
 		t.Fatalf("addresses.remove left %v", res.Addresses)
 	}
 
-	// Unpair.
+	// Unpair. alpha closes the link, and both sides forget the trust, also
+	// after a restart. The same UDP port lets the daemons find each other
+	// again.
 	alpha.call(t, "pair.unpair", map[string]any{"device": "beta"}, nil)
 	beta.wait(t, "unpaired", func(s state) bool { _, _, p, _, _ := device(s, "alpha"); return !p })
+	beta.stop()
+	beta.udpPort = alpha.udpPort
+	beta.launch(t, bin, tcpB)
+	alpha.wait(t, "beta online and not paired", func(s state) bool { _, on, p, _, _ := device(s, "beta"); return on && !p })
+	beta.wait(t, "alpha online and not paired", func(s state) bool { _, on, p, _, _ := device(s, "alpha"); return on && !p })
 	if strings.Contains(alpha.log.String(), "panic") || strings.Contains(beta.log.String(), "panic") {
 		t.Fatalf("a daemon panicked:\n%s\n%s", alpha.log, beta.log)
 	}

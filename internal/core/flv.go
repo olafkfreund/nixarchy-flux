@@ -1,0 +1,328 @@
+package core
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+)
+
+// The recorder writes FLV. Each FLV tag gives its size first, so a frame is
+// complete when its last byte arrives. A raw H.264 stream shows the end of
+// a frame only at the start of the next frame, 1 frame later.
+
+// Flags of a frame in the stream to the phone.
+const (
+	frameConfig byte = 1 // the SPS and the PPS
+	frameKey    byte = 2 // a frame that a decoder can start at
+	frameFormat byte = 4 // the video size: width and height as 2 big-endian uint16
+	frameAudio  byte = 8 // 48 kHz stereo, signed 16-bit little-endian PCM
+)
+
+// maxTag is the largest FLV tag that flvReader accepts.
+const maxTag = 16 << 20
+
+// videoFrame is 1 frame of H.264 in Annex-B form, with its flags.
+type videoFrame struct {
+	flags byte
+	data  []byte
+}
+
+var startCode = []byte{0, 0, 0, 1}
+
+// flvReader reads the H.264 video of an FLV stream. It skips the other
+// tags.
+type flvReader struct {
+	r       *bufio.Reader
+	started bool
+	// lengthSize is the size of each NAL unit length in a frame. The
+	// sequence header gives it.
+	lengthSize int
+	// tag and out hold the current tag and frame. next uses them again for
+	// the next frame, so a frame is valid only until the next call.
+	tag []byte
+	out []byte
+}
+
+func newFLVReader(r io.Reader) *flvReader {
+	return &flvReader{r: bufio.NewReaderSize(r, 64<<10), lengthSize: 4}
+}
+
+// next returns the next video frame, or io.EOF at the end of the stream.
+func (f *flvReader) next() (videoFrame, error) {
+	if !f.started {
+		if err := f.header(); err != nil {
+			return videoFrame{}, err
+		}
+		f.started = true
+	}
+	for {
+		var hdr [11]byte
+		if _, err := io.ReadFull(f.r, hdr[:]); err != nil {
+			return videoFrame{}, eof(err)
+		}
+		size := int(hdr[1])<<16 | int(hdr[2])<<8 | int(hdr[3])
+		if size > maxTag {
+			return videoFrame{}, fmt.Errorf("an FLV tag of %d bytes", size)
+		}
+		// The data, then the size of the previous tag.
+		if cap(f.tag) < size+4 {
+			f.tag = make([]byte, size+4)
+		}
+		data := f.tag[:size+4]
+		if _, err := io.ReadFull(f.r, data); err != nil {
+			return videoFrame{}, eof(err)
+		}
+		if hdr[0] != 9 {
+			continue
+		}
+		v, ok, err := f.video(data[:size])
+		if err != nil || ok {
+			return v, err
+		}
+	}
+}
+
+// header reads the FLV header and the first previous tag size.
+func (f *flvReader) header() error {
+	var h [9]byte
+	if _, err := io.ReadFull(f.r, h[:]); err != nil {
+		return eof(err)
+	}
+	if string(h[:3]) != "FLV" {
+		return errors.New("the stream is not FLV")
+	}
+	offset := binary.BigEndian.Uint32(h[5:])
+	if offset < 9 || offset > 1024 {
+		return fmt.Errorf("an FLV header of %d bytes", offset)
+	}
+	_, err := f.r.Discard(int(offset) - 9 + 4)
+	return eof(err)
+}
+
+// video decodes the data of a video tag. It reports false for a tag that
+// holds no frame, such as the end of the sequence.
+func (f *flvReader) video(b []byte) (videoFrame, bool, error) {
+	if len(b) < 5 {
+		return videoFrame{}, false, nil
+	}
+	if b[0]&0x80 != 0 {
+		return videoFrame{}, false, errors.New("the stream uses enhanced FLV, which Flux does not read")
+	}
+	if codec := b[0] & 0x0f; codec != 7 {
+		return videoFrame{}, false, fmt.Errorf("the stream has video codec %d, not H.264", codec)
+	}
+	key := b[0]>>4 == 1
+	// The packet type, then 3 bytes of composition time.
+	switch b[1] {
+	case 0:
+		data, lengthSize, err := avcConfig(b[5:])
+		if err != nil {
+			return videoFrame{}, false, err
+		}
+		f.lengthSize = lengthSize
+		return videoFrame{frameConfig, data}, true, nil
+	case 1:
+		data, err := annexB(f.out[:0], b[5:], f.lengthSize)
+		if err != nil {
+			return videoFrame{}, false, err
+		}
+		if f.lengthSize != 4 {
+			f.out = data
+		}
+		if len(data) == 0 {
+			return videoFrame{}, false, nil
+		}
+		flags := byte(0)
+		if key {
+			flags = frameKey
+		}
+		return videoFrame{flags, data}, true, nil
+	}
+	return videoFrame{}, false, nil
+}
+
+// avcConfig reads an AVCDecoderConfigurationRecord. It returns the SPS and
+// PPS units in Annex-B form and the size of the NAL unit lengths.
+func avcConfig(b []byte) ([]byte, int, error) {
+	bad := errors.New("the H.264 sequence header is not valid")
+	if len(b) < 7 {
+		return nil, 0, bad
+	}
+	lengthSize := int(b[4]&3) + 1
+	var out []byte
+	rest := b[5:]
+	for i := range 2 {
+		if len(rest) < 1 {
+			return nil, 0, bad
+		}
+		// The SPS count has 5 bits. The PPS count has 8 bits.
+		n := int(rest[0])
+		if i == 0 {
+			n &= 0x1f
+		}
+		rest = rest[1:]
+		for range n {
+			if len(rest) < 2 {
+				return nil, 0, bad
+			}
+			size := int(binary.BigEndian.Uint16(rest))
+			if len(rest) < 2+size {
+				return nil, 0, bad
+			}
+			out = append(append(out, startCode...), rest[2:2+size]...)
+			rest = rest[2+size:]
+		}
+	}
+	return out, lengthSize, nil
+}
+
+// annexB turns NAL units with length prefixes into NAL units with start
+// codes and appends them to dst. A 4-byte length has the size of a start
+// code, so annexB then replaces each length in b and returns b with no copy.
+func annexB(dst, b []byte, lengthSize int) ([]byte, error) {
+	errLength := errors.New("an H.264 frame ends inside a NAL unit length")
+	errUnit := errors.New("an H.264 NAL unit is longer than its frame")
+	if lengthSize == 4 {
+		for i := 0; i < len(b); {
+			if len(b)-i < 4 {
+				return nil, errLength
+			}
+			size := binary.BigEndian.Uint32(b[i:])
+			if uint64(size) > uint64(len(b)-i-4) {
+				return nil, errUnit
+			}
+			copy(b[i:], startCode)
+			i += 4 + int(size)
+		}
+		return b, nil
+	}
+	out := dst
+	for len(b) > 0 {
+		if len(b) < lengthSize {
+			return nil, errLength
+		}
+		size := 0
+		for _, c := range b[:lengthSize] {
+			size = size<<8 | int(c)
+		}
+		b = b[lengthSize:]
+		if size > len(b) {
+			return nil, errUnit
+		}
+		out = append(append(out, startCode...), b[:size]...)
+		b = b[size:]
+	}
+	return out, nil
+}
+
+// eof turns the end of the stream inside a tag into io.EOF.
+func eof(err error) error {
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return io.EOF
+	}
+	return err
+}
+
+// frameWriter writes frames to the phone: the size of the data as a
+// big-endian uint32, the flags, and the data. It writes each frame in 1
+// call, so that a frame goes out in as few TLS records as possible. It uses
+// 1 buffer for all frames.
+type frameWriter struct {
+	w   io.Writer
+	buf []byte
+}
+
+func (fw *frameWriter) write(flags byte, data []byte) error {
+	fw.buf = binary.BigEndian.AppendUint32(fw.buf[:0], uint32(len(data)))
+	fw.buf = append(append(fw.buf, flags), data...)
+	_, err := fw.w.Write(fw.buf)
+	return err
+}
+
+// writeError is an error of the stream to the phone, not of the recorder.
+type writeError struct{ err error }
+
+func (e writeError) Error() string { return "write to the phone: " + e.err.Error() }
+func (e writeError) Unwrap() error { return e.err }
+
+// pumpDesktop reads the FLV stream of the recorder and writes its frames to
+// the phone. The first frame is the video size. Before a key frame whose SPS
+// and PPS differ from the last config frame, it writes them as a config
+// frame. It calls live once, before the first frame. It returns io.EOF when
+// the recorder ends the stream, and a writeError when the phone closes it.
+func pumpDesktop(r io.Reader, w io.Writer, width, height int, live func()) error {
+	fr := newFLVReader(r)
+	fw := &frameWriter{w: w}
+	first := true
+	var config []byte
+	for {
+		f, err := fr.next()
+		if err != nil {
+			return err
+		}
+		if first {
+			first = false
+			live()
+			size := binary.BigEndian.AppendUint16(binary.BigEndian.AppendUint16(nil, uint16(width)), uint16(height))
+			if err := fw.write(frameFormat, size); err != nil {
+				return writeError{err}
+			}
+		}
+		switch {
+		case f.flags&frameConfig != 0:
+			config = append(config[:0], f.data...)
+		case f.flags&frameKey != 0:
+			// With VAAPI the SPS and the PPS in a key frame can differ from
+			// the sequence header. A Mac decodes with the config frame
+			// alone, so it gets the ones of the key frame first.
+			if sets := parameterSets(f.data); sets != nil && !bytes.Equal(sets, config) {
+				config = sets
+				if err := fw.write(frameConfig, config); err != nil {
+					return writeError{err}
+				}
+			}
+		}
+		if err := fw.write(f.flags, f.data); err != nil {
+			return writeError{err}
+		}
+	}
+}
+
+// parameterSets returns the SPS and PPS units of an Annex-B frame with their
+// start codes, or nil when the frame has no SPS or no PPS. It copies the
+// units, because the frame is valid only until the next read.
+func parameterSets(b []byte) []byte {
+	var out []byte
+	var sps, pps bool
+	for len(b) > 0 {
+		i := bytes.Index(b, startCode)
+		if i < 0 {
+			break
+		}
+		b = b[i+len(startCode):]
+		end := bytes.Index(b, startCode)
+		if end < 0 {
+			end = len(b)
+		}
+		if len(b) > 0 {
+			switch b[0] & 0x1f {
+			case 7:
+				sps = true
+			case 8:
+				pps = true
+			default:
+				b = b[end:]
+				continue
+			}
+			out = append(append(out, startCode...), b[:end]...)
+		}
+		b = b[end:]
+	}
+	if !sps || !pps {
+		return nil
+	}
+	return out
+}

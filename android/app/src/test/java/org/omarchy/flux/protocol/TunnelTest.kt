@@ -3,14 +3,14 @@ package org.omarchy.flux.protocol
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import org.omarchy.flux.net.LoopbackBridge
+import org.omarchy.flux.net.ConnectedSocketFactory
 import org.omarchy.flux.net.PAYLOAD_PORTS
 import org.omarchy.flux.net.Tls
 import org.omarchy.flux.net.Tunnel
+import org.omarchy.flux.net.WrongPeerException
 import java.io.ByteArrayOutputStream
 import java.net.InetAddress
 import java.net.Socket
@@ -21,7 +21,7 @@ import kotlin.concurrent.thread
 class TunnelTest {
     @Test
     fun parsesTunnelPayload() {
-        val line = """{"id":1,"type":"kdeconnect.share.request","body":{"filename":"a.jpg"},"payloadSize":42,"payloadTransferInfo":{"tunnel":"tok-1"}}"""
+        val line = """{"id":1,"type":"flux.share.request","body":{"filename":"a.jpg"},"payloadSize":42,"payloadTransferInfo":{"tunnel":"tok-1"}}"""
         val p = Packet.parse(line)!!
         assertTrue(p.hasPayload)
         assertEquals(0, p.payloadPort)
@@ -30,11 +30,14 @@ class TunnelTest {
     }
 
     @Test
-    fun portWinsOverTunnel() {
-        val line = """{"id":1,"type":"kdeconnect.share.request","body":{},"payloadSize":5,"payloadTransferInfo":{"port":1740,"tunnel":"x"}}"""
-        val p = Packet.parse(line)!!
-        assertEquals(1740, p.payloadPort)
-        assertNull(p.payloadTunnel)
+    fun incomingPortIsNoPayload() {
+        // The computer sends each payload through a tunnel, so the parse ignores a port.
+        val both = Packet.parse("""{"id":1,"type":"flux.share.request","body":{},"payloadSize":5,"payloadTransferInfo":{"port":1740,"tunnel":"x"}}""")!!
+        assertEquals(0, both.payloadPort)
+        assertEquals("x", both.payloadTunnel)
+        val port = Packet.parse("""{"id":1,"type":"flux.share.request","body":{},"payloadSize":5,"payloadTransferInfo":{"port":1740}}""")!!
+        assertEquals(0, port.payloadPort)
+        assertFalse(port.hasPayload)
     }
 
     @Test
@@ -47,7 +50,7 @@ class TunnelTest {
 
     @Test
     fun emptyTunnelIsNoPayload() {
-        val p = Packet.parse("""{"id":1,"type":"kdeconnect.share.request","body":{},"payloadSize":5,"payloadTransferInfo":{"tunnel":""}}""")!!
+        val p = Packet.parse("""{"id":1,"type":"flux.share.request","body":{},"payloadSize":5,"payloadTransferInfo":{"tunnel":""}}""")!!
         assertFalse(p.hasPayload)
     }
 
@@ -64,37 +67,76 @@ class TunnelTest {
     }
 
     @Test
-    fun fluxdIsDetectedByIncomingTunnel() {
-        val fluxd = Identity("fedcba9876543210fedcba9876543210", "pc", "laptop", 8, listOf(Types.PING, Types.FLUX_TUNNEL), emptyList())
-        val kde = Identity("fedcba9876543210fedcba9876543210", "pc", "laptop", 8, listOf(Types.PING), listOf(Types.FLUX_TUNNEL))
-        assertTrue(fluxd.isFlux)
-        assertFalse(kde.isFlux)
-    }
-
-    @Test
     fun capabilitiesListTunnel() {
         assertTrue(Types.FLUX_TUNNEL in INCOMING)
         assertTrue(Types.FLUX_TUNNEL in OUTGOING)
     }
 
+    private fun sftp(body: String) = SftpOffer.parse(Packet.parse("""{"id":1,"type":"flux.sftp","body":$body}""")!!)
+
     @Test
     fun sftpOffers() {
-        val tunnel = SftpOffer.parse(
-            Packet.parse("""{"id":1,"type":"kdeconnect.sftp","body":{"tunnel":"s1","user":"kdeconnect","password":"pw","path":"/home/u","multiPaths":["/home/u","/home/u/Pictures"],"pathNames":["Home","Pictures"]}}""")!!,
-        )!!
-        assertTrue(tunnel.viaTunnel)
-        assertEquals("s1", tunnel.tunnel)
-        assertEquals(listOf("Home" to "/home/u", "Pictures" to "/home/u/Pictures"), tunnel.roots)
+        val offer = sftp("""{"tunnel":"s1","user":"flux","password":"pw","path":"/home/u","multiPaths":["/home/u","/home/u/Pictures"],"pathNames":["Home","Pictures"]}""")!!
+        assertEquals("s1", offer.tunnel)
+        assertEquals("flux", offer.user)
+        assertEquals("pw", offer.password)
+        assertEquals(listOf("Home" to "/home/u", "Pictures" to "/home/u/Pictures"), offer.roots)
 
-        val direct = SftpOffer.parse(
-            Packet.parse("""{"id":1,"type":"kdeconnect.sftp","body":{"ip":"192.168.1.5","port":1739,"user":"kdeconnect","password":"pw","path":"/"}}""")!!,
-        )!!
-        assertFalse(direct.viaTunnel)
-        assertEquals(1739, direct.port)
-        assertEquals(listOf("Home" to "/"), direct.roots)
+        assertNull(sftp("""{"errorMessage":"no"}"""))
+        // An offer without a tunnel has no way to connect.
+        assertNull(sftp("""{"ip":"192.168.1.5","port":12070,"user":"flux","password":"pw","path":"/","multiPaths":["/"],"pathNames":["Home"]}"""))
+        assertNull(sftp("""{"tunnel":"","user":"flux","password":"pw","multiPaths":["/"],"pathNames":["Home"]}"""))
+        // The root lists must be present and have the same length.
+        assertNull(sftp("""{"tunnel":"s1","user":"flux","password":"pw","path":"/"}"""))
+        assertNull(sftp("""{"tunnel":"s1","user":"flux","password":"pw","path":"/","multiPaths":["/","/tmp"],"pathNames":["Home"]}"""))
+        assertNull(sftp("""{"tunnel":"s1","user":"flux","multiPaths":["/"],"pathNames":["Home"]}"""))
+    }
 
-        assertNull(SftpOffer.parse(Packet.parse("""{"id":1,"type":"kdeconnect.sftp","body":{"errorMessage":"no"}}""")!!))
-        assertNull(SftpOffer.parse(Packet.parse("""{"id":1,"type":"kdeconnect.sftp","body":{"user":"k","password":"p"}}""")!!))
+    @Test
+    fun sftpOfferTellsSearch() {
+        val base = """"tunnel":"s1","user":"flux","password":"pw","path":"/home/u","multiPaths":["/home/u"],"pathNames":["Home"]"""
+        assertFalse(sftp("{$base}")!!.search)
+        assertTrue(sftp("""{$base,"search":true}""")!!.search)
+    }
+
+    @Test
+    fun sftpSearchRequest() {
+        val p = Packet.parse(SftpFound.request(7, "invoice 2026", "").serialize())!!
+        assertEquals(Types.SFTP_REQUEST, p.type)
+        val search = p.obj("search")!!
+        assertEquals(7L, search.long("id"))
+        assertEquals("invoice 2026", search.str("query"))
+        assertEquals("", search.str("path"))
+        assertFalse(p.has("startBrowsing"))
+    }
+
+    private fun found(body: String) = SftpFound.parse(Packet.parse("""{"id":1,"type":"flux.sftp","body":$body}""")!!)
+
+    @Test
+    fun sftpSearchAnswers() {
+        val f = found(
+            """{"search":{"id":7,"results":[{"path":"/home/u/a.pdf","dir":false,"size":12,"modified":1700000000},""" +
+                """{"path":"/home/u/docs","dir":true,"size":4096,"modified":1},{"path":"relative","dir":false}],"more":true,"partial":false}}""",
+        )!!
+        assertEquals(7L, f.id)
+        assertEquals(listOf(SftpMatch("/home/u/a.pdf", false, 12, 1_700_000_000), SftpMatch("/home/u/docs", true, 4096, 1)), f.results)
+        assertTrue(f.more)
+        assertFalse(f.partial)
+        assertNull(f.error)
+
+        val failed = found("""{"search":{"id":8,"results":[],"more":false,"partial":false,"error":"Get files is not open. Open it again."}}""")!!
+        assertEquals("Get files is not open. Open it again.", failed.error)
+        assertTrue(failed.results.isEmpty())
+
+        // An offer and an error of the session are not search answers, and a search answer is not an offer.
+        val offer = Packet.parse("""{"id":1,"type":"flux.sftp","body":{"tunnel":"s1","user":"flux","password":"pw","multiPaths":["/"],"pathNames":["Home"],"search":true}}""")!!
+        assertFalse(SftpFound.isAnswer(offer))
+        assertTrue(SftpOffer.parse(offer)!!.search)
+        assertTrue(SftpFound.isAnswer(Packet.parse("""{"id":1,"type":"flux.sftp","body":{"search":{"results":[]}}}""")!!))
+        assertNull(found("""{"tunnel":"s1","user":"flux","password":"pw","multiPaths":["/"],"pathNames":["Home"],"search":true}"""))
+        assertNull(found("""{"errorMessage":"no"}"""))
+        assertNull(found("""{"search":{"results":[]}}"""))
+        assertNull(sftp("""{"search":{"id":7,"results":[]}}"""))
     }
 
     private val phone = LocalCertificate.generate("0123456789abcdef0123456789abcdef")
@@ -130,10 +172,78 @@ class TunnelTest {
         val answers = ArrayBlockingQueue<Packet>(1)
         val t = computer(stranger, answers) { it.outputStream.write(1) }
         val result = runCatching {
-            Tunnel.accept(Tls(phone), pc.certificate, "tok", announce = { answers.put(it) }, timeoutMs = 5000)
+            Tunnel.accept(Tls(phone), pc.certificate, "tok", announce = { answers.put(it) }, timeoutMs = 1500)
         }
         t.join(5000)
-        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is WrongPeerException)
+    }
+
+    @Test
+    fun strangerFirstDoesNotStopTransfer() {
+        // A stranger connects before the computer. Its connection closes,
+        // and the computer still gets the tunnel.
+        val stranger = LocalCertificate.generate("00000000000000000000000000000000")
+        val ports = ArrayBlockingQueue<Packet>(2)
+        val answers = ArrayBlockingQueue<Packet>(1)
+        val decoy = thread {
+            val ready = ports.poll(5, TimeUnit.SECONDS) ?: return@thread
+            runCatching { Tls(stranger).wrap(Socket(InetAddress.getLoopbackAddress(), ready.int("port")!!), server = false).close() }
+            answers.put(ready)
+        }
+        val data = ByteArray(1000) { it.toByte() }
+        val pcThread = computer(pc, answers) { ssl ->
+            ssl.outputStream.write(data)
+            ssl.outputStream.flush()
+        }
+        val out = ByteArrayOutputStream()
+        Tunnel.receive(Tls(phone), pc.certificate, "tok", data.size.toLong(), out, announce = { ports.put(it) })
+        decoy.join(5000)
+        pcThread.join(5000)
+        assertArrayEquals(data, out.toByteArray())
+    }
+
+    @Test
+    fun refusesOtherAddress() {
+        // Only the address of the link can connect, so the computer at
+        // 127.0.0.1 is refused before the handshake when the link is elsewhere.
+        val answers = ArrayBlockingQueue<Packet>(1)
+        val t = computer(pc, answers) { it.outputStream.write(1) }
+        val result = runCatching {
+            Tunnel.accept(Tls(phone), pc.certificate, "tok", announce = { answers.put(it) }, timeoutMs = 1500, peer = InetAddress.getByName("192.0.2.1"))
+        }
+        t.join(5000)
+        assertTrue(result.exceptionOrNull() is WrongPeerException)
+    }
+
+    @Test
+    fun sshUsesTunnelSocket() {
+        // sshj takes the connected socket and opens no connection of its
+        // own, so no other app can take the session.
+        val server = java.net.ServerSocket(0, 1, InetAddress.getLoopbackAddress())
+        val got = ArrayBlockingQueue<String>(1)
+        val peer = thread {
+            server.accept().use { s ->
+                s.soTimeout = 5000
+                s.getOutputStream().write("SSH-2.0-test\r\n".toByteArray())
+                s.getOutputStream().flush()
+                val line = StringBuilder()
+                while (true) {
+                    val b = s.getInputStream().read()
+                    if (b < 0 || b == '\n'.code) break
+                    line.append(b.toChar())
+                }
+                got.put(line.toString())
+            }
+        }
+        val socket = Socket(InetAddress.getLoopbackAddress(), server.localPort)
+        val client = net.schmizz.sshj.SSHClient(net.schmizz.sshj.DefaultConfig())
+        client.addHostKeyVerifier(net.schmizz.sshj.transport.verification.PromiscuousVerifier())
+        client.socketFactory = ConnectedSocketFactory(socket)
+        runCatching { client.connect("computer", 22) }
+        runCatching { client.disconnect() }
+        peer.join(5000)
+        server.close()
+        assertTrue(got.poll(5, TimeUnit.SECONDS)!!.startsWith("SSH-2.0-"))
     }
 
     @Test
@@ -143,37 +253,5 @@ class TunnelTest {
         assertTrue(result.isFailure)
         val port = announced!!.int("port")!!
         assertTrue(port in PAYLOAD_PORTS)
-    }
-
-    @Test
-    fun bridgeCarriesBothDirections() {
-        val answers = ArrayBlockingQueue<Packet>(1)
-        // The computer echoes every byte back, like an SSH peer that answers.
-        val pcThread = computer(pc, answers) { ssl ->
-            val buf = ByteArray(1024)
-            while (true) {
-                val n = ssl.inputStream.read(buf)
-                if (n < 0) break
-                ssl.outputStream.write(buf, 0, n)
-                ssl.outputStream.flush()
-            }
-        }
-        val tunnel = Tunnel.accept(Tls(phone), pc.certificate, "ssh", announce = { answers.put(it) })
-        val bridge = LoopbackBridge(tunnel)
-        Socket(bridge.host, bridge.port).use { local ->
-            local.getOutputStream().write("SSH-2.0-test\r\n".toByteArray())
-            local.getOutputStream().flush()
-            val got = ByteArray(14)
-            var read = 0
-            while (read < got.size) {
-                val n = local.getInputStream().read(got, read, got.size - read)
-                if (n < 0) break
-                read += n
-            }
-            assertEquals("SSH-2.0-test\r\n", String(got))
-        }
-        bridge.close()
-        pcThread.join(5000)
-        assertNotNull(tunnel)
     }
 }

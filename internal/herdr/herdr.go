@@ -18,14 +18,17 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // MinProtocol is the oldest herdr API protocol that Flux supports.
 const MinProtocol = 22
 
 // maxLine is the largest reply line that the client reads. An agent read
-// with 400 lines is much smaller.
+// with 1000 lines is much smaller.
 const maxLine = 32 << 20
 
 // callTimeout limits a call when the context has no deadline.
@@ -58,6 +61,50 @@ func SocketPath() string {
 	return filepath.Join(dir, "herdr", "herdr.sock")
 }
 
+// SessionsDir returns the folder of the named herdr sessions. Each
+// session has a folder there with its own API socket.
+func SessionsDir() string {
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(dir, "herdr", "sessions")
+}
+
+// SessionSocket returns the API socket of the named session in dir.
+func SessionSocket(dir, name string) string {
+	return filepath.Join(dir, name, "herdr.sock")
+}
+
+// Sessions returns the names of the named sessions in dir that have an
+// API socket, in name order. A session that stopped can keep its folder,
+// so a name does not mean that the session runs. Sessions skips the
+// session with the socket skip, which fluxd follows as the default
+// session already.
+func Sessions(dir, skip string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || strings.HasPrefix(name, ".") {
+			continue
+		}
+		sock := SessionSocket(dir, name)
+		if filepath.Clean(sock) == filepath.Clean(skip) {
+			continue
+		}
+		if fi, err := os.Stat(sock); err != nil || fi.Mode().Type() != os.ModeSocket {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
 // Error is an error response from herdr.
 type Error struct {
 	Code    string `json:"code"`
@@ -65,6 +112,16 @@ type Error struct {
 }
 
 func (e *Error) Error() string { return "herdr: " + e.Message }
+
+// Code returns the code of a herdr error, or an empty string for another
+// error.
+func Code(err error) string {
+	var he *Error
+	if errors.As(err, &he) {
+		return he.Code
+	}
+	return ""
+}
 
 // Pong is the result of ping.
 type Pong struct {
@@ -77,25 +134,57 @@ type Snapshot struct {
 	Version    string      `json:"version"`
 	Protocol   int         `json:"protocol"`
 	Workspaces []Workspace `json:"workspaces"`
+	Tabs       []Tab       `json:"tabs"`
+	Panes      []Pane      `json:"panes"`
 	Agents     []Agent     `json:"agents"`
 }
 
 // Workspace is one herdr workspace. Number is its place in the sidebar.
 type Workspace struct {
-	ID     string `json:"workspace_id"`
-	Label  string `json:"label"`
-	Number int    `json:"number"`
+	ID        string `json:"workspace_id"`
+	Label     string `json:"label"`
+	Number    int    `json:"number"`
+	ActiveTab string `json:"active_tab_id"`
 }
 
-// Agent is a coding agent that herdr found in a pane.
+// Tab is one tab of a workspace. Number is its place in the workspace.
+type Tab struct {
+	ID          string `json:"tab_id"`
+	WorkspaceID string `json:"workspace_id"`
+	Label       string `json:"label"`
+	Number      int    `json:"number"`
+}
+
+// Pane is one terminal of the session. A pane can hold an agent.
+type Pane struct {
+	ID            string `json:"pane_id"`
+	WorkspaceID   string `json:"workspace_id"`
+	TabID         string `json:"tab_id"`
+	Cwd           string `json:"cwd"`
+	ForegroundCwd string `json:"foreground_cwd"`
+	Title         string `json:"terminal_title_stripped"`
+}
+
+// Agent is a coding agent that herdr found in a pane. Agent is empty
+// while herdr starts the agent and has not found it yet. Name is empty
+// when nobody named the agent.
 type Agent struct {
 	PaneID        string `json:"pane_id"`
 	WorkspaceID   string `json:"workspace_id"`
 	Agent         string `json:"agent"`
+	Name          string `json:"name"`
 	Status        string `json:"agent_status"`
 	Cwd           string `json:"cwd"`
 	ForegroundCwd string `json:"foreground_cwd"`
 	Title         string `json:"terminal_title_stripped"`
+}
+
+// Created is the result of workspace.create and tab.create. RootPane is
+// the first pane of the new tab.
+type Created struct {
+	Workspace Workspace `json:"workspace"`
+	Tab       Tab       `json:"tab"`
+	RootPane  Pane      `json:"root_pane"`
 }
 
 // Read is the recent terminal output of an agent.
@@ -148,11 +237,25 @@ func GetSnapshot(ctx context.Context, path string) (Snapshot, error) {
 	return r.Snapshot, err
 }
 
+// The sources of a read. With SourceUnwrapped, herdr joins the rows that
+// the terminal wrapped. With SourceRows, each row of the terminal stays a
+// line.
+const (
+	SourceUnwrapped = "recent_unwrapped"
+	SourceRows      = "recent"
+)
+
 // ReadAgent returns up to lines rows of recent output from the agent in
 // the pane. herdr joins soft-wrapped rows. With ansi, the text keeps the
 // ANSI codes of colors and styles. Without it, herdr removes them.
 func ReadAgent(ctx context.Context, path, pane string, lines int, ansi bool) (Read, error) {
-	params := map[string]any{"target": pane, "source": "recent_unwrapped", "lines": lines}
+	return ReadAgentFrom(ctx, path, pane, SourceUnwrapped, lines, ansi)
+}
+
+// ReadAgentFrom is ReadAgent with the source of the read, SourceUnwrapped
+// or SourceRows.
+func ReadAgentFrom(ctx context.Context, path, pane, source string, lines int, ansi bool) (Read, error) {
+	params := map[string]any{"target": pane, "source": source, "lines": lines}
 	if ansi {
 		params["format"], params["strip_ansi"] = "ansi", false
 	}
@@ -161,6 +264,111 @@ func ReadAgent(ctx context.Context, path, pane string, lines int, ansi bool) (Re
 	}
 	err := Call(ctx, path, "agent.read", params, &r)
 	return r.Read, err
+}
+
+// ReadPane returns up to lines rows of recent output from any pane. It
+// does not check for an agent. With ansi, the text keeps the ANSI codes
+// of colors and styles.
+func ReadPane(ctx context.Context, path, pane string, lines int, ansi bool) (Read, error) {
+	params := map[string]any{"pane_id": pane, "source": "recent_unwrapped", "lines": lines}
+	if ansi {
+		params["format"], params["strip_ansi"] = "ansi", false
+	}
+	var r struct {
+		Read Read `json:"read"`
+	}
+	err := Call(ctx, path, "pane.read", params, &r)
+	return r.Read, err
+}
+
+// GetAgent returns the agent in the pane.
+func GetAgent(ctx context.Context, path, pane string) (Agent, error) {
+	var r struct {
+		Agent Agent `json:"agent"`
+	}
+	err := Call(ctx, path, "agent.get", map[string]any{"target": pane}, &r)
+	return r.Agent, err
+}
+
+// PaneLayout is the size of one pane in its tab, in terminal cells.
+type PaneLayout struct {
+	Width  int
+	Height int
+}
+
+// GetLayout returns the size of the pane in its tab. fluxd opens a
+// terminal session at this size, so watching a pane does not resize the
+// terminal that the desktop shows.
+func GetLayout(ctx context.Context, path, pane string) (PaneLayout, error) {
+	var r struct {
+		Layout struct {
+			Panes []struct {
+				PaneID string `json:"pane_id"`
+				Rect   struct {
+					Width  int `json:"width"`
+					Height int `json:"height"`
+				} `json:"rect"`
+			} `json:"panes"`
+		} `json:"layout"`
+	}
+	if err := Call(ctx, path, "pane.layout", map[string]any{"pane_id": pane}, &r); err != nil {
+		return PaneLayout{}, err
+	}
+	for _, p := range r.Layout.Panes {
+		if p.PaneID == pane {
+			return PaneLayout{Width: p.Rect.Width, Height: p.Rect.Height}, nil
+		}
+	}
+	return PaneLayout{}, fmt.Errorf("herdr: pane %s has no layout", pane)
+}
+
+// AgentKinds returns the agent kinds that herdr can detect and start.
+func AgentKinds(ctx context.Context, path string) ([]string, error) {
+	var r struct {
+		Manifests []struct {
+			Agent string `json:"agent"`
+		} `json:"manifests"`
+	}
+	if err := Call(ctx, path, "server.agent_manifests", nil, &r); err != nil {
+		return nil, err
+	}
+	kinds := make([]string, 0, len(r.Manifests))
+	for _, m := range r.Manifests {
+		if m.Agent != "" {
+			kinds = append(kinds, m.Agent)
+		}
+	}
+	return kinds, nil
+}
+
+// CreateWorkspace opens a workspace with one tab and one shell pane in
+// the folder. The workspace does not take the focus.
+func CreateWorkspace(ctx context.Context, path, cwd string) (Created, error) {
+	var c Created
+	err := Call(ctx, path, "workspace.create", map[string]any{"cwd": cwd, "focus": false}, &c)
+	return c, err
+}
+
+// CreateTab opens a tab with one shell pane in the folder, in an existing
+// workspace. The tab does not take the focus.
+func CreateTab(ctx context.Context, path, workspace, cwd string) (Created, error) {
+	var c Created
+	err := Call(ctx, path, "tab.create", map[string]any{"workspace_id": workspace, "cwd": cwd, "focus": false}, &c)
+	return c, err
+}
+
+// StartAgent types the command of an agent kind in the shell of the pane.
+// herdr refuses it with agent_pane_busy until the shell shows its prompt,
+// and with agent_name_taken when another agent has the name. The call
+// returns before herdr finds the agent.
+func StartAgent(ctx context.Context, path, name, kind, pane string) error {
+	return Call(ctx, path, "agent.start", map[string]any{"name": name, "kind": kind, "pane_id": pane}, nil)
+}
+
+// ClosePane closes the pane and ends its process. herdr also closes a tab
+// that has no pane left, and a workspace that has no tab left.
+func ClosePane(ctx context.Context, path, pane string) error {
+	return Call(ctx, path, "pane.close", map[string]any{"pane_id": pane}, nil)
 }
 
 // SendKeys sends key presses to the agent in the pane. herdr checks that
@@ -177,7 +385,7 @@ func Prompt(ctx context.Context, path, pane, text string) error {
 }
 
 // SendInput types text in the pane and then sends the keys. It does not
-// check for an agent. Use it only after herdr reported one.
+// check for an agent.
 func SendInput(ctx context.Context, path, pane, text string, keys []string) error {
 	return Call(ctx, path, "pane.send_input", map[string]any{"pane_id": pane, "text": text, "keys": keys}, nil)
 }
@@ -252,6 +460,10 @@ func open(ctx context.Context, path, method string, params any) (net.Conn, *bufi
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := checkOwner(conn, os.Getuid()); err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(callTimeout)
@@ -267,6 +479,35 @@ func open(ctx context.Context, path, method string, params any) (net.Conn, *bufi
 		return nil, nil, err
 	}
 	return conn, bufio.NewReader(conn), nil
+}
+
+// checkOwner checks with SO_PEERCRED that the server of conn runs as the
+// user uid. HERDR_SOCKET_PATH can name a shared folder, where another user
+// can listen first. That user must not get the prompts and the terminal
+// input of the phone.
+func checkOwner(conn net.Conn, uid int) error {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return errors.New("herdr: the socket is not a Unix socket")
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var cred *unix.Ucred
+	var credErr error
+	if err := raw.Control(func(fd uintptr) {
+		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	}); err != nil {
+		return err
+	}
+	if credErr != nil {
+		return credErr
+	}
+	if int(cred.Uid) != uid {
+		return fmt.Errorf("herdr: the socket belongs to user %d, not to user %d", cred.Uid, uid)
+	}
+	return nil
 }
 
 // await reads replies until the response to the request arrives. It
@@ -297,7 +538,7 @@ var errLineTooLong = errors.New("herdr: reply line is too long")
 func readReply(r *bufio.Reader) (response, error) {
 	var resp response
 	for {
-		line, err := readLine(r)
+		line, err := readLine(r, maxLine)
 		if err != nil {
 			return resp, err
 		}
@@ -311,12 +552,12 @@ func readReply(r *bufio.Reader) (response, error) {
 	}
 }
 
-// readLine reads one line of at most maxLine bytes.
-func readLine(r *bufio.Reader) ([]byte, error) {
+// readLine reads one line of at most max bytes.
+func readLine(r *bufio.Reader, max int) ([]byte, error) {
 	var line []byte
 	for {
 		chunk, err := r.ReadSlice('\n')
-		if len(line)+len(chunk) > maxLine {
+		if len(line)+len(chunk) > max {
 			return nil, errLineTooLong
 		}
 		line = append(line, chunk...)

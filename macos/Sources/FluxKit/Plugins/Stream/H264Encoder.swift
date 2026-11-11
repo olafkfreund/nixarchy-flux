@@ -7,7 +7,9 @@ import VideoToolbox
 /// second, and realtime priority. Frames keep their order, for a low delay.
 /// It writes the stream in Annex-B form, with SPS and PPS in front of each
 /// IDR frame, through output. After 100 ms without a new frame it encodes
-/// the last frame again, so a still scene keeps feeding the computer.
+/// the last frame again, so a still scene keeps feeding the computer. It
+/// does not repeat while backlogged returns true, so a slow network does
+/// not get more frames.
 final class H264Encoder: @unchecked Sendable {
     static let repeatAfter: Double = 0.1
 
@@ -16,6 +18,7 @@ final class H264Encoder: @unchecked Sendable {
     private let session: VTCompressionSession
     private let output: @Sendable ([UInt8]) -> Void
     private let onError: @Sendable (String) -> Void
+    private let backlogged: @Sendable () -> Bool
     private let timer: DispatchSourceTimer
 
     private let lock = NSLock()
@@ -23,6 +26,11 @@ final class H264Encoder: @unchecked Sendable {
     private var lastTime = CMTime.zero
     private var lastSubmit = DispatchTime.now()
     private var forceKey = true
+
+    /// Guards failed and released. VideoToolbox can call the output handler
+    /// inside VTCompressionSessionEncodeFrame, while `lock` is held, so the
+    /// handler takes only this lock.
+    private let stateLock = NSLock()
     private var failed = false
     private var released = false
 
@@ -30,19 +38,28 @@ final class H264Encoder: @unchecked Sendable {
     private let outputLock = NSLock()
     private var framer = AnnexBFramer()
 
-    init(width: Int, height: Int, bitrate: Int, output: @escaping @Sendable ([UInt8]) -> Void, onError: @escaping @Sendable (String) -> Void) throws {
+    init(
+        width: Int, height: Int, bitrate: Int, backlogged: @escaping @Sendable () -> Bool = { false },
+        output: @escaping @Sendable ([UInt8]) -> Void, onError: @escaping @Sendable (String) -> Void
+    ) throws {
         self.width = width
         self.height = height
         self.output = output
         self.onError = onError
-        let spec = [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: kCFBooleanTrue] as CFDictionary
+        self.backlogged = backlogged
+        #if os(macOS)
+        let spec: CFDictionary? = [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: kCFBooleanTrue] as CFDictionary
+        #else
+        // iOS picks the hardware encoder by itself.
+        let spec: CFDictionary? = nil
+        #endif
         var created: VTCompressionSession?
         let status = VTCompressionSessionCreate(
             allocator: nil, width: Int32(width), height: Int32(height), codecType: kCMVideoCodecType_H264,
             encoderSpecification: spec, imageBufferAttributes: nil, compressedDataAllocator: nil,
             outputCallback: nil, refcon: nil, compressionSessionOut: &created
         )
-        guard status == noErr, let created else { throw FluxError("This Mac cannot encode \(width) × \(height) video (\(status))") }
+        guard status == noErr, let created else { throw FluxError("\(FluxPlatform.current.deviceNounStart) cannot encode \(width) × \(height) video (\(status))") }
         session = created
         func set(_ key: CFString, _ value: CFTypeRef) -> Bool { VTSessionSetProperty(created, key: key, value: value) == noErr }
         _ = set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
@@ -81,17 +98,20 @@ final class H264Encoder: @unchecked Sendable {
 
     /// Writes the frames in flight and stops the encoder.
     func release() {
-        let first = lock.withLock { () -> Bool in
-            defer { released = true; last = nil }
+        let first = stateLock.withLock { () -> Bool in
+            defer { released = true }
             return !released
         }
         guard first else { return }
+        lock.withLock { last = nil }
         timer.cancel()
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
         VTCompressionSessionInvalidate(session)
     }
 
     private func repeatLast() {
+        // A repeat adds no new image, so it waits while the network is behind.
+        guard !backlogged() else { return }
         lock.withLock {
             guard let last, DispatchTime.now().uptimeNanoseconds - lastSubmit.uptimeNanoseconds >= UInt64(Self.repeatAfter * 1e9) else { return }
             submit(last)
@@ -100,7 +120,7 @@ final class H264Encoder: @unchecked Sendable {
 
     /// Hands 1 frame to VideoToolbox. The lock is held.
     private func submit(_ buffer: CVPixelBuffer) {
-        guard !released, !failed else { return }
+        guard stateLock.withLock({ !released && !failed }) else { return }
         var pts = CMClockGetTime(CMClockGetHostTimeClock())
         if pts <= lastTime { pts = lastTime + CMTime(value: 1, timescale: 1000) }
         lastTime = pts
@@ -118,7 +138,8 @@ final class H264Encoder: @unchecked Sendable {
 
     private func encoded(_ status: OSStatus, _ sample: CMSampleBuffer?) {
         guard status == noErr else {
-            lock.withLock { fail("The video encoder failed (\(status))") }
+            // No `lock` here: this can run inside submit, which holds it.
+            fail("The video encoder failed (\(status))")
             return
         }
         guard let sample, let block = CMSampleBufferGetDataBuffer(sample),
@@ -136,12 +157,18 @@ final class H264Encoder: @unchecked Sendable {
         if let out { output(out) }
     }
 
-    /// Reports an error once. The lock is held.
+    /// Reports an error once. The report goes out on another queue, so that
+    /// its handler never runs inside VideoToolbox or under `lock`.
     private func fail(_ message: String) {
-        guard !failed, !released else { return }
-        failed = true
+        let first = stateLock.withLock { () -> Bool in
+            guard !failed, !released else { return false }
+            failed = true
+            return true
+        }
+        guard first else { return }
         FluxLog.plugin.error("\(message, privacy: .public)")
-        onError(message)
+        let onError = onError
+        DispatchQueue.global().async { onError(message) }
     }
 
     private static func isKeyFrame(_ sample: CMSampleBuffer) -> Bool {

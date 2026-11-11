@@ -33,8 +33,10 @@ object Approvals {
     fun onPacket(core: FluxCore, d: Device, p: Packet) {
         when (p.string("kind")) {
             "cancel" -> {
+                // Only the computer of the open request can cancel it.
                 val id = p.string("id")
-                if (id != null && _current.value?.id == id) main.post { clear(core.app, id) }
+                val open = _current.value
+                if (id != null && open?.id == id && open.computerId == d.id) main.post { clear(core.app, id) }
             }
             "request", "enroll" -> receive(core, d, p)
         }
@@ -43,13 +45,22 @@ object Approvals {
     private fun receive(core: FluxCore, d: Device, p: Packet) {
         val id = p.string("id") ?: return
         val r = ApproveMessage.parse(p, d.id, d.identity.deviceName)
+        val admit = r?.let { ApproveMessage.admit(_current.value, it) }
+        // A repeated packet changes nothing, so the user approves the request that the screen showed.
+        if (admit == ApproveMessage.Admit.Repeat) return
+        if (r != null && admit == ApproveMessage.Admit.Conflict) {
+            Log.i(TAG, "closed request $id: ${d.identity.deviceName} changed its fields")
+            d.send(ApproveMessage.failed(id, "The request changed while the phone showed it"))
+            main.post { clear(core.app, id) }
+            return
+        }
         val problem = when {
             r == null -> "The request is not valid"
             !ApproveMessage.fresh(r, System.currentTimeMillis() / 1000) ->
                 "The clocks of the phone and the computer differ by more than 10 minutes"
             r.kind == ApproveRequest.Kind.Approve && !ApproveKeys.has(d.id) ->
                 "This phone has no key for the computer. Run: sudo flux-cli approve enroll"
-            _current.value != null && _current.value?.id != r.id -> "Another request is open on the phone"
+            admit == ApproveMessage.Admit.Busy -> "Another request is open on the phone"
             else -> null
         }
         if (problem != null || r == null) {
@@ -73,6 +84,7 @@ object Approvals {
     /** Sends the signature of the approval message of the current request. */
     fun approve(core: FluxCore, r: ApproveRequest, signature: ByteArray): Boolean {
         val ok = send(core, r, ApproveMessage.approved(r.id, signature))
+        if (ok) SendLog.approval(r, approved = true)
         clear(core.app, r.id)
         return ok
     }
@@ -80,13 +92,14 @@ object Approvals {
     /** Sends the new public key and the proof of the current enrollment. */
     fun enrolled(core: FluxCore, r: ApproveRequest, spki: ByteArray, signature: ByteArray): Boolean {
         val ok = send(core, r, ApproveMessage.enrolled(r.id, spki, signature))
+        if (ok) SendLog.approval(r, approved = true)
         clear(core.app, r.id)
         return ok
     }
 
     fun deny(core: FluxCore, r: ApproveRequest? = _current.value) {
         if (r == null) return
-        send(core, r, ApproveMessage.denied(r.id))
+        if (send(core, r, ApproveMessage.denied(r.id))) SendLog.approval(r, approved = false)
         clear(core.app, r.id)
     }
 
@@ -102,12 +115,19 @@ object Approvals {
         NotificationManagerCompat.from(context).cancel(Android.ID_APPROVE)
     }
 
+    /**
+     * Opens the Approve screen of the open request. The approval
+     * notification and the agents widget use it. The screen asks for the
+     * fingerprint before it signs.
+     */
+    fun openScreen(context: Context): PendingIntent = PendingIntent.getActivity(
+        context, 10, Intent(context, ApproveActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+
     @SuppressLint("MissingPermission")
     private fun show(context: Context, r: ApproveRequest) {
-        val open = PendingIntent.getActivity(
-            context, 10, Intent(context, ApproveActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
+        val open = openScreen(context)
         val deny = PendingIntent.getService(
             context, 11, Intent(context, FluxService::class.java).setAction(FluxService.ACTION_APPROVE_DENY),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,

@@ -1,6 +1,8 @@
 package desktop
 
 import (
+	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"regexp"
@@ -8,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/introspect"
@@ -20,6 +23,20 @@ const (
 	mprisPlayerIface = "org.mpris.MediaPlayer2.Player"
 	propsIface       = "org.freedesktop.DBus.Properties"
 )
+
+// Media reports a change changeDelay after the last signal of the player,
+// and at most changeMaxWait after the first signal. A player sends a
+// burst of signals for 1 change, such as a new track, and each report
+// sends a packet to each phone.
+const (
+	changeDelay   = 200 * time.Millisecond
+	changeMaxWait = time.Second
+)
+
+// stuckWait is how long Media does not ask a player again after the player
+// did not answer within busTimeout. A stopped player, such as mpv after
+// Ctrl+Z, keeps its bus name and never answers.
+const stuckWait = 10 * time.Second
 
 // Player is the state of one MPRIS media player on the desktop.
 type Player struct {
@@ -45,11 +62,16 @@ type Media struct {
 	conn    *dbus.Conn
 	signals chan *dbus.Signal
 
-	mu       sync.Mutex
-	byName   map[string]string // short name to bus name
-	byOwner  map[string]string // unique owner name to short name
-	volume   map[string]bool   // bus name to true when the player takes a volume
-	onChange []func(name string)
+	mu         sync.Mutex
+	byName     map[string]string // short name to bus name
+	byOwner    map[string]string // unique owner name to short name
+	volume     map[string]bool   // bus name to true when the player takes a volume
+	identities map[string]string // bus name to the Identity of the player
+	onChange   []func(name string)
+
+	// stuck holds the bus names of players that did not answer in time,
+	// with the time until which Media does not ask them again.
+	stuck map[string]time.Time
 }
 
 var instanceSuffix = regexp.MustCompile(`\.instance[\w.-]*$`)
@@ -92,7 +114,7 @@ func NewMedia() (*Media, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Media{conn: conn, signals: make(chan *dbus.Signal, 64), volume: map[string]bool{}}
+	m := &Media{conn: conn, signals: make(chan *dbus.Signal, 64), volume: map[string]bool{}, identities: map[string]string{}}
 	if err := conn.AddMatchSignal(
 		dbus.WithMatchObjectPath(mprisPath),
 		dbus.WithMatchInterface(propsIface),
@@ -129,7 +151,7 @@ func NewMedia() (*Media, error) {
 // refresh reads the list of players from the bus.
 func (m *Media) refresh() {
 	var names []string
-	if err := m.conn.BusObject().Call("org.freedesktop.DBus.ListNames", 0).Store(&names); err != nil {
+	if err := busCall(m.conn.BusObject(), "org.freedesktop.DBus.ListNames").Store(&names); err != nil {
 		return
 	}
 	var buses []string
@@ -142,7 +164,7 @@ func (m *Media) refresh() {
 	byOwner := make(map[string]string, len(byName))
 	for name, bus := range byName {
 		var owner string
-		if err := m.conn.BusObject().Call("org.freedesktop.DBus.GetNameOwner", 0, bus).Store(&owner); err == nil {
+		if err := busCall(m.conn.BusObject(), "org.freedesktop.DBus.GetNameOwner", bus).Store(&owner); err == nil {
 			byOwner[owner] = name
 		}
 	}
@@ -153,37 +175,135 @@ func (m *Media) refresh() {
 			delete(m.volume, bus)
 		}
 	}
+	for bus := range m.identities {
+		if !slices.Contains(buses, bus) {
+			delete(m.identities, bus)
+		}
+	}
+	for bus := range m.stuck {
+		if !slices.Contains(buses, bus) {
+			delete(m.stuck, bus)
+		}
+	}
 	m.mu.Unlock()
 }
 
+// dispatch reports the changes of the players until Shutdown. It joins
+// the signals of 1 player that come close together into 1 report.
 func (m *Media) dispatch() {
-	for sig := range m.signals {
-		var name string
-		switch sig.Name {
-		case "org.freedesktop.DBus.NameOwnerChanged":
-			m.refresh()
-			name = ""
-		case propsIface + ".PropertiesChanged", mprisPlayerIface + ".Seeked":
-			m.mu.Lock()
-			n, ok := m.byOwner[sig.Sender]
-			m.mu.Unlock()
+	var pending changes
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
+	for {
+		select {
+		case sig, ok := <-m.signals:
+			if !ok {
+				return
+			}
+			name, ok := m.changed(sig)
 			if !ok {
 				continue
 			}
-			name = n
-		default:
-			continue
+			pending.add(name, time.Now())
+		case <-timer.C:
+			for _, name := range pending.take(time.Now()) {
+				m.report(name)
+			}
 		}
-		m.mu.Lock()
-		fns := append([]func(string){}, m.onChange...)
-		m.mu.Unlock()
-		for _, fn := range fns {
-			fn(name)
+		if due, ok := pending.next(); ok {
+			timer.Reset(time.Until(due))
 		}
 	}
 }
 
-// Players returns the state of every player, sorted by name.
+// changed returns the short name of the player that sig changes. The name
+// is empty when a player starts or stops. ok is false for a signal that
+// Media does not report.
+func (m *Media) changed(sig *dbus.Signal) (name string, ok bool) {
+	switch sig.Name {
+	case "org.freedesktop.DBus.NameOwnerChanged":
+		// A new owner of the bus name can be a different player.
+		if len(sig.Body) > 0 {
+			if bus, ok := sig.Body[0].(string); ok {
+				m.mu.Lock()
+				delete(m.identities, bus)
+				m.mu.Unlock()
+			}
+		}
+		m.refresh()
+		return "", true
+	case propsIface + ".PropertiesChanged", mprisPlayerIface + ".Seeked":
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		name, ok = m.byOwner[sig.Sender]
+		return name, ok
+	}
+	return "", false
+}
+
+// report calls the OnChange functions with the short name.
+func (m *Media) report(name string) {
+	m.mu.Lock()
+	fns := append([]func(string){}, m.onChange...)
+	m.mu.Unlock()
+	for _, fn := range fns {
+		fn(name)
+	}
+}
+
+// changes holds the players with a change that Media has not reported.
+type changes struct {
+	first map[string]time.Time // the time of the first signal
+	due   map[string]time.Time // the time of the report
+}
+
+// add records a signal of the player name at the time now.
+func (c *changes) add(name string, now time.Time) {
+	if c.due == nil {
+		c.first, c.due = map[string]time.Time{}, map[string]time.Time{}
+	}
+	first, ok := c.first[name]
+	if !ok {
+		first = now
+		c.first[name] = now
+	}
+	due := now.Add(changeDelay)
+	if limit := first.Add(changeMaxWait); due.After(limit) {
+		due = limit
+	}
+	c.due[name] = due
+}
+
+// next returns the earliest time of a report. ok is false when no change
+// waits.
+func (c *changes) next() (due time.Time, ok bool) {
+	for _, t := range c.due {
+		if !ok || t.Before(due) {
+			due, ok = t, true
+		}
+	}
+	return due, ok
+}
+
+// take removes the players with a report due at the time now and returns
+// their names, sorted.
+func (c *changes) take(now time.Time) []string {
+	var names []string
+	for name, t := range c.due {
+		if !t.After(now) {
+			names = append(names, name)
+			delete(c.due, name)
+			delete(c.first, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Players returns the state of every player, sorted by name. It asks the
+// players at the same time, so a player that does not answer delays the
+// list by at most busTimeout. The list leaves out that player.
 func (m *Media) Players() []Player {
 	m.mu.Lock()
 	names := make([]string, 0, len(m.byName))
@@ -192,9 +312,20 @@ func (m *Media) Players() []Player {
 	}
 	m.mu.Unlock()
 	sort.Strings(names)
+	players := make([]Player, len(names))
+	found := make([]bool, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			players[i], found[i] = m.Player(name)
+		}()
+	}
+	wg.Wait()
 	out := make([]Player, 0, len(names))
-	for _, name := range names {
-		if p, ok := m.Player(name); ok {
+	for i, p := range players {
+		if found[i] {
 			out = append(out, p)
 		}
 	}
@@ -204,18 +335,18 @@ func (m *Media) Players() []Player {
 // Player returns the state of the player with the short name.
 func (m *Media) Player(name string) (Player, bool) {
 	bus, ok := m.bus(name)
-	if !ok {
+	if !ok || m.isStuck(bus) {
 		return Player{}, false
 	}
 	obj := m.conn.Object(bus, mprisPath)
 	var props map[string]dbus.Variant
-	if err := obj.Call(propsIface+".GetAll", 0, mprisPlayerIface).Store(&props); err != nil {
+	if err := busCall(obj, propsIface+".GetAll", mprisPlayerIface).Store(&props); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			m.markStuck(bus)
+		}
 		return Player{}, false
 	}
-	p := Player{Name: name, Bus: bus}
-	if v, err := obj.GetProperty(mprisRootIface + ".Identity"); err == nil {
-		p.Identity, _ = v.Value().(string)
-	}
+	p := Player{Name: name, Bus: bus, Identity: m.identity(obj)}
 	p.Playing = str(props["PlaybackStatus"]) == "Playing"
 	p.Position = toInt64(props["Position"]) / 1000
 	if v, ok := props["Volume"]; ok {
@@ -256,16 +387,7 @@ func (m *Media) Action(name, action string) error {
 	if err != nil {
 		return err
 	}
-	return obj.Call(mprisPlayerIface+"."+action, 0).Err
-}
-
-// Seek moves the position by offsetUs microseconds.
-func (m *Media) Seek(name string, offsetUs int64) error {
-	obj, err := m.object(name)
-	if err != nil {
-		return err
-	}
-	return obj.Call(mprisPlayerIface+".Seek", 0, offsetUs).Err
+	return busCall(obj, mprisPlayerIface+"."+action).Err
 }
 
 // SetPosition moves the position of the current track to ms milliseconds.
@@ -274,7 +396,7 @@ func (m *Media) SetPosition(name string, ms int64) error {
 	if err != nil {
 		return err
 	}
-	v, err := obj.GetProperty(mprisPlayerIface + ".Metadata")
+	v, err := getProperty(obj, mprisPlayerIface, "Metadata")
 	if err != nil {
 		return err
 	}
@@ -289,7 +411,7 @@ func (m *Media) SetPosition(name string, ms int64) error {
 	if !track.IsValid() {
 		return errors.New("player has no track ID")
 	}
-	return obj.Call(mprisPlayerIface+".SetPosition", 0, track, ms*1000).Err
+	return busCall(obj, mprisPlayerIface+".SetPosition", track, ms*1000).Err
 }
 
 // SetVolume sets the volume from 0 to 100.
@@ -299,7 +421,7 @@ func (m *Media) SetVolume(name string, volume int) error {
 		return err
 	}
 	volume = max(0, min(100, volume))
-	err = obj.SetProperty(mprisPlayerIface+".Volume", dbus.MakeVariant(float64(volume)/100))
+	err = busCall(obj, propsIface+".Set", mprisPlayerIface, "Volume", dbus.MakeVariant(float64(volume)/100)).Err
 	if err != nil {
 		// Some players list Volume as writable and refuse each change.
 		// Treat the player as one that takes no volume from now on.
@@ -320,12 +442,33 @@ func (m *Media) takesVolume(bus string) bool {
 	if known {
 		return ok
 	}
-	node, err := introspect.Call(m.conn.Object(bus, mprisPath))
+	node, err := introspectNode(m.conn.Object(bus, mprisPath))
 	ok = err == nil && writableVolume(node)
 	m.mu.Lock()
 	m.volume[bus] = ok
 	m.mu.Unlock()
 	return ok
+}
+
+// identity returns the Identity property of the player obj. Media reads it
+// once for each player and keeps it until the player stops.
+func (m *Media) identity(obj dbus.BusObject) string {
+	bus := obj.Destination()
+	m.mu.Lock()
+	id, ok := m.identities[bus]
+	m.mu.Unlock()
+	if ok {
+		return id
+	}
+	v, err := getProperty(obj, mprisRootIface, "Identity")
+	if err != nil {
+		return ""
+	}
+	id, _ = v.Value().(string)
+	m.mu.Lock()
+	m.identities[bus] = id
+	m.mu.Unlock()
+	return id
 }
 
 // writableVolume reports whether the introspection data lists the Volume
@@ -371,7 +514,57 @@ func (m *Media) object(name string) (dbus.BusObject, error) {
 	if !ok {
 		return nil, fmt.Errorf("no media player %q", name)
 	}
+	if m.isStuck(bus) {
+		return nil, fmt.Errorf("the media player %q does not answer", name)
+	}
 	return m.conn.Object(bus, mprisPath), nil
+}
+
+// isStuck reports whether the player at the bus name did not answer in
+// the last stuckWait.
+func (m *Media) isStuck(bus string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return time.Now().Before(m.stuck[bus])
+}
+
+// markStuck records that the player at the bus name did not answer.
+func (m *Media) markStuck(bus string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stuck == nil {
+		m.stuck = map[string]time.Time{}
+	}
+	m.stuck[bus] = time.Now().Add(stuckWait)
+}
+
+// busCall calls a method of obj and waits at most busTimeout for the
+// answer.
+func busCall(obj dbus.BusObject, method string, args ...any) *dbus.Call {
+	ctx, cancel := context.WithTimeout(context.Background(), busTimeout)
+	defer cancel()
+	return obj.CallWithContext(ctx, method, 0, args...)
+}
+
+// getProperty reads the property name of the interface iface with
+// busTimeout.
+func getProperty(obj dbus.BusObject, iface, name string) (dbus.Variant, error) {
+	var v dbus.Variant
+	err := busCall(obj, propsIface+".Get", iface, name).Store(&v)
+	return v, err
+}
+
+// introspectNode reads the introspection data of obj with busTimeout.
+func introspectNode(obj dbus.BusObject) (*introspect.Node, error) {
+	var data string
+	if err := busCall(obj, "org.freedesktop.DBus.Introspectable.Introspect").Store(&data); err != nil {
+		return nil, err
+	}
+	var node introspect.Node
+	if err := xml.NewDecoder(strings.NewReader(data)).Decode(&node); err != nil {
+		return nil, err
+	}
+	return &node, nil
 }
 
 func str(v dbus.Variant) string {

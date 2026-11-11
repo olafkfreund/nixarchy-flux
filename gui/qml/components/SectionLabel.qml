@@ -1,8 +1,8 @@
 import QtQuick
 import ".."
 
-// A small upper-case card heading in the dim color.
+// The heading of a card or a section, in sentence case.
 Txt {
-  color: Theme.dim
-  font.pixelSize: 12
+  font.pixelSize: 13
+  font.weight: Font.DemiBold
 }

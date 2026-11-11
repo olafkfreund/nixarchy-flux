@@ -1,0 +1,501 @@
+# Flux for iOS
+
+[Documentation index](README.md)
+
+Flux for iOS connects an iPhone to an Omarchy computer that runs `fluxd`.
+The iPhone takes the place of the Android phone: it uses Flux protocol version 8 and pairs, shares, and streams the same way.
+It shares the Swift package FluxKit with [Flux for macOS](macos.md) and offers the Android features that iOS allows.
+The app requires iOS 17 or later.
+
+## Requirements
+
+- A Mac with Xcode 26 or later. The app uses iOS 26 APIs where they exist.
+- XcodeGen:
+
+  ```sh
+  brew install xcodegen
+  ```
+
+- An iPhone simulator, or an iPhone with iOS 17 or later.
+
+## Build and run in the simulator
+
+From the repository root, build the app and run the tests:
+
+```sh
+make ios
+make test-ios
+```
+
+`make ios` generates `ios/Flux.xcodeproj` from `ios/project.yml` and builds the app for the simulator in `ios/build`.
+`make ios` and `make test-ios` set the app version to the last release tag, such as `0.7.0`. The app sends it to `fluxd`.
+A build from the Xcode window uses `MARKETING_VERSION` in `ios/project.yml` instead.
+`make test-ios` runs the app tests and the FluxKit tests in the booted iPhone simulator, else in the first available one.
+Set `IOS_SIMULATOR=<id>` to choose another simulator.
+The generated project and `ios/build` stay out of Git.
+
+To install and open the app in the booted simulator:
+
+```sh
+xcrun simctl install booted ios/build/Build/Products/Debug-iphonesimulator/Flux.app
+xcrun simctl launch booted org.omarchy.flux.ios
+```
+
+To work in Xcode, run `xcodegen generate` in `ios/` and open `Flux.xcodeproj`.
+The simulator needs no signing.
+
+## Install on an iPhone
+
+The project commits no signing settings.
+Install the app from Xcode with your own Apple ID:
+
+1. Run `xcodegen generate` in `ios/` and open `Flux.xcodeproj`.
+2. Add your Apple ID in **Xcode > Settings > Accounts**. A free Apple ID works.
+3. For the **Flux** and **FluxShare** targets, open **Signing & Capabilities** and select your team.
+4. Change the bundle ids when Xcode says they are taken, for example to `com.example.flux.ios` and `com.example.flux.ios.share`.
+   The share extension id must start with the app id.
+5. Set the App Group when Xcode says `group.org.omarchy.flux` is taken.
+   Change `FLUX_APP_GROUP` in `ios/project.yml` to a group id of your team, for example `group.com.example.flux`, and run `xcodegen generate` again.
+   It is the only place with the group id. The app and the share extension read it from their Info.plist.
+6. Connect the iPhone, select it as the run destination, and select **Run**.
+7. On the iPhone, turn on **Settings > Privacy & Security > Developer Mode** when iOS asks, and trust the developer in **Settings > General > VPN & Device Management**.
+
+| Apple ID | Result |
+| --- | --- |
+| Free | The app runs for 7 days. Run it from Xcode again to renew it. A free team has a small limit of app ids. |
+| Paid developer program | The app runs for 1 year. |
+
+The approval notification is time sensitive.
+Focus lets it through only with the time-sensitive entitlement, which the project does not set, because a free team may not be able to sign it.
+Without it, the notification still shows when no Focus is on.
+
+## Install a release with a sideload tool
+
+Each release attaches `flux-ios-VERSION.ipa`. The app in it has no signature.
+A sideload tool such as AltStore, SideStore, or Sideloadly signs it with your Apple ID and installs it.
+The limits of a free Apple ID in the table above also apply.
+The window on the computer shows an update notice only for the Android app.
+To find a newer iPhone app, check `https://github.com/bjarneo/flux/releases`.
+Flux 0.10.1 and earlier use other ports, see [Pair an iPhone](#pair-an-iphone).
+An iPhone app of 0.10.1 or earlier cannot connect to a newer `fluxd`, and a newer iPhone app cannot connect to an earlier `fluxd`.
+Update the iPhone app and `fluxd` together.
+
+The share extension needs the App Group `group.org.omarchy.flux`.
+When the sideload tool cannot give the app this group, the share extension cannot queue files for the app.
+To use the share extension with your own team, build the app from Xcode as described above.
+
+## Pair an iPhone
+
+1. Connect the iPhone and the computer to the same local network.
+2. Open Flux on the iPhone and allow access to the local network.
+3. Open **Computers** and select the computer under **Available**. Before the first pairing, **Chats** also lists the computers on the network. Then send the pair request.
+4. Accept the request on the computer when it shows the same 16-character key, such as `5EE6 825F 974E D59A`.
+
+Compare all 16 characters.
+Earlier versions of Flux show only 8 characters, so update Flux on all devices before you pair.
+
+You can also start from the computer with `flux-cli pair` and accept on the iPhone.
+While Flux is on the screen, a sheet shows the request.
+A swipe down on the sheet rejects it.
+While Flux is in the background, a notification shows the request and the key.
+**Accept** in the notification needs an unlocked iPhone and opens Flux.
+**Reject** also works on the lock screen.
+Flux shows 1 request at a time.
+When a request ends without a pairing, for example after a reject or a timeout, Flux ends new requests from the same computer or address for 30 seconds.
+To pair in that time, start the pairing on the iPhone.
+After the iPhone accepts, the computer asks you to confirm the key.
+Select **Confirm** in the Flux window or in the notification, or type `y` at the `flux-cli pair` prompt.
+The computer pins the iPhone only after this step, and each step waits at most 30 seconds.
+A pairing is bound to its link.
+When the computer connects again while a pairing runs, the pairing stops, so pair again.
+A request from the computer that stops this way also starts the wait of 30 seconds.
+Flux asks for permission to show notifications when you pair the first computer.
+The iPhone appears on the computer as `phone`, with the name from **Computers > Settings > This iPhone**.
+iOS gives apps only the generic name "iPhone", so set a name there.
+Flux keeps its identity key and certificate out of iCloud and computer backups, so pair again after you restore a backup.
+
+The computer connects to the iPhone.
+The iPhone publishes `_flux._udp` through Bonjour and listens for links on 1 TCP port from 12100 to 12108.
+Transfers, tunnels, and streams use TCP ports 12070 to 12099 on the iPhone.
+It also sends its identity to UDP port 12100 of each computer that it finds through Bonjour.
+It sends no UDP broadcasts, because iOS needs a special entitlement for them.
+
+| Problem | Check |
+| --- | --- |
+| The computer does not see the iPhone | Flux is open on the iPhone. **Settings > Privacy & Security > Local Network** allows Flux. While it does not, **Computers** shows **Local Network is off**. After you allow it, return to Flux, and Flux searches again. |
+| The computer sees the iPhone but cannot connect | The network allows connections between devices. Wi-Fi client isolation blocks them. |
+| The link drops away from the computer | Add an extra address. See below. |
+
+The default Omarchy firewall allows mDNS, and `fluxd` opens the connections, so the computer needs no new firewall rule.
+
+To reach the iPhone away from the local network, add its Tailscale name as an extra address on the computer, as for a phone in [Tailscale](tailscale.md#add-the-phone):
+
+```sh
+flux-cli --device "Snorre's iPhone" addresses add snorres-iphone
+```
+
+Flux must still be open on the iPhone. See [limits](#limits-of-ios).
+
+## Chats and navigation
+
+Flux has 3 tabs: **Chats**, **Control**, and **Computers**.
+Each tab has its own navigation stack, so the system back button and the edge swipe work.
+A tap on the open tab goes back to its root.
+The **Chats** tab has a badge with the number of items that need you on all computers, from 1 to 9, then `9+`.
+
+**Chats** is the home of the app, as in a messaging app.
+It has 1 chat for each agent and each paired computer.
+The line under the title counts the items that need you and the computers that are online, for example `2 need you · 1 of 2 online`.
+**+** at the end of the navigation bar starts an agent or opens a terminal on a computer that sets `herdr_control = true`.
+The search field under the title keeps only the chats that hold its text.
+A computer also stays when an entry of its chat holds the text, and the row shows that entry.
+
+**Chats** has 3 groups:
+
+- **Needs you**: the sudo, polkit, and enrollment request with **Deny** and **Approve**, pair requests with **Compare the key**, and each agent that waits for input. **Deny** acts at once. **Approve** opens the approval sheet, which asks for Face ID or Touch ID. Neither card approves or pairs by itself.
+- **Agents**: the agents that work, then the agents that are done, then the idle agents. A row shows the task, the status, the agent, and the project. An agent that waits shows how long it waits, such as `3m`. An agent that works shows how long it works, such as `2:14`.
+- **Computers**: the paired computers, the online computers first. A row shows the newest entry of the chat, such as `You: Dinner at 7, bring the kids`. A computer that is not reachable shows dimmed with **Offline** and the time that Flux saw it go offline.
+
+Tap an agent to open its chat. See [See your agents](herdr.md#see-your-agents).
+Tap a computer to open its chat.
+A notification of an agent opens the chat of the agent above **Chats**.
+A new pairing opens the chat of the new computer above **Chats**.
+The chat of a computer or an agent hides the tab bar, so that the thread and the dock take the height.
+
+The chat of a computer shows what happens between this iPhone and the computer as 1 thread, with the newest entry at the bottom.
+The navigation bar shows the computer with a green dot while it is online, and its link and battery, for example `connected · 82%, charging`.
+The menu at the end holds **Control** with that computer in scope, **Agents and terminals**, **New agent or terminal**, and **Queue and transfers**.
+The computer writes on the left:
+
+- Sudo, polkit, and enrollment requests of the computer, and the answers of this iPhone to them.
+- Files that come in, with their progress and **Open**.
+- The last clip from the computer.
+
+What this iPhone sent shows on the right: links, text, clips, scans, and files, with the progress of each transfer.
+A card that needs you takes the full width and has a red border.
+
+The dock under the thread shows the clipboard with **Send**, and the composer: the **+** key, the field, the mic key, and the send key.
+iOS asks before an app reads the clipboard, so the dock shows only the kind of the copy until it goes out.
+A tap on the field hides **+**, so the field takes its width and grows to 6 lines. The expand key opens the large editor.
+A link opens in the browser of the computer. Other text goes to its clipboard.
+
+**+** opens the tray under the composer, and turns into a cross that closes it.
+The tray and the keyboard take the same place, so 1 closes the other.
+The tray holds **Recent photos** with **All photos**, and the tools.
+The 4 newest photos of the library show only when Flux has access to the photos.
+Without the access, a line asks for it with **Allow**. After a refusal, **Settings** opens the Settings app.
+Tap a photo to select it. Each selected photo shows its number, and the send key shows the count. The send key sends the selected photos in that order.
+**All photos** opens the photo picker, which sends the photos and videos at once.
+The tools are **Camera**, **File**, **Scan**, **Text**, **QR**, **Signature**, and **Get files**.
+**Agent** also shows while the computer lets this iPhone start an agent.
+
+The notices under the entries tell when Flux connects and when the computer is not reachable.
+In **Chats**, the notices tell when no computer is online and ask for notifications.
+Before the first pairing, **Chats** shows the pairing guide.
+While Flux is off, **Chats** shows **Turn on**.
+
+Control and Computers show the computers as pills under the title. Tap a pill to make that computer the scope. Tap it again to show all computers.
+The scope filters **Control**, and it picks the theme of the computer.
+A tap on a paired computer in **Computers** also sets the scope.
+A new start of Flux begins with all computers.
+
+**Control** lists the agents and the terminals of herdr, with the time of each status that this iPhone saw.
+Under them are the tools: the Omarchy panel, the touchpad, the remote desktop, and the commands, then the microphone and the webcam.
+The dock plays the media of the computer. Tap the title to open **Media**.
+With all computers in scope and more than 1 computer online, a tool asks which computer to use.
+**Computers** holds this iPhone, the paired computers, the computers to pair, **Settings**, the theme, and **Turn off Flux**.
+The dock shows the search with **Scan again**.
+Touch and hold a paired computer to open its page with the address and the approval setup, or to unpair it.
+The **Omarchy panel** lists the windows of the active workspace. Tap a window to focus it. The dock holds the arrows and the window actions. Hold an arrow to move the window.
+
+## Theme
+
+Flux follows the active Omarchy theme of the computer.
+`fluxd` sends the theme in a `flux.theme` packet when the iPhone connects and when the theme changes.
+Flux saves the theme of each computer, so the next start draws it at once.
+
+To change the theme, open **Computers** and select a choice under **Theme**. The choices are:
+
+- **Computer**, the default: the theme of the computer in scope. In the scope of all computers, Flux uses the theme that changed most recently. A reconnect does not change the theme. Without a theme from the computer in scope, Flux uses Tokyo Night on a dark iPhone and Tokyo Night Day on a light iPhone. The choice shows the theme name and the computer that sent it.
+- **System**: Tokyo Night on a dark iPhone and Tokyo Night Day on a light iPhone.
+- **Light**: Tokyo Night Day.
+- **Dark**: Tokyo Night.
+
+The setting keeps the key of the earlier **Appearance** setting. **Automatic** becomes **Computer**, and **Light** and **Dark** stay.
+The light or dark mode of the theme also applies to the sheets, the alerts, and the keyboard.
+A contrast guard maps the theme to the colors of the app, as in [Flux for Android](android.md#theme).
+The master tile that needs you takes the gradient of `hyprland_active_border`.
+The feature screens take the background, the accent, and the light or dark mode of the theme.
+The agent output keeps its terminal colors.
+The theme engine is in `macos/Sources/FluxKit/Theme`, and the colors of the app are in `ios/App/Theme`.
+
+## Features
+
+| Feature | iPhone behavior |
+| --- | --- |
+| Files, text, and links | Send from the Files picker, the photo picker, the Share field, or the share sheet of any app. An `http` or `https` link with a host opens in the browser of the computer. Text and each other link go on its clipboard. Text has a limit of 1 MB. Received files go to the Flux folder in the Files app. A received file or link shows in a notification, and it opens only after a tap on the notification or on the transfer. |
+| Share sheet | **Flux** in the share sheet of other apps queues files, photos, text, and links for a computer. A text file, such as a `.txt` or `.md` file, goes as a file with its name. **Cancel** stops the share. Flux sends the items when it opens and connects. See [limits](#limits-of-ios). |
+| Clipboard | Text and images both ways while **Sync clipboard** is on and Flux is on the screen. When Flux opens, a new copy from another app goes out once. **Send** next to the clipboard in the chat of a computer sends it at once. A clip that you send goes on the clipboard of the computer also while its automatic sync is off. To send without opening Flux, see [Send the clipboard without opening Flux](#send-the-clipboard-without-opening-flux). |
+| Screenshots and photos | **Send new screenshots** and **Send new photos** send new items from the Photos library when Flux opens. An item goes only when its original is on this iPhone and it was taken at most 1 day before its switch turned on. Photos that only iCloud has, for example from your other devices or from a Shared Library, stay home. PhotoKit does not tell which device took a photo, so with **Download and Keep Originals** in iCloud Photos, new photos from those sources can go too. 1 scan sends at most 50 items. The rest go with the next scan, for example when Flux opens again. |
+| Media | Controls the players of the computer. The computer does not control the players on the iPhone. The [audio outputs](features.md#audio-outputs) and the [phone as speaker](camera.md#phone-as-speaker) are only in Flux for Android. |
+| Commands | Lists and runs the commands configured on the computer. |
+| Browse | Opens the shared folders of the computer read-only through SSH inside a `flux.tunnel`, and saves files to the Files app. |
+| Camera modes | Text, QR, Photo, Document, and Signature, like the Android app, from the camera, a picked photo, or a pasted image. A document has at most 30 pages. |
+| Webcam | Streams the front or back camera to the computer as a virtual webcam in H.264. **Also send the microphone** starts the microphone with it. It stops when Flux leaves the screen. The screen of the iPhone stays on while the webcam or the remote desktop streams and while the touchpad shows. `flux-cli webcam start` asks the iPhone to start it. See [Start a stream from the computer](#start-a-stream-from-the-computer). |
+| Microphone | Streams the microphone as 48 kHz mono audio. It keeps streaming in the background and while the iPhone is locked. `flux-cli mic start` asks the iPhone to start it. See [Start a stream from the computer](#start-a-stream-from-the-computer). |
+| Notifications | Shows notifications from `flux-cli notify`. Each computer can show 10 notifications at once, then 1 more each second. Only the first notification of a burst makes a sound. Each computer keeps at most 20 notifications in Notification Center, and a new one removes the oldest. Received links count toward these limits. |
+| Battery | Reports the battery of the iPhone. The chat of a computer, **Computers**, and the page of the computer show the battery of the computer. |
+| Ring | `flux-cli ring` rings the iPhone. |
+| Do Not Disturb | Reports the Focus through a Focus filter. The iPhone does not follow the computer. See [Focus](#focus). |
+| Fingerprint approval | Approves `sudo` and polkit with Face ID or Touch ID and a key in the Secure Enclave. Set it up on the page of the computer in **Computers**. See [fingerprint approval](approvals.md). |
+| Touchpad and keyboard | The touchpad gestures of the Android app, a key panel, a type field with dictation, and the keys of a hardware keyboard. The computer needs `remote_input = true`. 2 fingers scroll like the touchpads of the computer, as the **Computer** choice of [the scroll direction](remote-input.md#scroll-direction) does on Android. The iPhone has no setting for the scroll direction. See [Touchpad and keyboard](remote-input.md). |
+| Remote desktop | Shows the screen of the computer, with touches, keys, the Omarchy panel, dictation, and a monitor picker. The computer needs `remote_desktop = true`, and `remote_input = true` for control. See [Remote desktop](remote-desktop.md). |
+| herdr agents | Shows the agents that herdr runs, their output in color fitted to the phone screen, and notifications for needs input and finished. Answers them, starts agents, and runs terminals when the computer allows it. See [herdr agents](herdr.md). |
+| Dictation | Each text field has a mic key: the agent replies, the touchpad, the remote desktop, **Text or link** in **Send > Queue and transfers**, the scanned text, the shortcut search, the folder search and the task of a new agent, and the terminal command. Searches get the words in place of the search. Other fields get them at the end of the text. The iPhone dictates in its own languages. |
+| Clear and expand | Each text field has a clear key while it has text. The agent prompt, the terminal command, the task of a new agent, and **Text or link** also have an expand key that opens a large editor. The type field of the touchpad and the remote desktop deletes its typed text on the computer, and its expand key opens the draft editor. See [Clear and expand text fields](features.md#clear-and-expand-text-fields). |
+| Face ID lock | Replies, new agents, terminals, the touchpad, the remote desktop, and the Omarchy panel ask for Face ID, Touch ID, or the passcode. The unlock stays valid for 5 minutes, and it ends when the iPhone locks. An open touchpad, remote desktop, or Omarchy panel asks again when Flux returns after the unlock ended. |
+
+Flux for iOS does not advertise notifications of other apps, SMS, calls, or the screen mirror.
+
+## Start a stream from the computer
+
+The computer can ask the iPhone to start the webcam or the microphone.
+The iPhone never turns on its camera or its microphone without a tap on the iPhone.
+The request only asks, also while Flux is on the screen.
+
+```sh
+flux-cli webcam start
+flux-cli --device iPhone mic start
+```
+
+The computer sends `flux.stream.request` with `{"kind": "webcam"}` or `{"kind": "mic"}`.
+The iPhone lists `flux.stream.request` in its incoming packet types, because it can stream both kinds.
+
+| Flux | What the iPhone shows |
+| --- | --- |
+| On the screen | A sheet with the title `omarchy asks for the webcam` or `omarchy asks for the mic`. The sheet has the buttons **Start webcam** or **Start the mic**, and **Not now**. The sheet does not close with a swipe. |
+| Not on the screen | A notification with the text `Tap to start the webcam.` or `Tap to start the mic.` under the same title. The **Start webcam** or **Start the mic** action, or a tap on the notification, opens Flux and starts the stream. The action needs an unlocked iPhone. The notification shows only when Flux has notification access. |
+
+The prompt and the notification name the computer that asks.
+When a request waits and Flux comes on the screen, the sheet shows the request.
+
+A tap on start opens **Control > Webcam** or **Control > Mic** of that computer.
+The stream starts at once with the saved settings, the same as **Start webcam** or **Start microphone** on that screen.
+When Flux is not on the screen yet or the link is not back, the start waits up to 15 seconds.
+After that time, a message says that the stream did not start.
+
+Each request follows these rules:
+
+- A request ends after 60 seconds, and its notification goes away.
+- iOS suspends Flux soon after it leaves the screen, and a suspended Flux cannot remove a notification. A tap on a notification that is older than 60 seconds opens Flux and starts nothing.
+- When a stream of that kind already runs to that computer, the request does nothing.
+- The iPhone ignores a request of the same kind from the same computer that comes less than 3 seconds after the last request. An ignored request also counts as the last request.
+- An unpair ends the requests of the computer.
+
+The webcam stops when Flux leaves the screen, also after a start from a request.
+
+## Limits of iOS
+
+| Limit | Effect |
+| --- | --- |
+| iOS suspends Flux soon after it leaves the screen | The link closes, and Flux connects again when it opens. Approvals, agent alerts, notifications, stream requests, and clipboard changes reach the iPhone only while Flux runs. The microphone stream keeps running in the background. |
+| Other apps' notifications, text messages, and calls | iOS gives apps no access to them. Flux does not advertise `notification.request`, `sms.*`, or `telephony`. |
+| Clipboard | iOS gives apps no event for a new copy, and it asks before each read of text that another app copied. Flux reads the clipboard only while it is on the screen. When Flux opens and when a computer connects, it reads only after the clipboard changed. A shortcut with **Send Text to Computer** sends a copy while Flux stays closed. Text and images from a computer stay on the iPhone and do not go to Universal Clipboard. |
+| Screenshots and photos | They go to the computer when Flux opens, not in the background. |
+| Share sheet | The share extension runs apart from the app and cannot open Flux or hold a link. It queues the items in the App Group. Flux sends them when it opens and connects, and keeps failed items with the reason on the **Share** screen, under **Send > Queue and transfers**. The queue holds up to 200 items and 1 GB, and an item that failed 5 times or waited 7 days goes, with a notification. A try that ends because the link closed, for example when iOS suspends Flux, does not count as a failure. The extension checks the size of each file before the copy, and the size of each text before it decodes the text. Send a file larger than 1 GB from the **Share** screen of Flux. A text or link has a limit of 1 MB. Folders do not go. |
+| Focus | Flux cannot read or set the Focus. It reports the Focus through the Focus filter and ignores Do Not Disturb from the computer. A change while Flux has no link goes to each computer that was paired at the change, when that computer connects. |
+| Camera | iOS gives the camera only to the app on the screen, so the webcam stops when Flux leaves it. |
+| Volume keys | iOS gives apps no public way to take the volume keys, so they do not change slides. |
+| Screen mirror | iOS does not mirror the screen to a computer. See below. |
+
+### Screen mirror
+
+The iPhone does not announce `flux.screen`, and **Control** has no screen mirror tool.
+A broadcast upload extension would have to encode the screen and hold a TLS listener in about 50 MB of memory, and that could not be checked in the simulator.
+The broadcast also runs apart from the app.
+When the user leaves Flux to show another app, iOS suspends Flux and its link closes, and `fluxd` ends a mirror when the link that started it drops.
+Keeping the mirror alive needs a change to `fluxd` and the identity key in a second process.
+See [Phase 9 of the plan](ios-plan.md#phase-9-screen-mirror) for the details.
+
+## Send the clipboard without opening Flux
+
+iOS lets only the app on the screen read the clipboard.
+The **Send Text to Computer** action sends text while Flux stays closed.
+The Shortcuts app reads the clipboard and gives the text to the action.
+After the setup, each copy needs 1 gesture, for example a double tap on the back of the iPhone.
+
+To make the shortcut:
+
+1. Open **Shortcuts** and make a new shortcut.
+2. Add the **Get Clipboard** action.
+3. Add **Flux > Send Text to Computer**. It takes the clipboard as its text.
+4. Choose 1 way to run the shortcut:
+   - **Settings > Accessibility > Touch > Back Tap**, then **Double Tap**, then the shortcut.
+   - **Settings > Action Button**, then **Shortcut**, then the shortcut. This needs an iPhone with the Action button.
+   - Control Center, then **+**, then **Add a Control**, then **Shortcut**, then the shortcut. This needs iOS 18 or later.
+5. Run the shortcut once. Answer each question from Shortcuts with **Always Allow**.
+
+**Send without opening Flux** in the settings of Flux opens the Flux page in Shortcuts and shows these places.
+
+The action runs in the background and needs an unlocked iPhone.
+With no paired computer, it stops at once and shows **No computer is paired**.
+It starts the links and waits for the paired computers.
+The wait ends when each paired computer is connected, 2 seconds after the first computer connects, or after 20 seconds.
+The action sends the text as `flux.clipboard` to each computer that is connected at that time.
+It then closes the links again, unless Flux is on the screen.
+The computer puts the text on its clipboard while `auto_clipboard` is on, which is the default.
+While only the action keeps Flux running, the items of the share queue and new screenshots and photos do not go.
+The links close when the action ends and would stop their transfers.
+They go when Flux opens.
+
+A link usually takes 0.5 to 3 seconds.
+When the computer misses the Bonjour service of the iPhone, it connects only at its next check, which runs every 30 seconds.
+This worst case takes up to 30 seconds, but iOS ends an action after about 30 seconds.
+The action waits at most 20 seconds and then shows **No computer connected**.
+Run the shortcut again.
+Away from the local network, a link through Tailscale also waits for this check.
+
+**Warning:** When you copy a password, do not run the shortcut.
+The action cannot see the marks that password managers put on a copied password.
+The password goes to the computer and into its clipboard history.
+The clipboard sync in the app skips copies with these marks.
+
+The action sends text only.
+Turn on **Skip unchanged text** in the action when an automation runs it often.
+The action then does not send the text that Flux sent last or that a computer put on the clipboard.
+Flux compares keyed digests of these texts and does not keep the texts.
+The key stays in the Keychain of the iPhone and does not go into a backup.
+A copy that the action sent does not go out again when Flux opens.
+
+To send with Siri or Spotlight, say or search **Send clipboard with Flux**.
+This App Shortcut opens Flux, because iOS lets only the app on the screen read the clipboard.
+It sends text or an image to each connected computer.
+
+While **Send the clipboard when Flux opens** is on, Flux sends a new copy from another app once when it opens.
+The setting is on by default.
+With no computer connected, the first computer that connects gets the copy.
+Flux cannot know when you made the copy, so the copy counts as new and replaces the clipboard of the computer.
+iOS asks before Flux reads the copy.
+To skip the question, choose **Allow** in **Settings > Apps > Flux > Paste from Other Apps**.
+**Paste from Other Apps** in the settings of Flux opens the Flux page in the Settings app.
+
+## Focus
+
+To silence the computers with a Focus:
+
+1. In **Settings > Focus**, open a Focus, then **Add Filter**, then **Flux**.
+2. Turn on **Silence computers with Focus** in Flux.
+
+A Focus without the Flux filter is not reported.
+iOS runs the filter also while Flux is in the background or not open, when Flux has no link.
+Flux keeps such a change for each computer that is paired at the time of the change.
+Each of these computers gets the change when it connects.
+Only a change goes out.
+A computer that connects gets no state that it already has.
+A computer that you pair after the change does not get it.
+A computer that you unpair and pair again also does not get it.
+
+## Permissions
+
+iOS asks for each permission on first use.
+Flux asks for notifications when you pair the first computer, not at the first start.
+
+| Permission | Used by |
+| --- | --- |
+| Local Network | Discovery and links |
+| Notifications | Pairing requests, received files and links, notifications, approval, herdr agents, sent share sheet items |
+| Camera | Camera modes and the webcam |
+| Microphone | The microphone stream and dictation |
+| Speech Recognition | Dictation in the text fields |
+| Photos | Send new screenshots and photos, the recent photos in the chat of a computer, the photo picker |
+| Face ID | The Face ID lock and fingerprint approval |
+| Paste from other apps | Clipboard sync and the send when Flux opens. iOS asks at each read unless you choose **Allow** in **Settings > Apps > Flux > Paste from Other Apps**. **Send Text to Computer** needs no permission, because Shortcuts reads the clipboard. |
+
+## Privacy manifests
+
+The app has `ios/App/PrivacyInfo.xcprivacy`, and the share extension has `ios/ShareExtension/PrivacyInfo.xcprivacy`.
+Both declare no tracking, no tracking domains, and no collected data.
+They declare these required-reason APIs:
+
+| Target | API category | Reason | Use |
+| --- | --- | --- | --- |
+| Flux | User defaults | `CA92.1` | The settings of the app and of FluxKit, which only the app reads |
+| Flux | File timestamp | `C617.1` | The creation date of the share queue folders in the App Group, and the attributes of the files that Flux sends and receives in its container |
+| Flux | System boot time | `35F9.1` | The time between events in the app: touches, media positions, dictation, and agent tasks |
+| FluxShare | User defaults | `1C8F.1` | The last computer of the share extension, in the App Group |
+
+When code starts to use another required-reason API, add its category and reason to the manifest of each target that runs the code.
+FluxKit runs only in the app. The code in `ios/Shared` runs in the app and in the share extension.
+`options.fileTypes` in `ios/project.yml` puts each manifest into the bundle of its target.
+
+## Demo mode
+
+The demo shows sample computers without a network, for App Review and screenshots.
+The app shows `omarchy`, a connected laptop, and `workstation`, a desktop that is not reachable.
+It starts no discovery, listener, or link, and the actions on the sample computers reach no computer.
+**Chats** shows a sample approval, an agent that waits, an agent that works, an agent that is done, an idle agent, the laptop, and the desktop. The desktop went offline at 09:12.
+The chat of the laptop shows a link, a photo, a clip, a file that comes in, a text, and the sample approval.
+The agent that waits shows its question and choices in its chat.
+**Approve**, **Deny**, the choices, the send key, and the tray show a message and send nothing.
+The paired computers and the share queue stay as they are, and **Flux is on** in **Settings** does not change.
+
+To start the demo in the booted simulator:
+
+```sh
+xcrun simctl launch --terminate-running-process booted org.omarchy.flux.ios -FLUX_DEMO 1
+```
+
+In Xcode, add `-FLUX_DEMO 1` in **Product > Scheme > Edit Scheme > Run > Arguments Passed On Launch**.
+The app reads the argument as the `FLUX_DEMO` user default.
+Start the app without the argument to leave the demo.
+`ios/App/DemoMode.swift` holds the sample computers and the sample items.
+
+To give the laptop a sample Omarchy theme, add `-FLUX_THEME` and the name of a theme in `SampleThemes`, such as `neon`:
+
+```sh
+xcrun simctl launch --terminate-running-process booted org.omarchy.flux.ios -FLUX_DEMO 1 -FLUX_THEME neon
+```
+
+The names are `neon`, `tokyo-night`, `tokyo-night-day`, `catppuccin-latte`, `cotton-candy`, `futurism`, and `low-contrast`.
+The theme applies when the scope is all computers or the laptop.
+[Flux for iOS on the App Store](ios-app-store.md#test-without-an-omarchy-computer) explains what App Review can use.
+
+## Local tests
+
+```sh
+make test-ios
+```
+
+The FluxKit tests run on the iPhone simulator and on macOS with `make test-macos`.
+The app tests cover the app logic: pairing, share queue, clipboard actions, camera, keys, approval, dictation fields, the layout of agent output, and the demo.
+Some tests render screens.
+With `TEST_RUNNER_FLUX_SCREENS=<folder>`, they save them as PNG files in that folder.
+The demo tests save `demo-01-chats.png`, `demo-02-control.png`, `demo-03-computers.png`, `demo-04-chat.png`, and `demo-05-agent.png`.
+The theme tests save the demo list of chats and the demo chat of the laptop in each sample theme as `demo-chats-<theme>.png` and `demo-chat-<theme>.png`, for example `demo-chat-neon.png`.
+
+The simulator has no camera, no battery, no Secure Enclave key that needs Face ID, and no broadcast.
+Check camera capture, the webcam, the microphone, and approval on an iPhone.
+
+To read the logs of the app in the simulator:
+
+```sh
+xcrun simctl spawn booted log stream --predicate 'subsystem == "org.omarchy.flux"'
+```
+
+## Layout
+
+| Path | Content |
+| --- | --- |
+| `ios/App` | The SwiftUI app. `App/Features/Features.swift` lists the plugins and the feature screens. |
+| `ios/App/Theme` | The colors of the theme in the environment, and the shared tiles, buttons, and rows |
+| `ios/App/Shell` | The shared parts of the screens, the computer picker of the tools, and the routes of the tabs |
+| `ios/App/Chat` | **Chats**, and the chat of a computer: the thread, the cards, the dock, the tray, the notices, and the pairing guide |
+| `ios/App/Destinations` | Control and the page of a computer |
+| `ios/Shared` | The share queue and the App Group, for the app and the share extension |
+| `ios/ShareExtension` | The share extension |
+| `ios/Tests` | App tests |
+| `ios/project.yml` | XcodeGen project with the Info.plist keys and `FLUX_APP_GROUP` |
+| `macos/Sources/FluxKit` | The shared protocol peer and plugins, with `#if os(iOS)` where iOS differs |
+| `macos/Tests/FluxKitTests` | Protocol and feature tests for both apps |
+
+To add a feature, write a `FluxPlugin` in `macos/Sources/FluxKit/Plugins/<Feature>/`, add its views in `ios/App/Features/<Feature>/`, and add one line to each list in `Features.swift`.

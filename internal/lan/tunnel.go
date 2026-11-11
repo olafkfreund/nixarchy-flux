@@ -16,9 +16,9 @@ import (
 	"flux/internal/proto"
 )
 
-// The Flux tunnel extension turns a payload socket around. In KDE Connect
-// the sender of a payload listens and the receiver connects in, which a
-// firewall on this computer blocks. With a tunnel, the phone listens, sends
+// A tunnel turns a payload socket around. Without a tunnel, the sender of
+// a payload listens and the receiver connects in, which a firewall on this
+// computer blocks. With a tunnel, the phone listens, sends
 // its port in a flux.tunnel packet, and fluxd connects out. The listener is
 // the TLS server, and fluxd is the TLS client.
 
@@ -109,16 +109,17 @@ func (l *Link) OpenTunnel(ctx context.Context, id string) (*tls.Conn, error) {
 }
 
 // DialPeer connects to a TLS listener that the peer opened on a port from
-// 1739 to 1764, as the TLS client. It checks the pinned certificate.
+// MinPayloadPort to MaxPayloadPort, as the TLS client. It checks the pinned
+// certificate.
 func (l *Link) DialPeer(ctx context.Context, port int) (*tls.Conn, error) {
 	if port < MinPayloadPort || port > MaxPayloadPort {
 		return nil, fmt.Errorf("the device sent port %d, outside %d to %d", port, MinPayloadPort, MaxPayloadPort)
 	}
-	d := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(l.IP(), fmt.Sprint(port)))
+	conn, err := l.dialPort(ctx, port)
 	if err != nil {
 		return nil, err
 	}
+	setUserTimeout(conn)
 	tc := tls.Client(conn, clientConfig(l.provider.cfg.Cert))
 	_ = tc.SetDeadline(time.Now().Add(15 * time.Second))
 	if err := tc.HandshakeContext(ctx); err != nil {
@@ -131,6 +132,25 @@ func (l *Link) DialPeer(ctx context.Context, port int) (*tls.Conn, error) {
 	}
 	_ = tc.SetDeadline(time.Time{})
 	return tc, nil
+}
+
+// dialPort opens a TCP connection to port on the peer, from the local IP of
+// the link. Flux for Android takes a payload, tunnel, or stream connection
+// only from the address of the link. Without the local IP, the kernel can
+// choose another source address, for example on a computer with 2
+// addresses on the network.
+func (l *Link) dialPort(ctx context.Context, port int) (net.Conn, error) {
+	d := net.Dialer{Timeout: 10 * time.Second}
+	if l.conn != nil {
+		if a, ok := l.conn.LocalAddr().(*net.TCPAddr); ok {
+			d.LocalAddr = &net.TCPAddr{IP: a.IP, Zone: a.Zone}
+		}
+	}
+	host := ""
+	if l.Addr != nil {
+		host = (&net.IPAddr{IP: l.Addr.IP, Zone: l.Addr.Zone}).String()
+	}
+	return d.DialContext(ctx, "tcp", net.JoinHostPort(host, fmt.Sprint(port)))
 }
 
 // pushPayload sends a packet with a payload through a tunnel.

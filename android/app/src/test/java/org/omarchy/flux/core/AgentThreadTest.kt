@@ -1,0 +1,890 @@
+package org.omarchy.flux.core
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class AgentThreadTest {
+    /** The sample output of the demo computer: an approval dialog of Claude Code, with terminal colors. */
+    private val demo =
+        "\u001b[38;2;215;119;87m●\u001b[0m I added the migration in \u001b[1mdb/migrate/0042_add_invoice_status.sql\u001b[0m.\n\n" +
+            "\u001b[38;5;2m●\u001b[0m \u001b[1mBash\u001b[0m(bin/migrate --dry-run)\n" +
+            "  \u001b[38;5;8m⎿\u001b[0m  1 migration to apply: \u001b[38;5;6m0042_add_invoice_status\u001b[0m\n\n" +
+            "\u001b[38;5;4m" + "─".repeat(72) + "\u001b[0m\n" +
+            " \u001b[1;38;5;4mBash command\u001b[0m\n\n" +
+            "   bin/migrate --apply\n" +
+            "   \u001b[38;5;8mApply the pending migration\u001b[0m\n\n" +
+            " Do you want to proceed?\n" +
+            " \u001b[38;5;4m❯ 1. Yes\u001b[0m\n" +
+            "   2. Yes, and do not ask again for bin/migrate commands\n" +
+            "   3. No, and tell Codex what to do differently \u001b[38;5;8m(esc)\u001b[0m\n"
+
+    private fun text(ansi: String): List<String> = termLines(ansi).map { it.text }
+
+    @Test
+    fun demoGivesTheMessageAndTheToolAndNoDialog() {
+        val t = agentThread(text(demo))
+        assertEquals(
+            listOf(
+                ThreadBlock.Message("I added the migration in db/migrate/0042_add_invoice_status.sql."),
+                ThreadBlock.Tool("Bash", "bin/migrate --dry-run", listOf("1 migration to apply: 0042_add_invoice_status")),
+            ),
+            t.blocks,
+        )
+        assertEquals("", t.step)
+        assertEquals("", t.worked)
+    }
+
+    @Test
+    fun demoAskHasTheQuestionAndTheCommand() {
+        val ask = agentAsk(text(demo))!!
+        assertEquals("Do you want to proceed?", ask.question)
+        assertEquals(listOf("$ bin/migrate --apply", "Apply the pending migration"), ask.lines)
+        assertTrue(ask.command)
+    }
+
+    @Test
+    fun noChoicesGiveNoAsk() {
+        assertNull(agentAsk(listOf("● Done.", "", "> ")))
+        assertNull(dialogStart(listOf("● Done.")))
+    }
+
+    @Test
+    fun twoEditsMergeIntoChanges() {
+        val lines = listOf(
+            "● I wrote the migration.",
+            "",
+            "● Write(db/migrate/0042.sql)",
+            "  ⎿  Wrote 18 lines to db/migrate/0042.sql",
+            "",
+            "● Update(app/models/invoice.rb)",
+            "  ⎿  Updated app/models/invoice.rb with 24 additions and 7 removals",
+            "",
+            "● Bash(bin/migrate --dry-run)",
+            "  ⎿  1 migration to apply",
+        )
+        val blocks = agentThread(lines).blocks
+        assertEquals(3, blocks.size)
+        val c = blocks[1] as ThreadBlock.Changes
+        assertEquals(listOf(FileChange("db/migrate/0042.sql", 18, 0), FileChange("app/models/invoice.rb", 24, 7)), c.files)
+        assertEquals(42, c.added)
+        assertEquals(7, c.removed)
+        assertEquals("Bash", (blocks[2] as ThreadBlock.Tool).name)
+    }
+
+    @Test
+    fun oneEditStaysATool() {
+        val lines = listOf(
+            "● Update(tests/login.spec.ts)",
+            "  ⎿  Updated tests/login.spec.ts with 4 additions and 2 removals",
+            "",
+            "● Bash(npm test -- login)",
+            "  ⎿  20 passed",
+        )
+        val blocks = agentThread(lines).blocks
+        assertEquals(2, blocks.size)
+        val edit = blocks[0] as ThreadBlock.Tool
+        assertEquals("Update", edit.name)
+        assertEquals(FileChange("tests/login.spec.ts", 4, 2), edit.change)
+        assertNull((blocks[1] as ThreadBlock.Tool).change)
+    }
+
+    @Test
+    fun workingScreenGivesTheStepAndDropsTheInput() {
+        val lines = listOf(
+            "● I'll add a token bucket.",
+            "",
+            "● Bash(npm test -- upload)",
+            "  ⎿  Running 48 tests…",
+            "     31 passed",
+            "",
+            "✻ Running tests… (2:14 · esc to interrupt)",
+            "  ⎿  ☐ Report back",
+            "",
+            "╭──────────────────────╮",
+            "│ >                    │",
+            "╰──────────────────────╯",
+            "  ? for shortcuts",
+        )
+        val t = agentThread(lines)
+        assertEquals("Running tests", t.step)
+        assertEquals("2:14", t.elapsed)
+        assertEquals(
+            listOf(
+                ThreadBlock.Message("I'll add a token bucket."),
+                ThreadBlock.Tool("Bash", "npm test -- upload", listOf("Running 48 tests…", "31 passed")),
+            ),
+            t.blocks,
+        )
+    }
+
+    @Test
+    fun aNumberedListAtTheEndStaysInTheThread() {
+        val rule = "─".repeat(40)
+        val lines = listOf(
+            "● Here is what I would add.",
+            "",
+            "  Highest value",
+            "     ",
+            "  1. Notify when an agent needs you. Send a desktop notification when an agent",
+            "     asks a question.",
+            "  2. Hide finished agents.",
+            "",
+            "  Small fixes",
+            "",
+            "  3. Show the full command.",
+            "",
+            "  I would start with 1 and 2.",
+            "",
+            "✻ Cogitated for 24s · done 10:00 AM",
+            "",
+            rule,
+            "❯ ",
+            rule,
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+        )
+        assertNull(dialogStart(lines))
+        val t = agentThread(lines)
+        assertEquals("24s", t.worked)
+        val text = (t.blocks.single() as ThreadBlock.Message).text
+        assertTrue(text, text.startsWith("Here is what I would add."))
+        assertTrue(text, text.contains("3. Show the full command."))
+        assertTrue(text, text.endsWith("I would start with 1 and 2."))
+    }
+
+    @Test
+    fun codexWorkingLineGivesTheTime() {
+        val t = agentThread(listOf("• I will run it.", "", "• Working (12s • esc to interrupt)", "", "› Ask Codex to do anything"))
+        assertEquals("Working", t.step)
+        assertEquals("12s", t.elapsed)
+        assertEquals(listOf(ThreadBlock.Message("I will run it.")), t.blocks)
+    }
+
+    @Test
+    fun ruledInputAndHintsGo() {
+        val lines = listOf(
+            "● All tests pass.",
+            "",
+            "────────────────────",
+            "> ",
+            "────────────────────",
+            "  ⏵⏵ accept edits on (shift+tab to cycle)",
+        )
+        assertEquals(listOf(ThreadBlock.Message("All tests pass.")), agentThread(lines).blocks)
+    }
+
+    @Test
+    fun resultHintIsNotAFooter() {
+        val lines = listOf(
+            "● Read(src/a.ts)",
+            "  ⎿  line 1",
+            "     … +12 lines (ctrl+r to expand)",
+        )
+        val tool = agentThread(lines).blocks.single() as ThreadBlock.Tool
+        assertEquals(listOf("line 1", "… +12 lines (ctrl+r to expand)"), tool.result)
+    }
+
+    @Test
+    fun doneLineGivesTheTime() {
+        val lines = listOf("● The test passed 20 times.", "", "✻ Worked for 6m 12s", "", "> ", "  ? for shortcuts")
+        val t = agentThread(lines)
+        assertEquals("6m 12s", t.worked)
+        assertEquals(listOf(ThreadBlock.Message("The test passed 20 times.")), t.blocks)
+    }
+
+    @Test
+    fun codexDoneRuleGivesTheTime() {
+        val t = agentThread(listOf("• Done.", "", "─ Worked for 1m 03s ──────────"))
+        assertEquals("1m 03s", t.worked)
+        assertEquals(listOf(ThreadBlock.Message("Done.")), t.blocks)
+    }
+
+    @Test
+    fun promptsAndParagraphs() {
+        val lines = listOf(
+            "> Fix the login test",
+            "",
+            "● The test waited on a fixed timeout.",
+            "  It now waits for the cookie.",
+            "",
+            "",
+            "  The run passed 20 times.",
+            "",
+            "● Bash(npm test)",
+            "  ⎿  20 passed",
+        )
+        val blocks = agentThread(lines).blocks
+        assertEquals(ThreadBlock.Prompt("Fix the login test"), blocks[0])
+        assertEquals(
+            ThreadBlock.Message("The test waited on a fixed timeout.\nIt now waits for the cookie.\n\nThe run passed 20 times."),
+            blocks[1],
+        )
+        assertEquals(3, blocks.size)
+    }
+
+    @Test
+    fun codexToolsAndMessages() {
+        val lines = listOf(
+            "› Run the migration",
+            "",
+            "• I will run it.",
+            "",
+            "• Ran bin/migrate --dry-run",
+            "  └ 1 migration to apply",
+            "",
+            "• Edited src/a.ts (+3 -1)",
+            "    1 -old",
+            "    1 +new",
+        )
+        val blocks = agentThread(lines).blocks
+        assertEquals(ThreadBlock.Prompt("Run the migration"), blocks[0])
+        assertEquals(ThreadBlock.Message("I will run it."), blocks[1])
+        assertEquals(ThreadBlock.Tool("Ran", "bin/migrate --dry-run", listOf("1 migration to apply")), blocks[2])
+        val edit = blocks[3] as ThreadBlock.Tool
+        assertEquals("Edited", edit.name)
+        assertEquals("src/a.ts", edit.args)
+        assertEquals(FileChange("src/a.ts", 3, 1), edit.change)
+        assertEquals(4, blocks.size)
+    }
+
+    @Test
+    fun codexAddedAsAMessageIsNotATool() {
+        val blocks = agentThread(listOf("• Added a token bucket in front of the handler.")).blocks
+        assertEquals(listOf(ThreadBlock.Message("Added a token bucket in front of the handler.")), blocks)
+    }
+
+    @Test
+    fun codexApprovalWithoutARule() {
+        val lines = listOf(
+            "• I will apply the migration now.",
+            "",
+            "  Would you like to run the following command?",
+            "",
+            "  $ bin/migrate --apply",
+            "",
+            "› 1. Yes, proceed (y)",
+            "  2. Yes, and don't ask again for this command (a)",
+            "  3. No, and tell Codex what to do differently (esc)",
+        )
+        val ask = agentAsk(lines)!!
+        assertEquals("Would you like to run the following command?", ask.question)
+        assertEquals(listOf("$ bin/migrate --apply"), ask.lines)
+        assertTrue(ask.command)
+        assertEquals(listOf(ThreadBlock.Message("I will apply the migration now.")), agentThread(lines).blocks)
+    }
+
+    @Test
+    fun askKeepsTheLinesNearestTheChoices() {
+        val lines = listOf(
+            "────────────",
+            " Edit file",
+            "",
+            "   line 1",
+            "   line 2",
+            "   line 3",
+            "   line 4",
+            "   line 5",
+            "",
+            " Do you want to make this edit?",
+            " ❯ 1. Yes",
+            "   2. No",
+        )
+        val ask = agentAsk(lines, maxLines = 3)!!
+        assertEquals("Do you want to make this edit?", ask.question)
+        assertEquals(listOf("line 3", "line 4", "line 5"), ask.lines)
+        assertFalse(ask.command)
+    }
+
+    @Test
+    fun unknownLinesAreRaw() {
+        val lines = listOf(
+            "",
+            "╭─────────────╮",
+            "│ Welcome     │",
+            "╰─────────────╯",
+            "",
+            "● Hello.",
+            "",
+            "user@host:~$ ls",
+            "",
+            "a.txt",
+            "",
+            "● Bye.",
+        )
+        val blocks = agentThread(lines).blocks
+        assertEquals(
+            listOf(
+                ThreadBlock.Raw(1, 4),
+                ThreadBlock.Message("Hello."),
+                ThreadBlock.Raw(7, 10),
+                ThreadBlock.Message("Bye."),
+            ),
+            blocks,
+        )
+    }
+
+    @Test
+    fun failedEditIsNotMerged() {
+        val lines = listOf(
+            "● Update(a.ts)",
+            "  ⎿  Error: file not found",
+            "",
+            "● Update(b.ts)",
+            "  ⎿  Updated b.ts with 1 addition",
+        )
+        val blocks = agentThread(lines).blocks
+        assertEquals(2, blocks.size)
+        assertTrue((blocks[0] as ThreadBlock.Tool).failed)
+        assertEquals(FileChange("b.ts", 1, 0), (blocks[1] as ThreadBlock.Tool).change)
+    }
+
+    @Test
+    fun diffGivesFilesAndCounts() {
+        val lines = listOf(
+            "Changed files",
+            " M app/x.rb",
+            "?? n.txt",
+            "",
+            "Working tree changes",
+            "diff --git a/app/x.rb b/app/x.rb",
+            "index 1111111..2222222 100644",
+            "--- a/app/x.rb",
+            "+++ b/app/x.rb",
+            "@@ -1,2 +1,3 @@",
+            " class X",
+            "-old",
+            "+new",
+            "+more",
+            "",
+            "diff --git a/n.txt b/n.txt",
+            "new file",
+            "+line1",
+            "+",
+        )
+        val files = parseDiff(lines)
+        assertEquals(2, files.size)
+        val x = files[0]
+        assertEquals("app/x.rb", x.path)
+        assertEquals(2, x.added)
+        assertEquals(1, x.removed)
+        assertEquals(
+            listOf(DiffLineKind.Hunk, DiffLineKind.Context, DiffLineKind.Removed, DiffLineKind.Added, DiffLineKind.Added),
+            x.lines.map { it.kind },
+        )
+        val n = files[1]
+        assertEquals("n.txt", n.path)
+        assertEquals(1, n.added)
+        assertEquals(0, n.removed)
+        assertEquals(listOf(DiffLine("+line1", DiffLineKind.Added)), n.lines)
+    }
+
+    @Test
+    fun noChangesGiveNoFiles() {
+        assertEquals(emptyList<DiffFile>(), parseDiff(listOf("No changes in this repository.")))
+    }
+
+    // ───────────────────────── opencode ─────────────────────────
+
+    /** A finished turn of opencode after the tidy step: a prompt, 2 edits, a shell command, a message, and the input box. */
+    private val opencodeDone = listOf(
+        "┃",
+        "┃  Add a tax rate to total, then run the test.",
+        "┃",
+        "",
+        "   → Read invoice.js",
+        "",
+        "┃",
+        "┃  ← Edit invoice.js",
+        "┃",
+        "┃    1   // Invoices of a small billing app.",
+        "┃    2 - export function total(lines) {",
+        "┃    2 + export function total(lines, taxRate = 0) {",
+        "┃    3     let sum = 0",
+        "┃    5 -   return sum",
+        "┃    5 +   return sum * (1 + taxRate)",
+        "┃",
+        "",
+        "┃",
+        "┃  ← Edit invoice.test.js",
+        "┃",
+        "┃    4 + if (total(lines, 0.25) !== 31.25) throw new Error('wrong')",
+        "┃",
+        "",
+        "┃",
+        "┃  $ node invoice.test.js",
+        "┃",
+        "┃  ok",
+        "┃",
+        "",
+        "   Done. The total takes a tax rate:",
+        "     total(lines, 0.25)",
+        "",
+        "   ▣  Build · Big Pickle · 21.2s",
+        "",
+        "┃",
+        "┃  Build · Big Pickle OpenCode Zen",
+        " ~/Code/billing                                          13.1K (7%)  ctrl+p commands",
+    )
+
+    @Test
+    fun opencodeTurnGivesPromptToolsChangesAndTime() {
+        val t = agentThread(opencodeDone)
+        assertEquals(
+            listOf(
+                ThreadBlock.Prompt("Add a tax rate to total, then run the test."),
+                ThreadBlock.Tool("Read", "invoice.js", emptyList()),
+                ThreadBlock.Changes(listOf(FileChange("invoice.js", 2, 2), FileChange("invoice.test.js", 1, 0))),
+                ThreadBlock.Tool("Bash", "node invoice.test.js", listOf("ok")),
+                ThreadBlock.Message("Done. The total takes a tax rate:\n  total(lines, 0.25)"),
+            ),
+            t.blocks,
+        )
+        assertEquals("21.2s", t.worked)
+        assertEquals("", t.step)
+        assertNull("no dialog", agentAsk(opencodeDone))
+    }
+
+    @Test
+    fun opencodeWorkingHasAStepAndNoTime() {
+        val lines = listOf(
+            "┃",
+            "┃  ← Edit invoice.js",
+            "┃",
+            "┃    5 +   return sum * (1 + taxRate)",
+            "┃",
+            "",
+            "   ▣  Build · Big Pickle",
+            "┃",
+            "┃",
+            "┃  Build · Big Pickle OpenCode Zen",
+            " ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                 12.8K (6%)  ctrl+p commands",
+        )
+        val t = agentThread(lines)
+        assertEquals("Working", t.step)
+        assertEquals("", t.worked)
+        val edit = t.blocks.single() as ThreadBlock.Tool
+        assertEquals("Edit", edit.name)
+        assertEquals(FileChange("invoice.js", 1, 0), edit.change)
+    }
+
+    @Test
+    fun opencodeShellPermissionIsTheCommand() {
+        val lines = listOf(
+            "   $ node invoice.test.js",
+            "   ▣  Build · Big Pickle",
+            "┃",
+            "┃  △ Permission required",
+            "┃    # Shell command",
+            "┃",
+            "┃  $ node invoice.test.js",
+            "┃",
+            "┃",
+            "┃   Allow once   Allow always   Reject  ctrl+f fullscreen  ⇆ select  enter confirm",
+            "┃",
+        )
+        assertEquals(AgentAsk("Permission required", listOf("$ node invoice.test.js"), command = true), agentAsk(lines))
+        // The waiting command and the line of the turn belong to the dialog.
+        assertTrue(agentThread(lines).blocks.isEmpty())
+    }
+
+    @Test
+    fun opencodeEditPermissionIsTheFileAndTheDiff() {
+        val lines = listOf(
+            "┃",
+            "┃  △ Permission required",
+            "┃    → Edit invoice.js",
+            "┃",
+            "┃  1   // Invoices of a small billing app.                                      █",
+            "┃  2 - export function total(lines) {                                           █",
+            "┃  2 + export function total(lines, taxRate = 0) {                              ▀",
+            "┃",
+            "┃   Allow once   Allow always   Reject  ctrl+f fullscreen  ⇆ select  enter confirm",
+        )
+        assertEquals(
+            AgentAsk(
+                "Permission required",
+                listOf("Edit invoice.js", "1   // Invoices of a small billing app.", "2 - export function total(lines) {"),
+            ),
+            agentAsk(lines, maxLines = 3),
+        )
+    }
+
+    @Test
+    fun opencodeMenuRowGivesChoicesWithArrowKeys() {
+        val bar = "\u001b[38;2;240;198;116;48;2;43;46;49m┃\u001b[0m"
+        val gray = "48;2;50;53;57"
+        val accent = "48;2;240;198;116"
+        val row = bar + "\u001b[${gray}m  \u001b[${accent}m \u001b[38;2;29;31;33;${accent}mAllow once\u001b[${accent}m \u001b[0m" +
+            "\u001b[${gray}m  \u001b[38;2;169;169;169;${gray}mAllow always\u001b[${gray}m   \u001b[38;2;169;169;169;${gray}mReject" +
+            "\u001b[${gray}m  \u001b[38;2;197;200;198;${gray}mctrl+f \u001b[38;2;169;169;169;${gray}mfullscreen" +
+            "\u001b[${gray}m  \u001b[38;2;197;200;198;${gray}m⇆ \u001b[38;2;169;169;169;${gray}mselect\u001b[0m\n"
+        val choices = findMenuChoices(termLines(row))
+        assertEquals(
+            listOf(
+                AgentChoice("1", "Allow once", selected = true, keys = listOf("enter")),
+                AgentChoice("2", "Allow always", selected = false, keys = listOf("right", "enter")),
+                AgentChoice("3", "Reject", selected = false, keys = listOf("right", "right", "enter")),
+            ),
+            choices,
+        )
+        // After a move to Reject, the arrows wrap to the first choice.
+        val moved = row.replace("38;2;29;31;33;${accent}mAllow once", "38;2;169;169;169;${gray}mAllow once")
+            .replace("38;2;169;169;169;${gray}mReject", "38;2;29;31;33;${accent}mReject")
+        assertEquals(listOf("right", "enter"), findMenuChoices(termLines(moved))[0].keys)
+        assertEquals(listOf("enter"), findMenuChoices(termLines(moved))[2].keys)
+        // The choices of a numbered dialog go as their digit.
+        assertEquals(listOf("1"), findChoices(listOf("❯ 1. Yes", "  2. No"))[0].keys)
+    }
+
+    @Test
+    fun claudeOutputIsNotOpencode() {
+        assertFalse(isOpencode(text(demo)))
+        assertTrue(isOpencode(opencodeDone))
+    }
+
+    /** A question of opencode with 4 choices and descriptions, after the tidy step. */
+    private val opencodeQuestion = listOf(
+        "┃",
+        "┃  ask me a question I can answer a b c or d to",
+        "┃",
+        "",
+        "   + Thought: 984ms",
+        "   The next step is a merge decision.",
+        "   → Asked 1 question",
+        "   ▣  Build · Grok 4.7",
+        "┃",
+        "┃  What should I do with the pull request?",
+        "┃",
+        "┃  1. A. Approve CI, merge if green",
+        "┃     Approve the waiting runs. Merge only if both pass.",
+        "┃  2. B. Full review before any merge",
+        "┃     Read the change for bugs first.",
+        "┃  3. C. Do not merge",
+        "┃     Leave the pull request open.",
+        "┃  4. D. Close the pull request",
+        "┃     Reject the design.",
+        "┃  5. Type your own answer",
+        "┃",
+        "┃  ↑↓ select  enter submit  esc dismiss",
+        "┃",
+    )
+
+    @Test
+    fun opencodeQuestionGivesTheQuestionAndChoicesWithDescriptions() {
+        assertTrue(isOpencode(opencodeQuestion))
+        assertEquals(AgentAsk("What should I do with the pull request?", emptyList()), agentAsk(opencodeQuestion))
+        val choices = findChoices(opencodeQuestion)
+        assertEquals(5, choices.size)
+        assertEquals(AgentChoice("1", "A. Approve CI, merge if green", detail = "Approve the waiting runs. Merge only if both pass."), choices[0])
+        assertEquals(listOf("4"), choices[3].keys)
+        assertEquals("", choices[4].detail)
+        // The thought line, the tool call of the question, and the question itself are not in the thread.
+        assertEquals(
+            listOf(
+                ThreadBlock.Prompt("ask me a question I can answer a b c or d to"),
+                ThreadBlock.Message("The next step is a merge decision."),
+            ),
+            agentThread(opencodeQuestion).blocks,
+        )
+    }
+
+    @Test
+    fun opencodeAnsweredQuestionIsTheQuestionAndTheAnswer() {
+        val lines = listOf(
+            "┃",
+            "┃  # Questions",
+            "┃",
+            "┃  Which tax rate should total use?",
+            "┃  C 0.25",
+            "┃",
+            "",
+            "   ▣  Build · Big Pickle · 3.1s",
+        )
+        assertEquals(
+            listOf(ThreadBlock.Message("Which tax rate should total use?"), ThreadBlock.Prompt("C 0.25")),
+            agentThread(lines).blocks,
+        )
+    }
+
+    @Test
+    fun claudeQuestionDropsTheHeaderAndKeepsDescriptions() {
+        val lines = listOf(
+            "● I need a decision.",
+            "",
+            "─".repeat(40),
+            " ☐ Tax rate",
+            "",
+            "Which tax rate should total use?",
+            "",
+            "❯ 1. A 0",
+            "     No tax",
+            "  2. B 0.25",
+            "     A quarter",
+            "  3. Type something.",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        )
+        assertEquals(AgentAsk("Which tax rate should total use?", emptyList()), agentAsk(lines))
+        val choices = findChoices(lines)
+        assertEquals(listOf("No tax", "A quarter", ""), choices.map { it.detail })
+        assertTrue(choices[0].selected)
+    }
+
+    // ───────────────────────── Claude Code 2.1 ─────────────────────────
+
+    /** An idle screen of Claude Code 2.1: the logo, prompts with ❯, tool summaries, and the ruled input with the name of the session. */
+    private val claude21 = listOf(
+        " ▐▛███▜▌   Claude Code v2.1.293",
+        "▝▜█████▛▘  Opus 5.5 · Claude Max",
+        "  ▘▘ ▝▝    ~/Code/billing",
+        "",
+        "❯ Fix the login test",
+        "  ⎿  1 skill available",
+        "",
+        "  Read 2 files, listed 1 directory, ran 3 shell commands (ctrl+o to expand)",
+        "",
+        "● The test waited on a fixed timeout.",
+        "",
+        "  Ran 1 shell command",
+        "  ⎿  “Tell the reviewer” → sent to billing-2",
+        "",
+        "● Bash(cat > /tmp/fix.py <<'EOF'",
+        "      import sys",
+        "  ⎿  done",
+        "",
+        "● Workflow(Rebase the 3 PRs into one chain and run make check at each",
+        "          step)",
+        "  ⎿  /workflows to view dynamic workflow runs",
+        "",
+        "✻ Sautéed for 6m 47s · done Tuesday 7:11 PM",
+        "",
+        "❯ Ship it",
+        "",
+        "● Shipped.",
+        "",
+        "✻ Worked for 22s · done 10:08 PM",
+        "                                                              new task? /clear to save 671.7k tokens",
+        "✦ Heads up · Publishing a release deploys to production.",
+        "  1: Learn more   2: Knew this already   0: Dismiss",
+        "──────────────────────────────────── Fix the login test ─",
+        "❯",
+        "────────────────────────────────────────────────────────",
+        "  ▸▸ auto mode on (shift+tab to cycle) · ← for agents",
+    )
+
+    @Test
+    fun claude21PromptsSummariesAndLongToolCalls() {
+        val t = agentThread(claude21)
+        assertEquals(
+            listOf(
+                ThreadBlock.Prompt("Fix the login test"),
+                ThreadBlock.Tool("Read", "2 files, listed 1 directory, ran 3 shell commands", emptyList()),
+                ThreadBlock.Message("The test waited on a fixed timeout."),
+                ThreadBlock.Tool("Ran", "1 shell command", listOf("“Tell the reviewer” → sent to billing-2")),
+                ThreadBlock.Tool("Bash", "cat > /tmp/fix.py <<'EOF' import sys", listOf("done")),
+                ThreadBlock.Tool(
+                    "Workflow", "Rebase the 3 PRs into one chain and run make check at each step",
+                    listOf("/workflows to view dynamic workflow runs"),
+                ),
+                ThreadBlock.Prompt("Ship it"),
+                ThreadBlock.Message("Shipped."),
+            ),
+            t.blocks,
+        )
+        assertEquals("22s", t.worked)
+        assertEquals("", t.step)
+    }
+
+    @Test
+    fun claude21WorkingScreenGivesTheStepAndTheRunningCommand() {
+        val lines = listOf(
+            "● I will capture the output.",
+            "",
+            // The bullet of a call that runs blinks, so this capture has 2 blanks in its place.
+            "  Capture the output · 11s",
+            "  ⎿  $ mkdir -p /tmp/cap && cat >",
+            "     /tmp/cap/a.txt",
+            "     (ctrl+b to run in background)",
+            "",
+            "✶ Orbiting… (1m 17s · ↓ 5.7k tokens)",
+            "  ⎿  Tip: Use /btw to ask a quick side question",
+            "                                                     Update available! Run: mise upgrade claude",
+            "────────────────────────────────────────────────────",
+            "❯",
+            "────────────────────────────────────────────────────",
+            "  ▸▸ auto mode on · 1 shell · esc to interrupt · ← for agents · ↓ to manage",
+        )
+        val t = agentThread(lines)
+        assertEquals("Orbiting", t.step)
+        assertEquals("1m 17s", t.elapsed)
+        assertEquals(
+            listOf(
+                ThreadBlock.Message("I will capture the output."),
+                ThreadBlock.Tool("Bash", "Capture the output", listOf("$ mkdir -p /tmp/cap && cat >", "/tmp/cap/a.txt")),
+            ),
+            t.blocks,
+        )
+    }
+
+    @Test
+    fun summaryNeedsACountAndNoSentenceEnd() {
+        val lines = listOf("● Done.", "", "  Waves 1 to 5 each passed.", "", "  Ran 20 tests and all passed.")
+        assertEquals(1, agentThread(lines).blocks.size)
+    }
+
+    @Test
+    fun aLineAtTheLeftEdgeContinuesTheHead() {
+        val lines = listOf("● Dynamic workflow \"Build the PRs\"", "completed · 7h 55m", "", "● Next.")
+        assertEquals(
+            listOf(ThreadBlock.Message("Dynamic workflow \"Build the PRs\"\ncompleted · 7h 55m"), ThreadBlock.Message("Next.")),
+            agentThread(lines).blocks,
+        )
+    }
+
+    @Test
+    fun messageSplitsIntoTextAndTables() {
+        val text = "The PRs are open:\n┌───┬────┐\n│ # │ PR │\n├───┼────┤\n│ 1 │ #9 │\n└───┴────┘\nMerge them in order."
+        assertEquals(
+            listOf(
+                MessagePart("The PRs are open:", false),
+                MessagePart("┌───┬────┐\n│ # │ PR │\n├───┼────┤\n│ 1 │ #9 │\n└───┴────┘", true),
+                MessagePart("Merge them in order.", false),
+            ),
+            messageParts(text),
+        )
+        assertEquals(listOf(MessagePart("│ is a bar", false)), messageParts("│ is a bar"))
+    }
+
+    @Test
+    fun tableGivesRowsOfCellsAndJoinsWrappedCells() {
+        val table = listOf(
+            "┌───┬──────┬────────────┐",
+            "│ # │  PR  │ Fixes      │",
+            "├───┼──────┼────────────┤",
+            "│ 1 │ #593 │ Keyless    │",
+            "│   │      │ REST reads │",
+            "├───┼──────┼────────────┤",
+            "│ 2 │ #601 │            │",
+            "└───┴──────┴────────────┘",
+        ).joinToString("\n")
+        assertEquals(listOf(listOf("#", "PR", "Fixes"), listOf("1", "#593", "Keyless REST reads"), listOf("2", "#601", "")), parseTable(table))
+        assertNull("rows with other counts of cells", parseTable("│ a │ b │\n├───┤\n│ c │"))
+    }
+
+    @Test
+    fun changeMarksOfEditResults() {
+        assertEquals('-', changeMark("      42 -<<<<<<< HEAD"))
+        assertEquals('+', changeMark("      43 +"))
+        assertEquals('+', changeMark("+ export function total() {"))
+        assertEquals('-', changeMark("    2 - export function total() {"))
+        assertNull(changeMark("      40  Operational"))
+        assertNull(changeMark("  context line"))
+    }
+
+    // ───────────────────────── opencode panels ─────────────────────────
+
+    @Test
+    fun opencodeTitledPanelsAreTools() {
+        val lines = listOf(
+            "┃",
+            "┃  Clean up the middleware",
+            "┃",
+            "",
+            "┃",
+            "┃  # Todos",
+            "┃",
+            "┃  [✓] Read the middleware.",
+            "┃  [•] Replace the body limit.",
+            "┃",
+            "",
+            "┃",
+            "┃  # Deleted api/body-limit.ts",
+            "┃",
+            "┃  -93 lines",
+            "┃",
+            "",
+            "┃",
+            "┃  # Created api/limit.ts",
+            "┃",
+            "┃                              1 + import { limit } from 'x';",
+            "┃                              2 + export default limit;",
+            "┃",
+            "",
+            "┃",
+            "┃  # Running in /tmp/review",
+            "┃",
+            "┃  $ npx vitest run src/pages/MySpotsPage.test.tsx src/",
+            "┃  pages/MapPage.tsx --",
+            "┃  workers=2",
+            "┃",
+            "┃  ok",
+            "┃  …",
+            "┃",
+            "┃  Click to expand",
+            "┃",
+            "",
+            "   ▣  Build · Big Pickle · 21.2s",
+        )
+        val t = agentThread(lines)
+        assertEquals(
+            listOf(
+                ThreadBlock.Prompt("Clean up the middleware"),
+                ThreadBlock.Tool("Todos", "1 of 2 done", listOf("[✓] Read the middleware.", "[•] Replace the body limit.")),
+                ThreadBlock.Changes(listOf(FileChange("api/body-limit.ts", 0, 93), FileChange("api/limit.ts", 2, 0))),
+                ThreadBlock.Tool("Bash", "npx vitest run src/pages/MySpotsPage.test.tsx src/pages/MapPage.tsx --workers=2", listOf("ok", "…")),
+            ),
+            t.blocks,
+        )
+    }
+
+    @Test
+    fun splitDiffBecomesUnified() {
+        val lines = listOf(
+            "    1   import { a } from                 1   import { a } from",
+            "        'x';                                  'x';",
+            "    2 - const b = 1;                     2 + const b = 2;",
+            "                                         3 + const c = 3;",
+            "    3   export { a }                     4   export { a }",
+        )
+        assertEquals(
+            listOf("  import { a } from 'x';", "- const b = 1;", "+ const b = 2;", "+ const c = 3;", "  export { a }"),
+            unifySplitDiff(lines),
+        )
+        // A unified diff of a narrow terminal stays as it is.
+        assertNull(unifySplitDiff(listOf("    1   import { a }", "    2 - const b = 1;", "    2 + const b = 2;")))
+    }
+
+    @Test
+    fun opencodeSplitEditCountsBothSides() {
+        val lines = listOf(
+            "┃",
+            "┃  ← Edit src/a.ts",
+            "┃",
+            "┃    1   import { a } from 'x';           1   import { a } from 'x';",
+            "┃    2 - const b = 1;                     2 + const b = 2;",
+            "┃                                         3 + const c = 3;",
+            "┃",
+            "",
+            "   ▣  Build · Big Pickle · 2.1s",
+        )
+        val edit = agentThread(lines).blocks.single() as ThreadBlock.Tool
+        assertEquals(FileChange("src/a.ts", 2, 1), edit.change)
+        assertEquals(listOf("  import { a } from 'x';", "- const b = 1;", "+ const b = 2;", "+ const c = 3;"), edit.result)
+    }
+
+    @Test
+    fun opencodeThoughtWithATitleAndCompactionDoNotShow() {
+        val lines = listOf(
+            "   + Thought: Planning the commit · 1.8s",
+            "   I will commit now.",
+            "    Pushed to main.",
+            "",
+            "   ─────────────── Compaction ───────────────",
+            "",
+            "   ▣  Build · Big Pickle · 2.1s",
+        )
+        assertEquals(listOf(ThreadBlock.Message("I will commit now.\nPushed to main.")), agentThread(lines).blocks)
+    }
+}

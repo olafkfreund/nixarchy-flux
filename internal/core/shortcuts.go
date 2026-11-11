@@ -1,0 +1,396 @@
+package core
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os/exec"
+	"regexp"
+	"strings"
+	"time"
+
+	"flux/internal/desktop"
+	"flux/internal/proto"
+)
+
+// The phone moves around Omarchy with flux.shortcuts. It asks for the key
+// bindings of Hyprland and the workspaces, runs 1 of the bindings, or runs
+// a fixed action such as "switch to workspace 3". fluxd runs a binding in
+// Hyprland itself, not as keys, because the virtual keyboard of wtype has
+// its own keymap: a binding such as SUPER + code:10 never matches it. Each
+// action needs remote_input, like the keys. While the screen is locked,
+// fluxd runs no binding and no action, as the keyboard of the computer
+// cannot either. The phone then gets the error "Unlock the computer first",
+// and only a request for the workspaces works.
+//
+// Each device has at most 1 request in flight. A request that comes during
+// it waits as the next request. A later request replaces it, and keeps its
+// request for the binding list.
+//
+// While the screen is unlocked, each answer also lists the windows, so that
+// the phone shows the windows of the active workspace and focuses 1 of
+// them by its address.
+//
+// Hyprland 0.56 and later use a Lua configuration. Each binding then calls
+// a Lua function, and hyprctl binds shows the dispatcher "__lua" with the
+// registry reference of that function. fluxd calls a binding only by a
+// reference that the current binding list holds.
+
+// Shortcut is 1 key binding of Hyprland with a description.
+type Shortcut struct {
+	// Ref is the Lua registry reference of the binding. It changes when
+	// Hyprland reads its configuration again.
+	Ref string `json:"ref"`
+	// Keys is the key combination, such as "SUPER SHIFT RETURN", with the
+	// key name as Hyprland writes it. It is only the modifiers for a
+	// binding to a key code.
+	Keys        string `json:"keys"`
+	Description string `json:"description"`
+}
+
+// Workspace is 1 normal workspace of Hyprland.
+type Workspace struct {
+	ID      int `json:"id"`
+	Windows int `json:"windows"`
+}
+
+// hyprBind is 1 entry of hyprctl -j binds.
+type hyprBind struct {
+	Mouse          bool   `json:"mouse"`
+	CatchAll       bool   `json:"catch_all"`
+	HasDescription bool   `json:"has_description"`
+	Modmask        uint32 `json:"modmask"`
+	Submap         string `json:"submap"`
+	Key            string `json:"key"`
+	Description    string `json:"description"`
+	Dispatcher     string `json:"dispatcher"`
+	Arg            string `json:"arg"`
+}
+
+// Modifier bits of a Hyprland binding, in the order that a label shows them.
+var hyprMods = []struct {
+	bit  uint32
+	name string
+}{{64, "SUPER"}, {4, "CTRL"}, {8, "ALT"}, {1, "SHIFT"}}
+
+var luaRef = regexp.MustCompile(`^[0-9]{1,9}$`)
+
+// parseShortcuts returns the bindings that the phone can run: the key
+// bindings with a description, 1 for each description, in the order of the
+// configuration. It skips the mouse bindings and the bindings of a submap.
+func parseShortcuts(data []byte) ([]Shortcut, error) {
+	var binds []hyprBind
+	if err := json.Unmarshal(data, &binds); err != nil {
+		return nil, fmt.Errorf("read the Hyprland bindings: %w", err)
+	}
+	seen := map[string]bool{}
+	out := []Shortcut{}
+	for _, b := range binds {
+		d := strings.TrimSpace(b.Description)
+		if b.Mouse || b.CatchAll || !b.HasDescription || d == "" || b.Submap != "" ||
+			b.Dispatcher != "__lua" || !luaRef.MatchString(b.Arg) || seen[d] {
+			continue
+		}
+		seen[d] = true
+		var keys []string
+		for _, m := range hyprMods {
+			if b.Modmask&m.bit != 0 {
+				keys = append(keys, m.name)
+			}
+		}
+		if b.Key != "" {
+			keys = append(keys, b.Key)
+		}
+		out = append(out, Shortcut{Ref: b.Arg, Keys: strings.Join(keys, " "), Description: d})
+	}
+	return out, nil
+}
+
+// parseWorkspaces returns the normal workspaces, without the special ones.
+func parseWorkspaces(data []byte) ([]Workspace, error) {
+	var all []struct {
+		ID      int `json:"id"`
+		Windows int `json:"windows"`
+	}
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, fmt.Errorf("read the workspaces: %w", err)
+	}
+	out := []Workspace{}
+	for _, w := range all {
+		if w.ID > 0 {
+			out = append(out, Workspace{ID: w.ID, Windows: w.Windows})
+		}
+	}
+	return out, nil
+}
+
+// shortcutBody is the body of flux.shortcuts from the phone.
+type shortcutBody struct {
+	Request   bool   `json:"request"`
+	Run       string `json:"run"`
+	Action    string `json:"action"`
+	Workspace int    `json:"workspace"`
+	Direction string `json:"direction"`
+	// Address is the window of the action focusWindow.
+	Address string `json:"address"`
+}
+
+// fixedActions are the actions without a value, as Lua dispatchers. They
+// are the dispatchers of the Omarchy bindings.
+var fixedActions = map[string]string{
+	"close":             `hl.dsp.window.close()`,
+	"fullscreen":        `hl.dsp.window.fullscreen({ mode = "fullscreen" })`,
+	"float":             `hl.dsp.window.float({ action = "toggle" })`,
+	"split":             `hl.dsp.layout("togglesplit")`,
+	"scratchpad":        `hl.dsp.workspace.toggle_special("scratchpad")`,
+	"nextWindow":        `hl.dsp.window.cycle_next()`,
+	"nextWorkspace":     `hl.dsp.focus({ workspace = "e+1" })`,
+	"previousWorkspace": `hl.dsp.focus({ workspace = "e-1" })`,
+}
+
+var directions = map[string]bool{"l": true, "r": true, "u": true, "d": true}
+
+// maxWorkspace is the highest workspace that the phone can select.
+const maxWorkspace = 10
+
+// actionLua returns the Lua dispatcher of an action from the phone. The
+// values come from fixed text and checked numbers, never from the phone.
+func actionLua(b shortcutBody) (string, error) {
+	if lua, ok := fixedActions[b.Action]; ok {
+		return lua, nil
+	}
+	switch b.Action {
+	case "workspace", "moveToWorkspace":
+		if b.Workspace < 1 || b.Workspace > maxWorkspace {
+			return "", fmt.Errorf("workspace %d is not from 1 to %d", b.Workspace, maxWorkspace)
+		}
+		if b.Action == "workspace" {
+			return fmt.Sprintf(`hl.dsp.focus({ workspace = "%d" })`, b.Workspace), nil
+		}
+		return fmt.Sprintf(`hl.dsp.window.move({ workspace = "%d" })`, b.Workspace), nil
+	case "focus", "swap":
+		if !directions[b.Direction] {
+			return "", fmt.Errorf("the direction %s is not l, r, u, or d", peerText(b.Direction))
+		}
+		if b.Action == "focus" {
+			return fmt.Sprintf(`hl.dsp.focus({ direction = "%s" })`, b.Direction), nil
+		}
+		return fmt.Sprintf(`hl.dsp.window.swap({ direction = "%s" })`, b.Direction), nil
+	case "focusWindow":
+		if !windowAddress.MatchString(b.Address) {
+			return "", fmt.Errorf("the window %s is not a Hyprland address", peerText(b.Address))
+		}
+		return fmt.Sprintf(`hl.dsp.focus({ window = "address:%s" })`, b.Address), nil
+	}
+	return "", fmt.Errorf("the action %s is not known", peerText(b.Action))
+}
+
+// hyprctl runs hyprctl with args and returns its output. hyprctl reports a
+// failed request on stdout, with the prefix "error".
+func hyprctl(ctx context.Context, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "hyprctl", args...).Output()
+	if errors.Is(err, exec.ErrNotFound) {
+		return nil, errors.New("the shortcuts need Hyprland, and hyprctl is not installed")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("hyprctl %s: %w", args[0], err)
+	}
+	if msg := strings.TrimSpace(string(out)); strings.HasPrefix(strings.ToLower(msg), "error") {
+		return nil, fmt.Errorf("hyprland: %s", msg)
+	}
+	return out, nil
+}
+
+// lockedText is the answer to a binding or an action while the screen is
+// locked.
+const lockedText = "Unlock the computer first"
+
+// screenLocked reports whether the screen is locked. Tests replace it.
+var screenLocked = desktop.Locked
+
+// shortcutJob is the next flux.shortcuts request of a device, and the link
+// for the answer.
+type shortcutJob struct {
+	body shortcutBody
+	link streamLink
+}
+
+func (d *Daemon) handleShortcuts(dev *Device, l streamLink, p *proto.Packet) {
+	var b shortcutBody
+	if p.Decode(&b) != nil {
+		return
+	}
+	if msg := d.shortcutRefusal(dev); msg != "" {
+		_ = l.Send(proto.New(proto.TypeFluxShortcuts, map[string]any{"error": msg}))
+		return
+	}
+	d.mu.Lock()
+	if d.sessions.shortcuts == nil {
+		d.sessions.shortcuts = map[string]*shortcutJob{}
+	}
+	if next, busy := d.sessions.shortcuts[dev.ID]; busy {
+		// A request is in flight. Keep 1 next request.
+		switch {
+		case next == nil:
+			next = &shortcutJob{body: b, link: l}
+		case b.Run != "" || b.Action != "":
+			b.Request = b.Request || next.body.Request
+			next = &shortcutJob{body: b, link: l}
+		default:
+			next.body.Request = next.body.Request || b.Request
+			next.link = l
+		}
+		d.sessions.shortcuts[dev.ID] = next
+		d.mu.Unlock()
+		return
+	}
+	d.sessions.shortcuts[dev.ID] = nil
+	d.mu.Unlock()
+	// hyprctl can wait, so the link goes on reading.
+	go func() {
+		job := &shortcutJob{body: b, link: l}
+		for job != nil {
+			d.answerShortcut(dev, job)
+			d.mu.Lock()
+			job = d.sessions.shortcuts[dev.ID]
+			if job == nil {
+				delete(d.sessions.shortcuts, dev.ID)
+			} else {
+				d.sessions.shortcuts[dev.ID] = nil
+			}
+			d.mu.Unlock()
+		}
+	}()
+}
+
+// shortcutRefusal returns why the device cannot use the shortcuts now, or
+// an empty string.
+func (d *Daemon) shortcutRefusal(dev *Device) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	switch {
+	case !d.cfg.RemoteInput || d.input == nil || !d.permittedLocked(dev.ID, "remoteInput"):
+		return "Remote input is off. Turn it on in the Flux window, or run: flux-cli input on"
+	case !dev.Paired:
+		return dev.Name + " is not paired with " + d.nameLocked()
+	}
+	return ""
+}
+
+// answerShortcut runs 1 request and sends the answer.
+func (d *Daemon) answerShortcut(dev *Device, job *shortcutJob) {
+	b, l := job.body, job.link
+	send := func(body map[string]any) { _ = l.Send(proto.New(proto.TypeFluxShortcuts, body)) }
+	// The switch or the pairing can change while the request waits.
+	if msg := d.shortcutRefusal(dev); msg != "" {
+		send(map[string]any{"error": msg})
+		return
+	}
+	// While the screen is locked, only the workspace list works, without the windows.
+	locked := screenLocked(d.ctx)
+	if (b.Run != "" || b.Action != "" || b.Request) && locked {
+		send(map[string]any{"error": lockedText})
+		return
+	}
+	if err := d.runShortcut(b); err != nil {
+		d.logf("%s: shortcut: %v", dev.Name, err)
+		send(map[string]any{"error": err.Error()})
+		return
+	}
+	body, err := d.shortcutState(b.Request, !locked)
+	if err != nil {
+		send(map[string]any{"error": err.Error()})
+		return
+	}
+	send(body)
+}
+
+// runShortcut runs the binding or the action of b. A request only runs
+// nothing.
+func (d *Daemon) runShortcut(b shortcutBody) error {
+	ctx := d.ctx
+	switch {
+	case b.Run != "":
+		if !luaRef.MatchString(b.Run) {
+			return fmt.Errorf("the shortcut %s is not valid", peerText(b.Run))
+		}
+		data, err := hyprctl(ctx, "-j", "binds")
+		if err != nil {
+			return err
+		}
+		shortcuts, err := parseShortcuts(data)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, s := range shortcuts {
+			found = found || s.Ref == b.Run
+		}
+		if !found {
+			return errors.New("the shortcut is gone. Hyprland read its configuration again")
+		}
+		_, err = hyprctl(ctx, "eval", "debug.getregistry()["+b.Run+"]()")
+		return err
+	case b.Action != "":
+		lua, err := actionLua(b)
+		if err != nil {
+			return err
+		}
+		_, err = hyprctl(ctx, "dispatch", lua)
+		return err
+	}
+	return nil
+}
+
+// shortcutState returns the workspaces and the active workspace. With
+// list, it also returns the shortcuts, and with windows the windows.
+func (d *Daemon) shortcutState(list, windows bool) (map[string]any, error) {
+	ctx := d.ctx
+	body := map[string]any{}
+	if list {
+		data, err := hyprctl(ctx, "-j", "binds")
+		if err != nil {
+			return nil, err
+		}
+		shortcuts, err := parseShortcuts(data)
+		if err != nil {
+			return nil, err
+		}
+		body["shortcuts"] = shortcuts
+	}
+	data, err := hyprctl(ctx, "-j", "workspaces")
+	if err != nil {
+		return nil, err
+	}
+	workspaces, err := parseWorkspaces(data)
+	if err != nil {
+		return nil, err
+	}
+	body["workspaces"] = workspaces
+	if windows {
+		data, err := hyprctl(ctx, "-j", "clients")
+		if err != nil {
+			return nil, err
+		}
+		list, err := parseWindows(data, desktopApps.name)
+		if err != nil {
+			return nil, err
+		}
+		body["windows"] = list
+	}
+	data, err = hyprctl(ctx, "-j", "activeworkspace")
+	if err != nil {
+		return nil, err
+	}
+	var active struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(data, &active); err != nil {
+		return nil, fmt.Errorf("read the active workspace: %w", err)
+	}
+	body["active"] = active.ID
+	return body, nil
+}

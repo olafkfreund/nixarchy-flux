@@ -16,6 +16,8 @@ import (
 	"flux/internal/core"
 	"flux/internal/desktop"
 	"flux/internal/ipc"
+	"flux/internal/lan"
+	"flux/internal/sshagent"
 )
 
 var version = "dev"
@@ -23,17 +25,19 @@ var version = "dev"
 func main() {
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	headless := flag.Bool("headless", false, "test mode: no desktop integration, discovery on loopback only")
-	udpPort := flag.Int("udp-port", 0, "UDP discovery port (default 1716)")
-	tcpPort := flag.Int("tcp-port", 0, "first TCP port to try (default 1716)")
+	udpPort := flag.Int("udp-port", 0, fmt.Sprintf("UDP discovery port (default %d)", lan.UDPPort))
+	tcpPort := flag.Int("tcp-port", 0, fmt.Sprintf("first TCP port to try (default %d)", lan.MinTCPPort))
 	flag.Parse()
+	// A running fluxd reads the version of a new binary, so the version
+	// comes before the off marker.
+	if *showVersion {
+		fmt.Println("fluxd", version)
+		return
+	}
 	// systemd sets INVOCATION_ID. A fluxd that the user starts by hand
 	// ignores the marker of `flux-cli off`.
 	if os.Getenv("INVOCATION_ID") != "" && config.IsOff() {
 		log.Printf("fluxd is off. To turn it on, run: flux-cli on")
-		return
-	}
-	if *showVersion {
-		fmt.Println("fluxd", version)
 		return
 	}
 	logger := log.New(os.Stderr, "", 0)
@@ -54,10 +58,45 @@ func main() {
 			}
 		}
 	}
-	d, err := core.New(ctx, logger, core.Options{Headless: *headless, UDPPort: *udpPort, FirstTCPPort: *tcpPort})
+	// The runtime folder holds the socket, the clipboard images, and the
+	// self-restart marker. Another user must not own it or open it. A
+	// headless fluxd keeps its clipboard images in a folder of its own.
+	if !*headless {
+		if err := ipc.PrivateDir(config.RuntimeDir()); err != nil {
+			logger.Fatalf("fluxd: the runtime folder: %v. Log in with a session that has /run/user/%d, or set XDG_RUNTIME_DIR", err, os.Getuid())
+		}
+	}
+	opts := core.Options{Headless: *headless, UDPPort: *udpPort, FirstTCPPort: *tcpPort, Version: version}
+	opts.ReleaseURL, opts.ReleaseDelay = releaseCheck(*headless)
+	d, err := core.New(ctx, logger, opts)
 	if err != nil {
 		logger.Fatalf("fluxd: %v", err)
 	}
+	// A second fluxd stops here, before it starts the network.
+	ln, err := ipc.Listen(config.SocketPath())
+	if err != nil {
+		logger.Fatalf("fluxd: %v", err)
+	}
+	// The ssh-agent of the phone keys. fluxd runs without it when the
+	// socket fails, for example under a second headless fluxd.
+	agentPath := config.SSHAgentPath()
+	agentLn, agentErr := sshagent.Listen(agentPath)
+	if agentErr != nil {
+		logger.Printf("ssh agent: %v", agentErr)
+	}
+	d.SetSSHAgent(agentPath, agentErr)
+	if !*headless {
+		go refreshPlugin(logger)
+	}
+	unmark := markSelfRestart(logger)
+	defer unmark()
+	upgraded := make(chan string, 1)
+	go func() {
+		if v := watchBinary(ctx, d, logger); v != "" {
+			upgraded <- v
+			stop()
+		}
+	}()
 
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
@@ -72,8 +111,21 @@ func main() {
 	}()
 
 	errs := make(chan error, 2)
-	go func() { errs <- ipc.Serve(ctx, config.SocketPath(), d) }()
 	go func() { errs <- d.Run() }()
+	go func() {
+		// Requests use the network, so fluxd answers them after Run
+		// started it. Until then, the clients wait in the socket backlog.
+		select {
+		case <-d.Ready():
+			if agentLn != nil {
+				go func() { _ = sshagent.Serve(ctx, agentLn, d, logger.Printf) }()
+			}
+			errs <- ipc.Serve(ctx, ln, d)
+		case <-ctx.Done():
+			ln.Close()
+			errs <- nil
+		}
+	}()
 	running := 2
 	var failure error
 	select {
@@ -82,8 +134,12 @@ func main() {
 	case <-ctx.Done():
 	}
 	// Stop both parts and wait, so the socket file and the mDNS record
-	// are gone before the process exits.
+	// are gone before the process exits. A close of the agent socket
+	// also removes its file.
 	stop()
+	if agentLn != nil {
+		agentLn.Close()
+	}
 	deadline := time.After(2 * time.Second)
 	for ; running > 0; running-- {
 		select {
@@ -94,5 +150,12 @@ func main() {
 	}
 	if failure != nil {
 		logger.Fatalf("fluxd: %v", failure)
+	}
+	select {
+	case v := <-upgraded:
+		logger.Printf("fluxd %s stopped, so that systemd starts fluxd %s", version, v)
+		unmark()
+		os.Exit(exitUpgrade)
+	default:
 	}
 }

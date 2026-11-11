@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- 10.0.26100.87 has KeyCredentialManager.RequestCreateForWindowAsync and
+         KeyCredential.RequestSignForWindowAsync for the Windows Hello prompt of approvals. -->
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <WindowsSdkPackageVersion>10.0.26100.87</WindowsSdkPackageVersion>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>Flux</AssemblyName>
+    <RootNamespace>Flux</RootNamespace>
+    <ApplicationIcon>Assets/flux.ico</ApplicationIcon>
+    <Version>0.0.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <InternalsVisibleTo Include="Flux.UiTests" />
+    <ProjectReference Include="../FluxKit/FluxKit.csproj" />
+    <Resource Include="Assets/*.png" />
+  </ItemGroup>
+</Project>

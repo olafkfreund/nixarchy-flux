@@ -5,41 +5,67 @@ public let maxIdentityLine = 8192
 
 /// Packet types that Flux uses.
 public enum PacketType {
-    public static let identity = "kdeconnect.identity"
-    public static let pair = "kdeconnect.pair"
-    public static let ping = "kdeconnect.ping"
-    public static let battery = "kdeconnect.battery"
-    public static let batteryRequest = "kdeconnect.battery.request"
-    public static let clipboard = "kdeconnect.clipboard"
-    public static let clipboardConnect = "kdeconnect.clipboard.connect"
-    public static let share = "kdeconnect.share.request"
-    public static let shareUpdate = "kdeconnect.share.request.update"
-    public static let notification = "kdeconnect.notification"
-    public static let notificationRequest = "kdeconnect.notification.request"
-    public static let notificationReply = "kdeconnect.notification.reply"
-    public static let notificationAction = "kdeconnect.notification.action"
-    public static let runCommand = "kdeconnect.runcommand"
-    public static let runCommandRequest = "kdeconnect.runcommand.request"
-    public static let mpris = "kdeconnect.mpris"
-    public static let mprisRequest = "kdeconnect.mpris.request"
-    public static let sftp = "kdeconnect.sftp"
-    public static let sftpRequest = "kdeconnect.sftp.request"
+    public static let identity = "flux.identity"
+    public static let pair = "flux.pair"
+    public static let ping = "flux.ping"
+    public static let battery = "flux.battery"
+    public static let clipboard = "flux.clipboard"
+    public static let clipboardConnect = "flux.clipboard.connect"
+    public static let share = "flux.share.request"
+    public static let shareUpdate = "flux.share.request.update"
+    public static let notification = "flux.notification"
+    public static let notificationRequest = "flux.notification.request"
+    public static let notificationReply = "flux.notification.reply"
+    public static let notificationAction = "flux.notification.action"
+    public static let runCommand = "flux.runcommand"
+    public static let runCommandRequest = "flux.runcommand.request"
+    public static let mpris = "flux.mpris"
+    public static let mprisRequest = "flux.mpris.request"
+    public static let sftp = "flux.sftp"
+    public static let sftpRequest = "flux.sftp.request"
+    /// The computer asks this device to ring, so that the user finds it.
+    public static let findMyPhone = "flux.findmyphone.request"
+    /// Moves the pointer, clicks, scrolls, and types on the computer. This Mac
+    /// sends it. docs/remote-input.md describes the body.
+    public static let mousepadRequest = "flux.mousepad.request"
 
-    /// Flux extension: this device opens a listener that the computer connects to.
+    /// This device opens a listener that the computer connects to.
     public static let fluxTunnel = "flux.tunnel"
-    /// Flux extension: this device streams its camera to the computer as a virtual webcam.
+    /// This device streams its camera to the computer as a virtual webcam.
     public static let fluxWebcam = "flux.webcam"
-    /// Flux extension: the Do Not Disturb state, {"on": bool}, after a local change. Both sides send it.
+    /// The Do Not Disturb state, {"on": bool}, after a local change. Both sides send it.
     public static let fluxDnd = "flux.dnd"
-    /// Flux extension: this device streams its microphone to the computer as a virtual source.
+    /// This device streams its microphone to the computer as a virtual source.
     public static let fluxMic = "flux.mic"
-    /// Flux extension: this device streams its screen to a window on the computer.
+    /// The computer sends its herdr agents, and this device asks for their output and answers them. Both sides send it.
+    public static let fluxHerdr = "flux.herdr"
+    /// This device streams its screen to a window on the computer.
     public static let fluxScreen = "flux.screen"
-    /// Flux extension: the computer asks this device to approve sudo with a fingerprint.
+    /// The computer tells whether it accepts remote input and
+    /// whether it shows its screen, {"enabled": bool, "desktop": bool}.
+    public static let fluxInput = "flux.input"
+    /// The computer streams its screen to a window on this device.
+    public static let fluxDesktop = "flux.desktop"
+    /// The computer sends its Hyprland key bindings and
+    /// workspaces, and runs them for this device. Both sides send it.
+    public static let fluxShortcuts = "flux.shortcuts"
+    public static let fluxTransfer = "flux.transfer"
+    /// The computer asks this device to approve sudo with a fingerprint.
     public static let fluxApprove = "flux.approve"
+    /// An image that was copied, as the payload, with
+    /// {"mime": type}. Both sides send it.
+    public static let fluxClipboardImage = "flux.clipboard.image"
+    /// The computer sends its active Omarchy theme. docs/omarchy.md,
+    /// section "Theme packet", describes the body.
+    public static let fluxTheme = "flux.theme"
+    /// The computer asks this device to start its webcam or its
+    /// microphone, {"kind": "webcam"} or {"kind": "mic"}. The packet only
+    /// asks. The stream starts only after a tap of the user, see
+    /// `StreamRequestPlugin`.
+    public static let fluxStreamRequest = "flux.stream.request"
 }
 
-/// The body of a kdeconnect.identity packet.
+/// The body of a flux.identity packet.
 public struct Identity: Sendable, Equatable {
     public var deviceId: String
     public var deviceName: String
@@ -48,8 +74,13 @@ public struct Identity: Sendable, Equatable {
     public var incoming: [String]
     public var outgoing: [String]
     public var tcpPort: Int
+    /// The Flux program of the device and its version: "macos" or "ios"
+    /// and the app version for this device, "fluxd" for a computer. An
+    /// earlier Flux sends neither.
+    public var app: String
+    public var appVersion: String
 
-    public init(deviceId: String, deviceName: String, deviceType: String, protocolVersion: Int, incoming: [String], outgoing: [String], tcpPort: Int = 0) {
+    public init(deviceId: String, deviceName: String, deviceType: String, protocolVersion: Int, incoming: [String], outgoing: [String], tcpPort: Int = 0, app: String = "", appVersion: String = "") {
         self.deviceId = deviceId
         self.deviceName = deviceName
         self.deviceType = deviceType
@@ -57,6 +88,8 @@ public struct Identity: Sendable, Equatable {
         self.incoming = incoming
         self.outgoing = outgoing
         self.tcpPort = tcpPort
+        self.app = app
+        self.appVersion = appVersion
     }
 
     /// Returns the identity packet. Only the UDP broadcast carries tcpPort.
@@ -72,6 +105,8 @@ public struct Identity: Sendable, Equatable {
             "outgoingCapabilities": outgoing,
         ]
         if withPort && tcpPort > 0 { body["tcpPort"] = tcpPort }
+        if !app.isEmpty { body["app"] = app }
+        if !appVersion.isEmpty { body["appVersion"] = appVersion }
         if let target {
             body["targetDeviceId"] = target.deviceId
             body["targetProtocolVersion"] = target.protocolVersion
@@ -79,24 +114,34 @@ public struct Identity: Sendable, Equatable {
         return Packet(PacketType.identity, body)
     }
 
-    /// True when the peer is an Omarchy desktop that runs fluxd. fluxd accepts flux.tunnel.
-    public var isFlux: Bool { incoming.contains(PacketType.fluxTunnel) }
+    /// True when the peer is an Omarchy computer that runs fluxd. fluxd is a
+    /// desktop or laptop that accepts flux.tunnel. Flux for Android also
+    /// accepts flux.tunnel, but it is a phone or tablet. The Mac is a remote
+    /// for Omarchy, so it connects and pairs only with these peers.
+    public var isFlux: Bool {
+        (deviceType == "desktop" || deviceType == "laptop") && incoming.contains(PacketType.fluxTunnel)
+    }
 
+    /// Parses an identity packet. It returns nil for a packet without a
+    /// valid device ID or without a protocol version.
     public static func from(_ p: Packet) -> Identity? {
-        guard p.type == PacketType.identity, let id = p.string("deviceId"), validDeviceId(id) else { return nil }
+        guard p.type == PacketType.identity, let id = p.string("deviceId"), validDeviceId(id),
+              let version = p.int("protocolVersion") else { return nil }
         return Identity(
             deviceId: id,
             deviceName: cleanName(p.string("deviceName") ?? "unnamed"),
             deviceType: p.string("deviceType") ?? "desktop",
-            protocolVersion: p.int("protocolVersion") ?? 7,
+            protocolVersion: version,
             incoming: p.strings("incomingCapabilities"),
             outgoing: p.strings("outgoingCapabilities"),
-            tcpPort: p.int("tcpPort") ?? 0
+            tcpPort: p.int("tcpPort") ?? 0,
+            app: p.string("app") ?? "",
+            appVersion: p.string("appVersion") ?? ""
         )
     }
 }
 
-/// Reports whether the ID has the KDE Connect device ID format.
+/// Reports whether the ID has the Flux device ID format.
 public func validDeviceId(_ id: String) -> Bool {
     guard (32...38).contains(id.count) else { return false }
     return id.unicodeScalars.allSatisfy { ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "_" || $0 == "-" }
@@ -104,7 +149,7 @@ public func validDeviceId(_ id: String) -> Bool {
 
 private let invalidNameChars = Set("\"',;:.!?()[]<>")
 
-/// Removes the characters that KDE Connect does not allow in a device name and
+/// Removes the characters that Flux does not allow in a device name and
 /// limits the name to 32 characters.
 public func cleanName(_ name: String, fallback: String = "Mac") -> String {
     let cleaned = String(name.filter { !invalidNameChars.contains($0) }).trimmingCharacters(in: .whitespaces)

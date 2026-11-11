@@ -3,7 +3,7 @@
   "id": "flux",
   "name": "Flux",
   "version": "0.1.0",
-  "description": "Connects this computer to Flux for Android and to KDE Connect. Shares the clipboard, files, and notifications, and lets the phone control the media players. Summon the window with: omarchy-shell shell summon flux '{\"page\":\"files\"}'",
+  "description": "Connects this computer to Flux for Android, iOS, and macOS. Shares the clipboard, files, and notifications, and lets the phone control the media players. Summon the window with: omarchy-shell shell summon flux '{\"page\":\"chat\"}'",
   "kinds": ["service", "bar-widget", "panel"],
   "keepLoaded": true,
   "entryPoints": {
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "Flux",
-    "description": "The first connected device and its battery. Click to open Flux.",
+    "description": "The Flux mark, in the accent color while a paired device is connected. Click to open Flux.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right"

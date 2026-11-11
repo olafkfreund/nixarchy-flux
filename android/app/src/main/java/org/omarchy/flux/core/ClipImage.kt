@@ -15,7 +15,6 @@ import org.omarchy.flux.protocol.Types
 import org.omarchy.flux.protocol.bodyOf
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.net.InetAddress
 import java.security.cert.X509Certificate
 
 private const val TAG = "FluxClipImage"
@@ -56,31 +55,23 @@ object ClipImage {
      * transfer runs on the IO pool.
      */
     fun receive(core: FluxCore, d: Device, p: Packet) {
-        val token = p.payloadTunnel
+        val token = p.payloadTunnel ?: return
         val size = p.payloadSize
-        if (!core.settings.syncClipboard || !p.hasPayload || size <= 0 || size > MAX_BYTES) {
-            if (token != null) d.send(TunnelPackets.failed(token, "the phone does not accept this clipboard image"))
+        if (!core.settings.syncClipboard || size <= 0 || size > MAX_BYTES) {
+            d.send(TunnelPackets.failed(token, "the phone does not accept this clipboard image"))
             return
         }
         val mime = p.string("mime")?.takeIf { it in TYPES } ?: "image/png"
-        val address = d.link?.address ?: return
         val cert = d.certificate ?: return
         val tls = FluxCore.tls ?: return
-        core.io.execute { download(core, d, p, address, cert, tls, mime) }
+        core.io.execute { download(core, d, p, token, cert, tls, mime) }
     }
 
-    private fun download(core: FluxCore, d: Device, p: Packet, address: InetAddress, cert: X509Certificate, tls: Tls, mime: String) {
+    private fun download(core: FluxCore, d: Device, p: Packet, token: String, cert: X509Certificate, tls: Tls, mime: String) {
         val dir = File(core.app.cacheDir, DIR).apply { mkdirs() }
         val file = File(dir, "clip-${System.currentTimeMillis()}.${extension(mime)}")
-        val token = p.payloadTunnel
         val ok = runCatching {
-            file.outputStream().use { out ->
-                if (token != null) {
-                    Tunnel.receive(tls, cert, token, p.payloadSize, out, announce = { d.send(it) })
-                } else {
-                    Payload.receive(tls, address, p.payloadPort, p.payloadSize, out)
-                }
-            }
+            file.outputStream().use { out -> Tunnel.receive(tls, cert, token, p.payloadSize, out, announce = { d.send(it) }) }
         }.onFailure { Log.w(TAG, "receive from ${d.identity.deviceName} failed", it) }.isSuccess
         if (!ok) {
             file.delete()
@@ -90,18 +81,46 @@ object ClipImage {
         dir.listFiles()?.filter { it != file }?.forEach { it.delete() }
         val uri = FileProvider.getUriForFile(core.app, authority(core.app), file)
         lastRemote = uri
+        InboxFeed.clipReceived(d.id, d.identity.deviceName, null)
         main.post { Android.setClipboardImage(core.app, uri) }
     }
 
     private fun authority(context: Context) = "${context.packageName}.clipboard"
 
     /**
+     * True when [uri] is the address of a file in the clipboard folder, which
+     * holds only images from a computer. Another app cannot put this address
+     * on the clipboard, because Android makes the app that sets a clip prove
+     * that it can grant the address.
+     */
+    private fun received(context: Context, uri: Uri): Boolean {
+        if (uri.authority != authority(context)) return false
+        val files = File(context.cacheDir, DIR).listFiles() ?: return false
+        return files.any { it.isFile && runCatching { FileProvider.getUriForFile(context, authority(context), it) }.getOrNull() == uri }
+    }
+
+    /**
      * Sends the image at [uri] to each device in [devices]. [onDone] runs
      * on an IO thread with the number of devices that got the image, or -1
-     * when the image is larger than [MAX_BYTES].
+     * when the image is larger than [MAX_BYTES]. Only a content address of
+     * another app goes out, because a file address opens a path with the
+     * rights of Flux. Of the addresses of Flux, only [lastRemote] goes out,
+     * so that the user can send an image from 1 computer to another. The
+     * clipboard sync does not send [lastRemote] back.
+     *
+     * [manual] is true for Send clipboard. It also sends an image from a
+     * computer that is still in the clipboard folder, because [lastRemote]
+     * is empty after Flux starts again.
      */
-    fun send(core: FluxCore, devices: List<Device>, uri: Uri, mime: String, onDone: (Int) -> Unit = {}) {
+    fun send(core: FluxCore, devices: List<Device>, uri: Uri, mime: String, manual: Boolean = false, onDone: (Int) -> Unit = {}) {
         core.io.execute {
+            // The clipboard gives the app that reads it a read grant for a content address.
+            val shared = Share.acceptShared(uri.scheme, uri.authority, core.app.packageName, granted = true)
+            if (uri != lastRemote && !shared && !(manual && received(core.app, uri))) {
+                Log.i(TAG, "ignored a clipboard image at ${uri.scheme}:")
+                onDone(0)
+                return@execute
+            }
             val read = runCatching { read(core.app, uri) }
             val data = read.getOrElse {
                 Log.w(TAG, "read $uri failed", it)
@@ -110,7 +129,7 @@ object ClipImage {
             }
             var sent = 0
             for (d in devices) {
-                runCatching { sendTo(d, data, mime) }
+                runCatching { sendTo(d, data, mime, manual) }
                     .onSuccess { sent++ }
                     .onFailure { Log.w(TAG, "send to ${d.identity.deviceName} failed", it) }
             }
@@ -136,11 +155,13 @@ object ClipImage {
         }
     }
 
-    private fun sendTo(d: Device, data: ByteArray, mime: String) {
+    /** Sends the image to [d]. The [manual] flag puts it on the clipboard of the computer also while its automatic sync is off. */
+    private fun sendTo(d: Device, data: ByteArray, mime: String, manual: Boolean) {
         val cert = d.certificate ?: error("not paired")
         val tls = FluxCore.tls ?: error("no TLS")
         val server = Payload.openServer()
-        val p = Packet(Types.FLUX_CLIPBOARD_IMAGE, bodyOf("mime" to mime), payloadSize = data.size.toLong(), payloadPort = server.localPort)
+        val body = if (manual) bodyOf("mime" to mime, "manual" to true) else bodyOf("mime" to mime)
+        val p = Packet(Types.FLUX_CLIPBOARD_IMAGE, body, payloadSize = data.size.toLong(), payloadPort = server.localPort)
         if (!d.send(p)) {
             server.close()
             error("Not connected")

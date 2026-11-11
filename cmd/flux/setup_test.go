@@ -1,67 +1,212 @@
 package main
 
 import (
-	"io/fs"
+	"context"
+	"encoding/json"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"flux/internal/ipc"
 )
 
-// TestCopyPluginLayout copies the plugin from the checkout and checks the
-// layout that `omarchy plugin validate` accepts: real files, the shared
-// views in Flux/, and no tools folder.
-func TestCopyPluginLayout(t *testing.T) {
-	dest := filepath.Join(t.TempDir(), "flux")
-	if err := copyPlugin("../../gui/omarchy", "../../gui/qml", dest); err != nil {
+// systemd splits ExecStart at spaces and replaces % specifiers, so the
+// unit quotes the path of a checkout such as ~/My Code/flux. systemd does
+// not replace $ in the path of the program, and it refuses quotes and
+// backslashes there.
+func TestServiceUnitQuotesThePath(t *testing.T) {
+	unit, err := serviceUnit(`/home/u/My Code/100% a/$HOME/fluxd`)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"manifest.json", "Panel.qml", "BarWidget.qml", "Service.qml", "Backend.qml", "Flux/qmldir", "Flux/FluxView.qml", "Flux/pages/qmldir", "Flux/components/qmldir"} {
-		if _, err := os.Stat(filepath.Join(dest, want)); err != nil {
-			t.Errorf("missing %s", want)
-		}
+	if !strings.Contains(unit, "\nExecStart=\"/home/u/My Code/100%% a/$HOME/fluxd\"\n") {
+		t.Fatalf("unit:\n%s", unit)
 	}
-	_ = filepath.WalkDir(dest, func(path string, d fs.DirEntry, err error) error {
-		rel, _ := filepath.Rel(dest, path)
-		if d.Type()&fs.ModeSymlink != 0 {
-			t.Errorf("symlink %s", rel)
-		}
-		if strings.Contains(rel, "tools") {
-			t.Errorf("tools file %s", rel)
-		}
-		return nil
-	})
-	// The real validator, when this machine has Omarchy.
-	if _, err := exec.LookPath("omarchy"); err == nil {
-		if out, err := exec.Command("omarchy", "plugin", "validate", dest).CombinedOutput(); err != nil {
-			t.Fatalf("omarchy plugin validate: %v\n%s", err, out)
+	if !strings.Contains(unit, "\nType=exec\n") {
+		t.Fatal("the unit must use Type=exec, so that a missing binary fails the start")
+	}
+	if !setupWrote(unit) {
+		t.Fatal("setup does not know its own unit")
+	}
+	for _, path := range []string{"/home/u/flux\n/fluxd", `/home/u/"a"/fluxd`, "/home/u/it's/fluxd", `/home/u/a\b/fluxd`} {
+		if _, err := serviceUnit(path); err == nil {
+			t.Errorf("the path %q must fail", path)
 		}
 	}
 }
 
-// TestCopyPluginSystemLayout copies the plugin from the system install
-// layout, where Flux/ already holds the real shared views. The copy must
-// keep them, or the bar widget and panel fail to load while summon still
-// answers "ok".
-func TestCopyPluginSystemLayout(t *testing.T) {
-	src := t.TempDir()
-	for _, f := range []string{"manifest.json", "Panel.qml", "BarWidget.qml", "Service.qml", "Backend.qml", "Flux/qmldir", "Flux/FluxView.qml", "Flux/components/FluxMark.qml"} {
-		p := filepath.Join(src, f)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte("// test"), 0o644); err != nil {
-			t.Fatal(err)
+// setup removes only a unit that it wrote with no change: the unit of
+// this version or of an earlier version.
+func TestSetupWrote(t *testing.T) {
+	for i, old := range oldUnits {
+		if !setupWrote(strings.Replace(old, "@FLUXD@", "/home/u/.local/bin/fluxd", 1)) {
+			t.Errorf("the unit of earlier setup %d", i)
 		}
 	}
-	dest := filepath.Join(t.TempDir(), "flux")
-	if err := copyPlugin(src, "", dest); err != nil {
+	unit, _ := serviceUnit("/home/u/My Code/flux/bin/fluxd")
+	if !setupWrote(unit) {
+		t.Error("the unit of this setup")
+	}
+	changed := strings.Replace(unit, "RestartSec=2", "RestartSec=10", 1)
+	if setupWrote(changed) {
+		t.Error("a unit that the user changed")
+	}
+	own := "[Unit]\nDescription=My fluxd\n[Service]\nExecStart=/home/u/.local/bin/fluxd\n"
+	if setupWrote(own) {
+		t.Error("a unit of the user")
+	}
+	if setupWrote("") {
+		t.Error("an empty file")
+	}
+}
+
+// A user unit from a checkout hides the unit of the package. setup removes
+// it, but it keeps a unit that the user wrote.
+func TestRemoveUserUnit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fluxd.service")
+	var ran []string
+	run := func(what, name string, args ...string) error {
+		ran = append(ran, name+" "+strings.Join(args, " "))
+		return nil
+	}
+	if removed, err := removeUserUnit(path, false, run); err != nil || removed {
+		t.Fatalf("no unit: %v %v", removed, err)
+	}
+
+	unit, _ := serviceUnit("/home/u/.local/bin/fluxd")
+	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"manifest.json", "Panel.qml", "BarWidget.qml", "Flux/qmldir", "Flux/FluxView.qml", "Flux/components/FluxMark.qml"} {
-		if _, err := os.Stat(filepath.Join(dest, want)); err != nil {
-			t.Errorf("missing %s", want)
-		}
+	if removed, err := removeUserUnit(path, true, run); err != nil || removed || len(ran) != 0 {
+		t.Fatalf("--dry-run: %v %v %q", removed, err, ran)
+	}
+	if removed, err := removeUserUnit(path, false, run); err != nil || !removed {
+		t.Fatalf("the unit of setup: %v %v", removed, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("the unit stays")
+	}
+	if len(ran) != 1 || ran[0] != "systemctl --user disable fluxd.service" {
+		t.Fatalf("commands %q", ran)
+	}
+
+	own := "[Unit]\nDescription=My fluxd\n[Service]\nExecStart=/opt/fluxd\n"
+	if err := os.WriteFile(path, []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := removeUserUnit(path, false, run); err != nil || removed {
+		t.Fatalf("a unit of the user: %v %v", removed, err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != own {
+		t.Fatal("setup changed a unit of the user")
+	}
+}
+
+// A failed step gives an error, so that `flux-cli setup && echo done`
+// does not report a success.
+func TestSetupFailsWhenAStepFails(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	old := systemUnit
+	systemUnit = filepath.Join(t.TempDir(), "none.service")
+	defer func() { systemUnit = old }()
+	// The test binary has no fluxd next to it, so the service step fails.
+	err := setup([]string{"--no-plugin"})
+	if err == nil || err.Error() != "1 step failed" {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestNixSetup(t *testing.T) {
+	packager = "nix"
+	t.Cleanup(func() { packager = "" })
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"service", func() error {
+			return setupService(false, func(string, string, ...string) error {
+				t.Fatal("setup ran systemctl")
+				return nil
+			})
+		}},
+		{"system report", func() error { setupSystemReport(); return nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			read, write, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout := os.Stdout
+			os.Stdout = write
+			t.Cleanup(func() { os.Stdout = stdout })
+			err = tc.run()
+			write.Close()
+			out, readErr := io.ReadAll(read)
+			read.Close()
+			if err != nil || readErr != nil {
+				t.Fatalf("run: %v, read: %v", err, readErr)
+			}
+			want := "services.flux"
+			if tc.name == "system report" {
+				want = "services.flux.webcam.enable"
+				if !strings.Contains(string(out), "services.flux.approve.services") {
+					t.Fatalf("missing approval option: %s", out)
+				}
+			}
+			if !strings.Contains(string(out), want) {
+				t.Fatalf("missing %s: %s", want, out)
+			}
+		})
+	}
+	if _, err := os.Stat(userUnit()); !os.IsNotExist(err) {
+		t.Fatalf("setup wrote a unit: %v", err)
+	}
+}
+
+func TestExecPath(t *testing.T) {
+	v := "{ path=/home/u/My Code/bin/fluxd ; argv[]=/home/u/My Code/bin/fluxd ; ignore_errors=no ; start_time=[n/a] }"
+	if got := execPath(v); got != "/home/u/My Code/bin/fluxd" {
+		t.Errorf("got %q", got)
+	}
+	if got := execPath(""); got != "" {
+		t.Errorf("empty: %q", got)
+	}
+}
+
+// stateHandler answers each call, as fluxd does after it started the
+// network.
+type stateHandler struct{}
+
+func (stateHandler) Call(context.Context, string, json.RawMessage) (any, error) {
+	return map[string]any{}, nil
+}
+
+func (stateHandler) Subscribe(func(string, any)) func() { return func() {} }
+
+// fluxd makes its socket before it starts the network. A socket that takes
+// the connection but does not answer is not a fluxd that runs.
+func TestWaitForFluxdNeedsAnAnswer(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	path := filepath.Join(t.TempDir(), "fluxd.sock")
+	t.Setenv("FLUX_SOCKET", path)
+	ln, err := ipc.Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := waitForFluxd(500 * time.Millisecond); err == nil {
+		t.Fatal("a socket with no answer must not count as a started fluxd")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ipc.Serve(ctx, ln, stateHandler{})
+	if err := waitForFluxd(5 * time.Second); err != nil {
+		t.Fatalf("a fluxd that answers: %v", err)
 	}
 }
