@@ -27,6 +27,7 @@ Omarchy shell plugin ┘
 | Desktop services | `internal/desktop/` | Clipboard, notifications, media, audio, and camera integration |
 | Updates | `internal/upgrade/`, `internal/plugin/` | The restart of fluxd into a new binary, and the copy of the shell plugin |
 | herdr client | `internal/herdr/` | API socket client that reads the [herdr agents](herdr.md) for the phone, and the bridge of the live terminal |
+| SSH agent | `internal/sshagent/` | The ssh-agent socket that offers the SSH key of a phone and sends each signature request to the phone |
 | Approval | `internal/approve/`, `cmd/flux-approve/` | Root trust anchor, PAM setup, and signature verification |
 | Shared views | `gui/qml/` | Qt Quick screens and controls for both desktop hosts |
 | Qt host | `gui/app/` | Native C++ host, backend adapter, and theme watcher |
@@ -46,7 +47,7 @@ The routes are the same for each of them.
 | --- | --- |
 | Discover the phone | mDNS through Avahi |
 | Connect to the phone | Desktop opens the connection |
-| Connect to the phone outside the local network | Desktop dials an [extra address](tailscale.md), for example through Tailscale |
+| Connect to the phone outside the local network | Desktop dials an [extra address](tailscale.md), for example through Tailscale or [ZeroTier](zerotier.md) |
 | Receive files | Desktop connects to the phone's payload port |
 | Send files to the phone | Phone listens for a `flux.tunnel`, then desktop connects |
 | Browse the desktop from the phone | SSH inside a `flux.tunnel` |

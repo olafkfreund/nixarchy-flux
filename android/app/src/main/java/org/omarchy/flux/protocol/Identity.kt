@@ -60,6 +60,7 @@ object Types {
     /**
      * The computer tells whether it accepts remote input and
      * whether it shows its screen, {"enabled": bool, "desktop": bool}.
+     * "extend" is true when it can add a monitor that this phone shows.
      */
     const val FLUX_INPUT = "flux.input"
 
@@ -90,6 +91,25 @@ object Types {
      */
     const val FLUX_MOTION = "flux.motion"
     const val FLUX_TRANSFER = "flux.transfer"
+
+    /** The computer sends the network cards that can wake it. See core/Wake.kt. */
+    const val FLUX_WAKE = "flux.wake"
+
+    /** The computer sends its audio outputs, as the answer to [FLUX_AUDIO_REQUEST]. */
+    const val FLUX_AUDIO = "flux.audio"
+
+    /** This phone asks for the audio outputs of the computer, selects the default output, or sets the volume or the mute state of 1 output. */
+    const val FLUX_AUDIO_REQUEST = "flux.audio.request"
+
+    /** The computer streams the audio of its default output to this phone, which plays it. Both sides send it. */
+    const val FLUX_SPEAKER = "flux.speaker"
+
+    /**
+     * The SSH key of this phone. The computer asks for the key and sends
+     * the sign requests of its ssh-agent. This phone sends its key and the
+     * signatures. Both sides send it.
+     */
+    const val FLUX_SSH = "flux.ssh"
 }
 
 /** Packet types that the phone accepts. */
@@ -100,6 +120,10 @@ val INCOMING = listOf(
     Types.SFTP, Types.FLUX_TUNNEL, Types.FLUX_WEBCAM, Types.FLUX_DND,
     Types.FLUX_MIC, Types.FLUX_SCREEN, Types.FLUX_APPROVE, Types.FLUX_HERDR, Types.FLUX_INPUT,
     Types.FLUX_DESKTOP, Types.FLUX_SHORTCUTS, Types.FLUX_THEME, Types.FLUX_STREAM_REQUEST, Types.FLUX_TRANSFER,
+    Types.FLUX_WAKE,
+    Types.FLUX_AUDIO,
+    Types.FLUX_SPEAKER,
+    Types.FLUX_SSH,
     Types.FLUX_MOTION,
 )
 
@@ -109,7 +133,11 @@ val OUTGOING = listOf(
     Types.SHARE_UPDATE, Types.NOTIFICATION, Types.RUN_COMMAND_REQUEST, Types.MPRIS_REQUEST,
     Types.SFTP_REQUEST, Types.TELEPHONY, Types.FLUX_TUNNEL, Types.FLUX_WEBCAM, Types.FLUX_DND,
     Types.FLUX_MIC, Types.FLUX_SCREEN, Types.FLUX_APPROVE, Types.FLUX_HERDR, Types.FLUX_CLIPBOARD_IMAGE,
-    Types.MOUSEPAD_REQUEST, Types.FLUX_DESKTOP, Types.FLUX_SHORTCUTS, Types.FLUX_TRANSFER, Types.FLUX_MOTION,
+    Types.MOUSEPAD_REQUEST, Types.FLUX_DESKTOP, Types.FLUX_SHORTCUTS, Types.FLUX_TRANSFER,
+    Types.FLUX_AUDIO_REQUEST,
+    Types.FLUX_SPEAKER,
+    Types.FLUX_SSH,
+    Types.FLUX_MOTION,
 )
 
 /**

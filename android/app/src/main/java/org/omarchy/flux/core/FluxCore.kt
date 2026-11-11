@@ -85,6 +85,7 @@ object FluxCore {
     @Volatile private var notificationAccess = false
     @Volatile private var callAccess = false
     @Volatile private var smsAccess = false
+    @Volatile private var contactsAccess = false
     @Volatile private var smsSupported = false
 
     private val _state = MutableStateFlow(UiState())
@@ -132,6 +133,7 @@ object FluxCore {
             val d = Device(this, identity)
             d.pairState = PairState.Paired
             d.lastIp = t.lastIp
+            d.wake = t.wake
             d.certificate = trust.certificate(t.id)
             devices[t.id] = d
         }
@@ -177,6 +179,7 @@ object FluxCore {
         notificationAccess = Android.hasNotificationAccess(app)
         callAccess = Android.hasPhoneState(app)
         smsAccess = SmsSync.hasAccess(app)
+        contactsAccess = Android.hasContacts(app)
         val detect = MotionCues.detect
         MotionCues.refreshAccess(app)
         if (MotionCues.detect != detect) MotionCues.updateDetection(this)
@@ -423,9 +426,11 @@ object FluxCore {
             org.omarchy.flux.screen.ScreenSession.stopFor(id, message)
             org.omarchy.flux.webcam.WebcamSession.stopFor(this, id, message)
             org.omarchy.flux.mic.MicSession.stopFor(this, id, message)
+            org.omarchy.flux.speaker.SpeakerSession.stopFor(this, id, message)
             org.omarchy.flux.desktop.DesktopSession.stopFor(id, message)
             if (browsing) Browse.close()
             Approvals.current.value?.takeIf { it.computerId == id }?.let { Approvals.clear(app, it.id) }
+            SshAgent.forget(app, id)
             Android.cancelFromComputer(app, id)
             StreamRequests.forget(app, id)
         }
@@ -456,6 +461,7 @@ object FluxCore {
                 callAccess = callAccess,
                 smsSync = settings.syncSms,
                 smsAccess = smsAccess,
+                contactsAccess = contactsAccess,
                 smsSupported = smsSupported,
                 agentInputAlerts = settings.agentInputAlerts,
                 agentDoneAlerts = settings.agentDoneAlerts,
@@ -466,7 +472,10 @@ object FluxCore {
                 lastScan = lastScan,
                 connecting = inConnectGrace(connectFrom, SystemClock.elapsedRealtime()),
                 enabled = settings.enabled,
+                remoteAccess = settings.remoteAccess,
+                tailnetKeySet = settings.tailnetAuthKey.isNotBlank(),
                 theme = settings.theme,
+                touchpadScroll = settings.touchpadScroll,
                 computerTheme = ComputerThemes.current(),
                 themeScope = ComputerThemes.scope,
                 computerThemes = ComputerThemes.names(),
@@ -475,6 +484,11 @@ object FluxCore {
             )
         }
         _state.value = snapshot
+    }
+
+    /** Sends a Wake-on-LAN magic packet to the paired computer [id]. */
+    fun wake(id: String) {
+        device(id)?.let { Wake.send(this, it) }
     }
 
     fun toast(message: String) {
@@ -587,9 +601,49 @@ object FluxCore {
         }
     }
 
+    /** True while the user wants the userspace tailnet node. */
+    val remoteAccess: Boolean get() = settings.remoteAccess
+
+    /**
+     * Starts or stops the userspace tailnet node after a setting changed.
+     * The node joins the tailnet without a VPN interface, so another VPN
+     * app keeps the VPN slot.
+     */
+    fun applyTsnet() {
+        if (!settings.enabled || !settings.remoteAccess || settings.tailnetAuthKey.isBlank()) {
+            io.execute { org.omarchy.flux.net.TsnetNode.stop() }
+            return
+        }
+        val key = settings.tailnetAuthKey
+        val id = local.deviceId.lowercase().filter { it.isLetterOrDigit() || it == '-' }.take(20)
+        val host = "flux-" + id.ifBlank { "phone" }
+        io.execute { org.omarchy.flux.net.TsnetNode.start(app, key, host) }
+    }
+
+    fun setRemoteAccess(on: Boolean) {
+        settings.remoteAccess = on
+        publish()
+        applyTsnet()
+    }
+
+    fun setTailnetAuthKey(key: String) {
+        settings.tailnetAuthKey = key.trim()
+        publish()
+        if (settings.remoteAccess) applyTsnet()
+    }
+
+    fun stopTsnet() {
+        io.execute { org.omarchy.flux.net.TsnetNode.stop() }
+    }
+
     fun setTheme(mode: ThemeMode) {
         settings.theme = mode
         ComputerThemes.applyNightMode(app)
+        publish()
+    }
+
+    fun setTouchpadScroll(mode: ScrollMode) {
+        settings.touchpadScroll = mode
         publish()
     }
 

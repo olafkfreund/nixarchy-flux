@@ -1,12 +1,12 @@
 package core
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -34,7 +34,7 @@ const maxReceives = 4
 
 // receiveIdle ends an incoming transfer when the device sends no data for
 // this time.
-const receiveIdle = time.Minute
+var receiveIdle = time.Minute
 
 // maxSharePreview is the number of characters of a shared text that the
 // desktop notification shows.
@@ -175,6 +175,13 @@ func (d *Daemon) progress(t *Transfer) func(int64) {
 
 func (d *Daemon) finishTransfer(t *Transfer, err error) {
 	d.mu.Lock()
+	received := d.finishTransferLocked(t, err)
+	d.mu.Unlock()
+	d.finishTransferEmit(t, received)
+}
+
+// finishTransferLocked changes the record while d.mu is held.
+func (d *Daemon) finishTransferLocked(t *Transfer, err error) bool {
 	received := err == nil && t.Dir == "in" && t.State != "done"
 	switch {
 	case err == nil:
@@ -186,7 +193,10 @@ func (d *Daemon) finishTransfer(t *Transfer, err error) {
 	}
 	t.Rate = 0
 	d.trimTransfersLocked()
-	d.mu.Unlock()
+	return received
+}
+
+func (d *Daemon) finishTransferEmit(t *Transfer, received bool) {
 	if received {
 		d.emitAutomation(automationEvent{Kind: "file.received", Device: t.Device, Path: t.Path})
 	}
@@ -219,6 +229,55 @@ func (d *Daemon) CancelTransfer(id string) error {
 	}
 	d.mu.Unlock()
 	return apiErr("not_found", "No transfer with ID %s", id)
+}
+
+// transferPath returns the local file of a finished transfer.
+func (d *Daemon) transferPath(id string) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, t := range d.transfers {
+		if t.ID != id {
+			continue
+		}
+		if t.State != "done" || t.Path == "" {
+			return "", apiErr("not_ready", "%s is not a finished file", t.Name)
+		}
+		if _, err := os.Stat(t.Path); err != nil {
+			return "", apiErr("not_found", "%s no longer exists", t.Path)
+		}
+		return t.Path, nil
+	}
+	return "", apiErr("not_found", "No transfer with ID %s", id)
+}
+
+// OpenTransfer opens the file of a finished transfer with the default app.
+func (d *Daemon) OpenTransfer(id string) error {
+	path, err := d.transferPath(id)
+	if err != nil {
+		return err
+	}
+	return desktop.Open(path)
+}
+
+// CopyTransfer puts the file of a finished transfer on the clipboard.
+func (d *Daemon) CopyTransfer(id string) error {
+	path, err := d.transferPath(id)
+	if err != nil {
+		return err
+	}
+	return d.copyFile(path)
+}
+
+// copyFile puts the file at path on the clipboard. An image of at most
+// maxClipboardImage bytes goes on as image data, so that it pastes into
+// chats and editors. Any other file goes on as a file URI, so that it
+// pastes into a file manager.
+func (d *Daemon) copyFile(path string) error {
+	if err := d.copyImage(path); !errors.Is(err, errNoImage) {
+		return err
+	}
+	uri := (&url.URL{Scheme: "file", Path: path}).String()
+	return d.clip.SetImage([]byte(uri+"\r\n"), "text/uri-list")
 }
 
 // handleShare receives a file, a text, or a URL.
@@ -356,8 +415,8 @@ const (
 // maxClipboardImage is the largest signature that fluxd puts on the clipboard.
 const maxClipboardImage = 16 << 20
 
-// pngMagic starts every PNG file.
-var pngMagic = []byte("\x89PNG\r\n\x1a\n")
+// errNoImage marks a file that copyImage does not put on the clipboard.
+var errNoImage = errors.New("no clipboard image")
 
 // destDir returns the folder for a received file of the kind.
 func destDir(cfg *config.Config, kind fileDest) string {
@@ -433,6 +492,16 @@ func (d *Daemon) receiveFile(dev *Device, l *lan.Link, p *proto.Packet, name str
 		title = "Photo from " + from
 	case destScreenshot:
 		title = "Screenshot from " + from
+		d.mu.Lock()
+		auto := d.cfg.AutoClipboard
+		d.mu.Unlock()
+		if auto {
+			if err := d.copyImage(t.Path); err != nil {
+				d.logf("copy screenshot %s: %v", t.Path, err)
+			} else {
+				body = "Copied to the clipboard. Saved as " + t.Path
+			}
+		}
 	case destSignature:
 		title = "Signature from " + from
 		if err := d.copyImage(t.Path); err != nil {
@@ -622,6 +691,21 @@ func (d *Daemon) cleanParts(dir string) {
 	}
 }
 
+// removeAllParts removes every temporary file of incoming transfers, also
+// the legacy .flux-received-* files. At start no transfer is running.
+func removeAllParts(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.Type().IsRegular() && strings.HasPrefix(name, partPrefix) && (strings.HasSuffix(name, partSuffix) || strings.HasPrefix(name, ".flux-received-")) {
+			os.Remove(filepath.Join(dir, name))
+		}
+	}
+}
+
 // removeStaleParts removes the temporary files of incoming transfers that
 // stopped more than 1 day ago. Only a crash of fluxd or a power loss
 // leaves such a file.
@@ -641,9 +725,10 @@ func removeStaleParts(dir string, now time.Time) {
 	}
 }
 
-// copyImage puts the PNG file at path on the clipboard, so that the user
-// can paste it at once. The file must be a PNG of at most
-// maxClipboardImage bytes.
+// copyImage puts the image file at path on the clipboard, so that the user
+// can paste it at once. The file must be an image of at most
+// maxClipboardImage bytes. For any other file, copyImage returns an error
+// that wraps errNoImage.
 func (d *Daemon) copyImage(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -655,12 +740,13 @@ func (d *Daemon) copyImage(path string) error {
 		return err
 	}
 	if len(data) > maxClipboardImage {
-		return fmt.Errorf("the image is larger than %d MiB", maxClipboardImage>>20)
+		return fmt.Errorf("%w: the image is larger than %d MiB", errNoImage, maxClipboardImage>>20)
 	}
-	if !bytes.HasPrefix(data, pngMagic) {
-		return errors.New("the file is not a PNG image")
+	mime := http.DetectContentType(data)
+	if !strings.HasPrefix(mime, "image/") {
+		return fmt.Errorf("%w: the file is not an image", errNoImage)
 	}
-	return d.clip.SetImage(data, "image/png")
+	return d.clip.SetImage(data, mime)
 }
 
 // saveScan writes text that the phone camera read into a new file in the

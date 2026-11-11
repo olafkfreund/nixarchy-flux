@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"flux/internal/config"
 	"flux/internal/proto"
@@ -55,22 +56,44 @@ func TestOutboxRestartAndResumableDelivery(t *testing.T) {
 	downloads := t.TempDir()
 	b := &Daemon{ctx: ctx, cfg: &config.Config{DownloadDir: downloads}, devices: map[string]*Device{deskID: peer},
 		resumeDir: t.TempDir(), logger: log.New(io.Discard, "", 0)}
-	go onDesk.Receive(func(p *proto.Packet) { a.handlePacket(dev, onDesk, p) })
+	replies := make(chan resumeMessage, 4)
+	go onDesk.Receive(func(p *proto.Packet) {
+		// a handles the packet first, so a reply that the test reads has
+		// already reached a's sender, and a stale one cannot arrive later.
+		a.handlePacket(dev, onDesk, p)
+		var reply resumeMessage
+		if p.Type == proto.TypeFluxTransfer && p.Decode(&reply) == nil {
+			select {
+			case replies <- reply:
+			default:
+			}
+		}
+	})
 	go onPhone.Receive(func(p *proto.Packet) { b.handlePacket(peer, onPhone, p) })
+	offerReply := func(offer resumeMessage) resumeMessage {
+		b.handleResumable(peer, onPhone, proto.New(proto.TypeFluxTransfer, offer))
+		select {
+		case reply := <-replies:
+			return reply
+		case <-time.After(5 * time.Second):
+			t.Fatal("resumable offer reply timed out")
+			return resumeMessage{}
+		}
+	}
 	j := a.outbox.jobs[ts[0].ID]
 	// Restore a partial file left by a previous receiver process.
 	offer := resumeMessage{Action: "offer", ID: j.ID, Name: j.Name, Size: j.Size, Hash: j.Hash}
-	if _, err := b.receiveResumable(peer, onPhone, proto.New(proto.TypeFluxTransfer, nil), offer); err != nil {
-		t.Fatal(err)
+	if reply := offerReply(offer); reply.Action != "offset" || reply.Offset != 0 {
+		t.Fatal(reply)
 	}
 	key := sha256.Sum256([]byte(deskID + ":" + j.ID))
 	part := filepath.Join(b.resumeDir, hex.EncodeToString(key[:]), "data")
 	if err := os.WriteFile(part, want[:4096], 0o600); err != nil {
 		t.Fatal(err)
 	}
-	resume, err := b.receiveResumable(peer, onPhone, proto.New(proto.TypeFluxTransfer, nil), offer)
-	if err != nil || resume.Offset != 4096 {
-		t.Fatalf("resume: %+v %v", resume, err)
+	resume := offerReply(offer)
+	if resume.Action != "offset" || resume.Offset != 4096 {
+		t.Fatalf("resume: %+v", resume)
 	}
 	a.sendOutbox(ctx, j)
 	got, err := os.ReadFile(filepath.Join(downloads, "sample.bin"))
@@ -81,10 +104,12 @@ func TestOutboxRestartAndResumableDelivery(t *testing.T) {
 		t.Fatal("delivery was not acknowledged")
 	}
 	// A lost final acknowledgement must not create a second destination.
-	ack, err := b.receiveResumable(peer, onPhone, proto.New(proto.TypeFluxTransfer, nil),
-		resumeMessage{Action: "offer", ID: j.ID, Name: j.Name, Size: j.Size, Hash: j.Hash})
-	if err != nil || ack.Action != "done" {
-		t.Fatalf("repeat: %+v, %v", ack, err)
+	for len(replies) > 0 {
+		<-replies
+	}
+	ack := offerReply(offer)
+	if ack.Action != "done" {
+		t.Fatalf("repeat: %+v", ack)
 	}
 	files, _ := os.ReadDir(downloads)
 	if len(files) != 1 {

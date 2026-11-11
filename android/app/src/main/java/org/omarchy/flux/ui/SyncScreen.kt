@@ -1,6 +1,8 @@
 package org.omarchy.flux.ui
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Intent
 import android.os.Build
@@ -15,11 +17,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,6 +47,7 @@ import org.omarchy.flux.core.FluxCore
 import org.omarchy.flux.core.NotificationSync
 import org.omarchy.flux.core.SmsSync
 import org.omarchy.flux.core.UiState
+import org.omarchy.flux.net.TsnetNode
 import org.omarchy.flux.service.FluxNotificationListener
 
 /** 1 sync switch: what it does, and its state. [key] names the switch, so that a refused permission shows under it. */
@@ -119,6 +128,13 @@ fun SyncScreen(state: UiState, onBack: () -> Unit) {
             refuse(SMS, "Text messages need SMS access. Allow it in the app settings.")
         }
     }
+    // Without the contacts, the computers show the numbers of the
+    // conversations. Android does not ask again after the user refused
+    // twice, so the notice then opens the app settings.
+    val askContacts = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        FluxCore.refresh()
+        if (granted) clearRefused() else refuse(SMS, "Names need access to the contacts. Allow Contacts in the app settings.")
+    }
     // The first capture switch that turns on asks for access to photos.
     var asking by remember { mutableStateOf<CaptureKind?>(null) }
     val askPhotos = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -178,7 +194,12 @@ fun SyncScreen(state: UiState, onBack: () -> Unit) {
         // A tablet without a SIM slot has no text messages.
         if (state.smsSupported) {
             add(SyncItem(SMS, Ic.sms, "Text messages", "Shows text messages on the computers, and sends the replies from them.", state.smsSync && state.smsAccess) {
-                if (!state.smsAccess) askSms.launch(SmsSync.permissions()) else FluxCore.setSyncSms(!state.smsSync)
+                when {
+                    !state.smsAccess -> askSms.launch(SmsSync.permissions())
+                    // Access to SMS can come from the app settings. The switch then asks for the contacts.
+                    !state.smsSync && !state.contactsAccess -> askSms.launch(arrayOf(Manifest.permission.READ_CONTACTS))
+                    else -> FluxCore.setSyncSms(!state.smsSync)
+                }
             })
         }
         add(
@@ -215,9 +236,104 @@ fun SyncScreen(state: UiState, onBack: () -> Unit) {
                 SyncRow(s)
                 // The notice shows under the switch that asked, where the user looks after the tap.
                 val text = refused
-                if (text != null && refusedKey == s.key) PermissionNotice(text)
+                if (text != null && refusedKey == s.key) {
+                    PermissionNotice(text)
+                } else if (s.key == SMS && state.smsSync && state.smsAccess && !state.contactsAccess) {
+                    ContactsNotice { askContacts.launch(Manifest.permission.READ_CONTACTS) }
+                }
             }
         }
+        RemoteAccessSection(state)
+    }
+}
+
+/**
+ * The userspace tailnet node. It lets a paired computer reach this phone
+ * away from home without a VPN app, so another VPN keeps the VPN slot.
+ */
+@Composable
+private fun RemoteAccessSection(state: UiState) {
+    val context = LocalContext.current
+    val nodeState by TsnetNode.state.collectAsState()
+    var showKey by rememberSaveable { mutableStateOf(false) }
+    var keyText by rememberSaveable { mutableStateOf("") }
+
+    fun askKey() {
+        keyText = ""
+        showKey = true
+    }
+    fun toggle() {
+        if (!state.remoteAccess && !state.tailnetKeySet) askKey()
+        else FluxCore.setRemoteAccess(!state.remoteAccess)
+    }
+
+    val detail = when (val n = nodeState) {
+        is TsnetNode.State.Ready -> "Address ${n.address}. Add it as an extra address on the computer."
+        is TsnetNode.State.Starting -> "Connecting to the tailnet."
+        is TsnetNode.State.Failed -> n.reason
+        else -> if (state.tailnetKeySet) "Reach this phone away from home without a VPN app." else "Needs a tailnet auth key."
+    }
+
+    Column(Modifier.padding(top = 24.dp), verticalArrangement = Arrangement.spacedBy(TileGap)) {
+        SyncRow(SyncItem("remote", Ic.link, "Remote access", detail, state.remoteAccess) { toggle() })
+        if (state.remoteAccess) {
+            val address = (nodeState as? TsnetNode.State.Ready)?.address
+            if (address != null) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    T(address, Modifier.weight(1f), size = 14)
+                    TextButton(onClick = {
+                        val clipboard = context.getSystemService(ClipboardManager::class.java)
+                        clipboard?.setPrimaryClip(ClipData.newPlainText("Flux tailnet address", address))
+                        FluxCore.toast("Copied the tailnet address")
+                    }) { Text("Copy") }
+                }
+            }
+            TextButton(onClick = { askKey() }) { Text("Change key") }
+        }
+    }
+
+    if (showKey) {
+        AlertDialog(
+            onDismissRequest = { showKey = false },
+            title = { Text("Tailnet auth key") },
+            text = {
+                OutlinedTextField(
+                    value = keyText,
+                    onValueChange = { keyText = it },
+                    label = { Text("tskey-auth-...") },
+                    singleLine = false,
+                    minLines = 3,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = keyText.isNotBlank(),
+                    onClick = {
+                        FluxCore.setTailnetAuthKey(keyText)
+                        if (!state.remoteAccess) FluxCore.setRemoteAccess(true)
+                        showKey = false
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { showKey = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+/**
+ * Shows under Text messages while Flux cannot read the contacts. The
+ * computers then show the numbers of the conversations. [onAllow] asks
+ * for the contacts.
+ */
+@Composable
+private fun ContactsNotice(onAllow: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        T("The computers show numbers in place of names. Allow access to the contacts to show the names.", size = 13, color = Tn.sub, lineHeight = 1.3f)
+        FluxButton("Allow contacts", onAllow, Modifier.offset(x = (-12).dp), kind = ButtonKind.Text)
     }
 }
 

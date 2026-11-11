@@ -8,13 +8,13 @@ import (
 	"strings"
 )
 
-// HelperPath is the PAM helper that the package installs.
-const HelperPath = "/usr/lib/flux/flux-approve"
+// HelperPath is the PAM helper that the package installs. Nix builds set it with -ldflags -X.
+var HelperPath = "/usr/lib/flux/flux-approve"
 
 // PAMLine is the line that turns approvals on in a PAM file. sufficient
 // means that an approval ends the auth stack, and that any other result
 // goes on to the next rule, so the password still works.
-const PAMLine = "auth sufficient pam_exec.so quiet stdout " + HelperPath
+func PAMLine() string { return "auth sufficient pam_exec.so quiet stdout " + HelperPath }
 
 // pamComment goes above PAMLine, so that a reader knows where the line
 // comes from and how to remove it.
@@ -45,7 +45,7 @@ func AddPAMLine(text string) (string, bool, error) {
 		f := strings.Fields(l)
 		if len(f) > 0 && (f[0] == "auth" || f[0] == "-auth") {
 			out := append([]string{}, lines[:i]...)
-			out = append(out, pamComment, PAMLine)
+			out = append(out, pamComment, PAMLine())
 			out = append(out, lines[i:]...)
 			return strings.Join(out, "\n"), true, nil
 		}

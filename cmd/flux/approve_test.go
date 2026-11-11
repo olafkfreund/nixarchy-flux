@@ -44,6 +44,25 @@ func TestSudoUserRefusesRoot(t *testing.T) {
 	}
 }
 
+func TestNixApprovePAMGuards(t *testing.T) {
+	packager = "nix"
+	t.Cleanup(func() { packager = "" })
+	for _, tc := range []struct {
+		name string
+		run  func([]string) error
+	}{
+		{"enable", approveEnable},
+		{"disable", approveDisable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run([]string{"sudo"})
+			if err == nil || !strings.Contains(err.Error(), "services.flux.approve.services") {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
 func TestCheckHelperRefusesWritableHelper(t *testing.T) {
 	dir := t.TempDir()
 	if err := checkHelper(filepath.Join(dir, "missing")); err == nil || !strings.Contains(err.Error(), "not installed") {

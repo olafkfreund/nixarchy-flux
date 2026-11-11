@@ -27,6 +27,9 @@ import (
 )
 
 var version = "dev"
+var packager = "" // "nix" when built by the flake
+
+func nixBuild() bool { return packager == "nix" }
 
 const usage = `Usage: flux-cli [command] [--device NAME] [args]
 
@@ -35,9 +38,12 @@ Commands:
                          enabled, else flux-gui. Pages: overview, clipboard, files,
                          notifications, messages, commands
   status [--json]        Show this computer and the known devices
-  discover               Broadcast this computer on the network now
+  discover               Broadcast this computer and find the devices again
   pair DEVICE            Ask a device to pair, show the verification key, and
                          ask you to confirm it
+  pair --address HOST[:PORT]
+                         Connect to the device at an IP address or a host name,
+                         without discovery, then pair as above
   accept DEVICE [KEY]    Accept a pair request, or confirm a pairing that the
                          device accepted. With KEY, only the pairing with that key.
                          Without KEY, show the key and ask you to compare it
@@ -46,7 +52,7 @@ Commands:
   unpair DEVICE          Remove a paired device
   addresses              List the extra addresses of the paired devices
   addresses add HOST     Add a host name or IP address, for example the Tailscale
-                         name of the phone. fluxd tries it while the device is offline
+                         name or the ZeroTier address of the phone. fluxd tries it while the device is offline
   addresses remove HOST  Remove an extra address
   ring                   Ring the phone
   ping [MESSAGE]         Send a ping
@@ -62,7 +68,7 @@ Commands:
                          Ongoing notifications, such as a media player, stay
   notification-rules     List rules. Actions: add APP MODE [DURATION], quiet START END, remove ID
   device-settings [KEY true|false|inherit]  Set access for the selected device
-  automation [add EVENT COMMAND_ID [BELOW]|remove ID]  Manage local event rules
+  automation [add EVENT COMMAND_ID [NUMBER]|remove ID]  Manage local event rules
   notify TITLE [BODY]    Show a notification on the phone
   notify --run -- CMD…   Run CMD, then show on the phone how it ended. Exits with
                          the exit code of CMD. The phone gets only the program
@@ -78,6 +84,10 @@ Commands:
   webcam reset           Set the phone camera back to the neutral values
   mic [stop]             Show the phone microphone state, or stop the phone microphone
   mic start              Ask the phone to start its microphone. You confirm on the phone
+  speaker [stop]         Show whether the phone plays the audio of this computer,
+                         or stop it
+  speaker start          Ask the phone to play the audio of this computer. You
+                         confirm on the phone
   screen [stop]          Show the phone screen mirror state, or stop the mirror
   desktop [stop]         Show whether a phone shows this screen, or stop it
   desktop on|off         Let a paired phone or Mac show this screen, or stop that
@@ -98,8 +108,16 @@ Commands:
   approve enable [SVC…]  Turn approval on in PAM for an enrolled phone. Run it with sudo.
   approve disable [SVC…] Turn approval off in PAM. Run it with sudo.
   approve remove         Delete the phone key and turn approval off. Run it with sudo.
+  ssh [key|socket] [--json]  Print the SSH key of each connected phone for
+                         authorized_keys, and the ssh-agent socket. key prints
+                         only the keys, and socket only the path
   watch                  Print each state change as one JSON line
-  setup [--dry-run]      Start fluxd for this user and add the omarchy-shell plugin
+  setup [--dry-run]      Start fluxd for this user, add the omarchy-shell plugin, and
+                         let the browser extension talk to fluxd. Options: --dry-run,
+                         --no-plugin, --no-browser
+  browser install        Let the browser extension talk to fluxd, in the browsers of
+                         this user
+  browser remove         Remove those host manifests
   off                    Stop fluxd, and do not start it at login
   on                     Start fluxd, and start it at each login
   doctor                 Check the setup and print the fixes
@@ -126,7 +144,11 @@ func main() {
 	case "discover":
 		err = call("discover", nil)
 	case "pair":
-		err = pair(need(args, "DEVICE"))
+		if addr, ok := addressArg(args); ok {
+			err = pairAddress(addr)
+		} else {
+			err = pair(need(args, "DEVICE"))
+		}
 	case "accept":
 		name := need(args, "DEVICE")
 		err = accept(name, keyArg(args[1:]))
@@ -180,6 +202,8 @@ func main() {
 		err = webcam(args, device)
 	case "mic":
 		err = mic(args, device)
+	case "speaker":
+		err = speaker(args, device, os.Stdout)
 	case "screen":
 		err = screen(args)
 	case "desktop":
@@ -192,6 +216,8 @@ func main() {
 		err = motion(args, device)
 	case "approve":
 		err = approveCmd(args, device)
+	case "ssh":
+		err = sshCmd(args, device)
 	case "watch":
 		err = watch()
 	case "off":
@@ -200,6 +226,8 @@ func main() {
 		err = power(true)
 	case "setup":
 		err = setup(args)
+	case "browser":
+		err = browser(args)
 	case "doctor":
 		doctor()
 	case "update":
@@ -466,6 +494,31 @@ func pair(device string) error {
 		in = os.Stdin
 	}
 	return waitPair(c, in, os.Stdout, res)
+}
+
+// addressArg returns the address of flux-cli pair --address ADDRESS or
+// --address=ADDRESS.
+func addressArg(args []string) (string, bool) {
+	switch {
+	case len(args) == 0:
+		return "", false
+	case args[0] == "--address":
+		return need(args[1:], "ADDRESS"), true
+	case strings.HasPrefix(args[0], "--address="):
+		return strings.TrimPrefix(args[0], "--address="), true
+	}
+	return "", false
+}
+
+// pairAddress connects to the device at addr without discovery, then asks
+// it to pair as pair does.
+func pairAddress(addr string) error {
+	fmt.Printf("Connecting to %s…\n", addr)
+	var res pairResult
+	if err := callInto("pair.address", map[string]any{"address": addr}, &res); err != nil {
+		return err
+	}
+	return pair(res.Device)
 }
 
 // pairClient is the part of ipc.Client that waitPair uses.

@@ -61,6 +61,12 @@ type Config struct {
 	// RemoteDesktop lets the phone show the screen of this computer. It is
 	// off by default. The touches on the screen also need RemoteInput.
 	RemoteDesktop bool `toml:"remote_desktop"`
+	// PairRequests lets a device on the network ask this computer to pair.
+	// With false, fluxd refuses each pair request, and a pairing starts on
+	// this computer, with flux-cli pair or the Flux window. Then a device
+	// that the user did not pick cannot show a pair request here. It is on
+	// by default.
+	PairRequests bool `toml:"pair_requests"`
 	// MotionCues lets a paired phone send its acceleration, so that the
 	// omarchy-shell plugin shows motion cues for a passenger. It is off by
 	// default.
@@ -93,6 +99,39 @@ type Config struct {
 	Devices           map[string]map[string]bool `toml:"devices,omitempty"`
 	NotificationRules []NotificationRule         `toml:"notification_rules,omitempty"`
 	AutomationRules   []AutomationRule           `toml:"automation_rules,omitempty"`
+
+	// RemoteDesktopEncoder selects the video encoder of the remote
+	// desktop: "auto" or empty for the GPU with a CPU fallback, "gpu" for
+	// the GPU only, and "cpu" for the CPU. Some older GPUs, such as AMD
+	// Polaris, hang when their encoder starts, so "cpu" keeps the stream
+	// off the GPU encoder.
+	RemoteDesktopEncoder string `toml:"remote_desktop_encoder,omitempty"`
+}
+
+// Encoders are the values of remote_desktop_encoder.
+const (
+	EncoderAuto = "auto"
+	EncoderGPU  = "gpu"
+	EncoderCPU  = "cpu"
+)
+
+// Encoder returns the remote desktop encoder: EncoderAuto, EncoderGPU, or
+// EncoderCPU. An empty value is EncoderAuto.
+func (c *Config) Encoder() string {
+	if c == nil || c.RemoteDesktopEncoder == "" {
+		return EncoderAuto
+	}
+	return c.RemoteDesktopEncoder
+}
+
+// validateEncoder returns an error for a remote_desktop_encoder value that
+// fluxd does not know.
+func (c *Config) validateEncoder() error {
+	switch c.RemoteDesktopEncoder {
+	case "", EncoderAuto, EncoderGPU, EncoderCPU:
+		return nil
+	}
+	return fmt.Errorf("%s: remote_desktop_encoder must be auto, gpu, or cpu, not %q", Path(), c.RemoteDesktopEncoder)
 }
 
 const (
@@ -202,6 +241,10 @@ func SocketPath() string {
 	return filepath.Join(RuntimeDir(), "fluxd.sock")
 }
 
+// SSHAgentPath returns the path of the ssh-agent socket of fluxd:
+// ssh-agent.sock in RuntimeDir. A client sets SSH_AUTH_SOCK to it.
+func SSHAgentPath() string { return filepath.Join(RuntimeDir(), "ssh-agent.sock") }
+
 func xdg(env, fallback string) string {
 	if d := os.Getenv(env); d != "" {
 		return d
@@ -219,7 +262,7 @@ var mu sync.Mutex
 func Load() (*Config, error) {
 	mu.Lock()
 	defer mu.Unlock()
-	c := &Config{AutoClipboard: true, Notifications: true, ShareHome: true, PauseMediaOnCall: true, SyncDnd: true, Herdr: true, CheckUpdates: true, MotionAuto: true}
+	c := &Config{AutoClipboard: true, Notifications: true, ShareHome: true, PauseMediaOnCall: true, SyncDnd: true, Herdr: true, PairRequests: true, CheckUpdates: true, MotionAuto: true}
 	data, err := os.ReadFile(Path())
 	if errors.Is(err, os.ErrNotExist) {
 		c.Commands = []Command{}
@@ -232,6 +275,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", Path(), err)
 	}
 	if err := c.ValidateRules(); err != nil {
+		return nil, err
+	}
+	if err := c.validateEncoder(); err != nil {
 		return nil, err
 	}
 	setCommandIDs(c.Commands)
@@ -275,7 +321,7 @@ func Check() error {
 	if _, err := toml.Decode(string(data), &c); err != nil {
 		return fmt.Errorf("%s: %w", Path(), err)
 	}
-	return nil
+	return c.validateEncoder()
 }
 
 // Save writes config.toml.

@@ -189,6 +189,7 @@ fun FluxShell(
     val toComputers = { go(Nav(Tab.Computers)) }
     val toSync = { open(Route(null, SYNC_PAGE)) }
     val toAbout = { open(Route(null, ABOUT_PAGE)) }
+    val toSsh = { open(Route(null, SSH_PAGE)) }
     // The same intent as Approvals.show: the screen opens in its own task, and Android reuses a screen that waits there.
     val approve: (ApproveRequest) -> Unit = { r ->
         if (isDemo(r.computerId)) {
@@ -265,7 +266,7 @@ fun FluxShell(
                                     ChatsScreen(state, active, notices(null), actions, picker)
                                 }
                                 Tab.Control -> ControlScreen(state, scope, onScope, picker, onOpen = ::open, onPair = toComputers)
-                                Tab.Computers -> ComputersScreen(state, scope, onScope, onPair, onUnpair, onSync = toSync, onAbout = toAbout)
+                                Tab.Computers -> ComputersScreen(state, scope, onScope, onPair, onUnpair, onSync = toSync, onSsh = toSsh, onAbout = toAbout)
                             }
                         }
                     }
@@ -515,6 +516,7 @@ private fun DetailScreen(route: Route, state: UiState, current: () -> Nav, go: (
         when (route.page) {
             SYNC_PAGE -> SyncScreen(state, pop)
             ABOUT_PAGE -> AboutScreen(pop)
+            SSH_PAGE -> SshKeyScreen(pop)
         }
         return
     }
@@ -539,8 +541,9 @@ private fun DetailScreen(route: Route, state: UiState, current: () -> Nav, go: (
             if (nav.stack.lastOrNull() == route) go(nav.replaceTop(Route(id, if (what == "terminal") "$TERMINAL_PAGE$pane" else "$AGENT_PAGE$pane")))
         }
         page == "browse" -> BrowseScreen(device, state.browse, pop)
-        page == "touchpad" -> TouchpadScreen(device, pop)
+        page == "touchpad" -> TouchpadScreen(device, state.touchpadScroll, pop)
         page == "desktop" -> DesktopScreen(device, pop)
+        page == EXTEND_PAGE -> DesktopScreen(device, pop, extend = true)
         page == OMARCHY_PAGE -> OmarchyScreen(device, pop)
         // The Webcam was a mode of the camera. Debug builds still open it with "camera:webcam".
         page == WEBCAM_PAGE || page == "camera:webcam" -> WebcamScreen(device, pop)
