@@ -7,6 +7,7 @@ import (
 	"net"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"flux/internal/hc"
@@ -46,6 +47,20 @@ func TestHerdrAppIDs(t *testing.T) {
 	}
 	if herdrApp("w5:p1") || herdrApp("omarchy/w5:p1") {
 		t.Fatal("a herdr pane counts as the herdr app")
+	}
+}
+
+// TestHerdrAppDirRefusesRemote checks that a review of an agent on another
+// machine never reads a local folder: the path is a path on that machine.
+// hcPath does not exist, so asking herdr-core at all would fail differently.
+func TestHerdrAppDirRefusesRemote(t *testing.T) {
+	d := &Daemon{hcPath: filepath.Join(t.TempDir(), "none.sock")}
+	dir, err := d.herdrAgentDir(context.Background(), "herdr-app/yoga/t1")
+	if dir != "" || err == nil || !strings.Contains(err.Error(), "another machine") {
+		t.Fatalf("remote agent: dir %q, err %v", dir, err)
+	}
+	if _, err := d.herdrAgentDir(context.Background(), "herdr-app/t1"); err == nil || strings.Contains(err.Error(), "another machine") {
+		t.Fatalf("a local agent must ask herdr-core, err %v", err)
 	}
 }
 

@@ -268,7 +268,13 @@ func (d *Daemon) herdrAppInput(ctx context.Context, pane, text string, keys []st
 
 // herdrAppDir returns the project folder of an agent in the herdr app.
 func (d *Daemon) herdrAppDir(ctx context.Context, pane string) (string, error) {
-	t, err := hc.Get(ctx, d.hcPath, herdrAppAddress(pane))
+	addr := herdrAppAddress(pane)
+	// machine/t7 is a terminal on another machine, and its folder is a path
+	// there. A review reads this computer, so it would show other files.
+	if strings.Contains(addr, "/") {
+		return "", herdrRefusal("A review of an agent on another machine is not supported")
+	}
+	t, err := hc.Get(ctx, d.hcPath, addr)
 	if err != nil {
 		return "", err
 	}
