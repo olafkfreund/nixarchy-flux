@@ -129,9 +129,10 @@ jobs:
       contents: read
     env:
       BUILD_TOOLS: '36.0.0'
-      # The SHA-256 digest of the Flux release certificate. Android installs
-      # an update only with the certificate of the installed app. Change the
-      # value only for a planned key rotation.
+      # The SHA-256 digest of the fork's Android release certificate (see
+      # docs/releasing.md). Android installs an update only with the
+      # certificate of the installed app. Change the value only for a planned
+      # key rotation.
       CERT_SHA256: a9af3fb3886f2c7cf4e2c9d93824aed23314d4e4fb36a364373064aa11700884
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -468,17 +469,3 @@ jobs:
           fi
           gh release upload "$TAG" release/* --clobber
           gh release edit "$TAG" --draft=false --latest="$LATEST"
-
-  # AUR gets only the highest stable version. aur.yml also refuses a
-  # downgrade.
-  aur:
-    needs: [version, files, publish]
-    if: vars.AUR_PUBLISH == 'true' && needs.files.outputs.latest == 'true'
-    uses: ./.github/workflows/aur.yml
-    with:
-      tag: ${{ needs.version.outputs.tag }}
-    secrets:
-      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-      AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
-      AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
-      AUR_KNOWN_HOSTS: ${{ secrets.AUR_KNOWN_HOSTS }}
