@@ -339,11 +339,15 @@ func waitRelease(t *testing.T, d *Daemon, want string) {
 func TestSendAppUnpaired(t *testing.T) {
 	body := []byte("apk")
 	sum := sha256.Sum256(body)
+	sumsText := []byte(hex.EncodeToString(sum[:]) + "  flux-android-0.7.0.apk\n")
+	sig, err := release.Sign(sumsText, release.UseTestKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/flux-android-0.7.0.apk", func(w http.ResponseWriter, r *http.Request) { w.Write(body) })
-	mux.HandleFunc("/SHA256SUMS", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(hex.EncodeToString(sum[:]) + "  flux-android-0.7.0.apk\n"))
-	})
+	mux.HandleFunc("/SHA256SUMS", func(w http.ResponseWriter, r *http.Request) { w.Write(sumsText) })
+	mux.HandleFunc("/SHA256SUMS.sig", func(w http.ResponseWriter, r *http.Request) { w.Write(sig) })
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -359,7 +363,7 @@ func TestSendAppUnpaired(t *testing.T) {
 	if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r := releaseInfo{Version: "0.7.0", APK: srv.URL + "/flux-android-0.7.0.apk", Sums: srv.URL + "/SHA256SUMS",
+	r := releaseInfo{Version: "0.7.0", APK: srv.URL + "/flux-android-0.7.0.apk", Sums: srv.URL + "/SHA256SUMS", Sig: srv.URL + "/SHA256SUMS.sig",
 		APKName: "flux-android-0.7.0.apk", APKSize: int64(len(body))}
 	d.sendApp(&Device{Name: "phone", App: "android", AppVersion: "0.6.0"}, r, "0.7.0", "phone")
 

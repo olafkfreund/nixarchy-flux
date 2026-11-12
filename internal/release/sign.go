@@ -16,6 +16,20 @@ const PublicKey = "YDs0bELLTbFCbPSnt2GTaJJbmSCgoIb735p/cZTTF1U="
 // releaseKey is the key that Fetch uses. Tests change it.
 var releaseKey = PublicKey
 
+// UseTestKey makes Fetch check signatures with a new key until t ends, and
+// returns the seed of that key for Sign. Tests in other packages call it,
+// because no test has the private key of PublicKey.
+func UseTestKey(t interface{ Cleanup(func()) }) string {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		panic(err)
+	}
+	old := releaseKey
+	releaseKey = base64.StdEncoding.EncodeToString(pub)
+	t.Cleanup(func() { releaseKey = old })
+	return base64.StdEncoding.EncodeToString(priv.Seed())
+}
+
 // Signed reports whether this build checks the signature of SHA256SUMS.
 func Signed() bool { return releaseKey != "" }
 
