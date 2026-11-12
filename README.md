@@ -137,7 +137,7 @@ make android
 GitHub Actions builds the complete Arch package, the Android APKs, and the macOS and iOS apps for each push to the `master` branch.
 Pull requests run no build.
 Stable version tags produce a signed APK, an Arch package, an AUR recipe, an ad hoc signed macOS app, an unsigned iOS app for sideload tools, and checksums.
-The optional AUR job publishes the tested recipe after the GitHub release succeeds.
+This fork does not publish to AUR.
 
 On a Mac with Xcode and XcodeGen, test, build, and install the macOS app:
 

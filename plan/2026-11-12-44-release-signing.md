@@ -68,6 +68,8 @@ everywhere.
 | R2 | 4 | After the clone, `README.md:69` and `docs/install.md:31` run `cd nixarchy-flux` instead of `cd flux`. | The clone URL now creates a `nixarchy-flux` folder. |
 | R3 | 4 | `docs/install.md`: the update text drops the `yay` fallback and the line about skipping the signature check. "Install from AUR" is replaced by a short note that the AUR package is upstream's, and "Update an AUR install" is removed. | Steps 1-2 and the no-AUR decision make that text wrong. The spec listed only the links in this file. |
 | R4 | 5 | `docs/releasing.md`: cross-references use the guide's own section links instead of the spec's step numbers. The leftover "AUR job fails" paragraph is removed. | agy copied the spec's step numbers, which the guide does not have. |
+| R5 | 5 | `docs/releasing.md`: the Arch desktop step downloads `*.pkg.tar.zst` and gives the `pacman -U` command. `<public key>` becomes `PUBLIC_KEY`. A sentence with stray parentheses is reworded. | The first-install download fetches only the APK. `<public` is a shell redirection. Found by the lead and in agy's diff review. |
+| R6 | 4 | `docs/install.md`: the upstream certificate digest literal is replaced by a pointer to `CERT_SHA256`, and the "while that value is empty" line is removed. Also changed: `README.md:140` (AUR job), `docs/troubleshooting.md:126` (no-key text), and an "uninstall upstream's app first" note next to both `adb install -r` lines. | Found in agy's diff review. Without it, step 7's `! grep -rn a9af3fb3 .github docs` would fail, and users would compare the APK with upstream's certificate. |
 
 ## Steps
 

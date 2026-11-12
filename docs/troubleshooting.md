@@ -123,7 +123,6 @@ When a check fails, it installs nothing and prints the cause:
 | `SHA256SUMS.sig does not match SHA256SUMS and the release key, so Flux does not trust this release` | Do not install the release. Report it to the maintainer. |
 | `the SHA-256 checksum of FILE is …, and SHA256SUMS gives …` | The download is damaged. Run `flux-cli update` again. |
 
-A `flux-cli` without a release key checks only `SHA256SUMS` and says so.
 See [check a release](install.md#check-a-release) to check the files by hand.
 
 ## The phone does not appear
@@ -207,7 +206,7 @@ When the old app announces itself, `fluxd` logs `runs a Flux app older than 0.8`
 `flux-cli status` and `flux-cli doctor` then name the phone.
 Install the latest app from the [releases](https://github.com/olafkfreund/nixarchy-flux/releases/latest).
 On Android, [install it with adb](android-setup.md#install-with-adb).
-`adb install -r` keeps the app data, so the phone stays paired.
+`adb install -r` keeps the app data, so the phone stays paired. An app from upstream's releases has another certificate: uninstall it first, see [first install on each phone and tablet](releasing.md#first-install-on-each-phone-and-tablet).
 
 ## A device does not find the computer after an update
 
@@ -218,7 +217,7 @@ On an Android phone, an iPhone, or a Mac, such an app does not find the computer
 
 Install the latest app on each device from the [releases](https://github.com/olafkfreund/nixarchy-flux/releases/latest).
 On Android, [install it with adb](android-setup.md#install-with-adb).
-`adb install -r` keeps the app data, so the phone stays paired.
+`adb install -r` keeps the app data, so the phone stays paired. An app from upstream's releases has another certificate: uninstall it first, see [first install on each phone and tablet](releasing.md#first-install-on-each-phone-and-tablet).
 On an iPhone, [install the release with a sideload tool](ios.md#install-a-release-with-a-sideload-tool).
 
 ## A pairing from the computer stops after the phone accepts

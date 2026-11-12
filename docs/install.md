@@ -99,7 +99,6 @@ It does not show who made the release, because the same release gives the file a
 The signature in `SHA256SUMS.sig` shows that the Flux release workflow made `SHA256SUMS`.
 
 To check the signature, you need the public release key: the value of `PublicKey` in [`internal/release/sign.go`](../internal/release/sign.go).
-While that value is empty, the releases have no key to check.
 From the download directory, replace `KEY` with the public key and run:
 
 ```sh
@@ -122,11 +121,8 @@ For a first install of `flux-android-VERSION.apk`, compare its certificate with 
 apksigner verify --print-certs flux-android-0.1.0.apk
 ```
 
-The line `Signer #1 certificate SHA-256 digest` must show:
-
-```text
-a9af3fb3886f2c7cf4e2c9d93824aed23314d4e4fb36a364373064aa11700884
-```
+The line `Signer #1 certificate SHA-256 digest` must show the value of `CERT_SHA256` in [`.github/workflows/release.yml`](../.github/workflows/release.yml).
+A phone with upstream's Flux app has another certificate, so uninstall that app first, see [first install on each phone and tablet](releasing.md#first-install-on-each-phone-and-tablet).
 
 ## Build and install directly
 

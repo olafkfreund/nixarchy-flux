@@ -204,7 +204,7 @@ The [release environment](#release-environment) and the rulesets protect the wor
 
 ## First release (v0.20.0)
 
-Do this only after ([Release environment](#release-environment), [Android release key](#android-release-key), and [Release signing key](#release-signing-key)), and after `PublicKey` and `CERT_SHA256` are on `master`:
+Do this only after the [release environment](#release-environment), the [Android release key](#android-release-key) and the [release signing key](#release-signing-key) are set up, and after `PublicKey` and `CERT_SHA256` are on `master`:
 
 1. Tag `v0.20.0` on `master`.
 2. Approve both jobs (`apk-sign` and `sign`).
@@ -218,7 +218,7 @@ Do this only after ([Release environment](#release-environment), [Android releas
    gh release download -R olafkfreund/nixarchy-flux v0.20.0 -D "$dir" -p 'SHA256SUMS*' -p '*.apk'
    ```
 
-2. Run `go run ./scripts/signsums verify "$dir/SHA256SUMS" <public key>`, then `(cd "$dir" && sha256sum --check --ignore-missing SHA256SUMS)`.
+2. Run `go run ./scripts/signsums verify "$dir/SHA256SUMS" PUBLIC_KEY`, with `PUBLIC_KEY` replaced by the key kept in 1Password, then `(cd "$dir" && sha256sum --check --ignore-missing SHA256SUMS)`.
 3. Run `apksigner verify --print-certs "$dir/flux-android-0.20.0.apk"`.
    Compare `Signer #1 certificate SHA-256 digest` with the digest kept in 1Password (see [Android release key](#android-release-key)). **Don't use the `android-certificate.txt` from the same download.**
 4. Only then uninstall upstream's Flux on the device.
@@ -228,7 +228,12 @@ Do this only after ([Release environment](#release-environment), [Android releas
 ## Desktops
 
 - A NixOS desktop rebuilds from a `master` that contains this change. Its fluxd has the key before it reads a fork release.
-- An Arch desktop on upstream's package installs the fork's v0.20.0 package once by hand, after the same checks as steps 1-2 of the [first install](#first-install-on-each-phone-and-tablet), with `sudo pacman -U`.
+- An Arch desktop on upstream's package installs the fork's v0.20.0 package once by hand.
+  Download it with steps 1-2 of the [first install](#first-install-on-each-phone-and-tablet), with `-p '*.pkg.tar.zst'` instead of `-p '*.apk'`, and install it after both checks pass:
+
+  ```sh
+  sudo pacman -U "$dir"/omarchy-flux-0.20.0-*-x86_64.pkg.tar.zst
+  ```
 
 ## Later releases
 
@@ -405,7 +410,6 @@ Test the upgrade from the previous release on a computer with a paired phone:
 `fluxd` restarts about 10 seconds after the install.
 The release check of an installed `fluxd` finds the new release within 1 day.
 To see the offer at once, run `flux-cli update --check`.
-
 
 ## TestFlight
 
