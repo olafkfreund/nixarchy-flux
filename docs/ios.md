@@ -75,7 +75,7 @@ Each release attaches `flux-ios-VERSION.ipa`. The app in it has no signature.
 A sideload tool such as AltStore, SideStore, or Sideloadly signs it with your Apple ID and installs it.
 The limits of a free Apple ID in the table above also apply.
 The window on the computer shows an update notice only for the Android app.
-To find a newer iPhone app, check `https://github.com/bjarneo/flux/releases`.
+To find a newer iPhone app, check `https://github.com/olafkfreund/nixarchy-flux/releases`.
 Flux 0.10.1 and earlier use other ports, see [Pair an iPhone](#pair-an-iphone).
 An iPhone app of 0.10.1 or earlier cannot connect to a newer `fluxd`, and a newer iPhone app cannot connect to an earlier `fluxd`.
 Update the iPhone app and `fluxd` together.

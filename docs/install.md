@@ -27,8 +27,8 @@ The macOS app requires macOS 14 or later.
 ## Clone the repository
 
 ```sh
-git clone https://github.com/bjarneo/flux.git
-cd flux
+git clone https://github.com/olafkfreund/nixarchy-flux.git
+cd nixarchy-flux
 ```
 
 ## Install the Arch package from your checkout
@@ -74,18 +74,11 @@ So another account does not announce this computer on the network.
 The package recipe supports `x86_64` and `aarch64` source builds.
 GitHub Actions currently produces an `x86_64` binary package.
 
-## Install from AUR
+## AUR
 
-After the maintainer publishes `omarchy-flux` to AUR, install it with:
-
-```sh
-yay -S omarchy-flux
-flux-cli setup
-flux-cli doctor
-```
-
-The workflow does not establish that the package already exists in AUR.
-See [release setup](releasing.md) for the first publication.
+This fork publishes no AUR package.
+The `omarchy-flux` package in AUR is upstream's, and it updates from upstream's releases.
+Install a [release package](#install-a-release-package) instead.
 
 ## Install a release package
 
@@ -276,12 +269,11 @@ For a pacman package, `flux-cli update` does these steps:
 2. It downloads the release package into `~/.cache/flux/update`, which only your user can read, and checks it against `SHA256SUMS`.
 3. `sudo` copies the package into a new folder that only root can read, checks the copy again, and runs `pacman -U` on the copy.
 
-A `flux-cli` without a public release key skips the signature check in step 1 and says so.
 When `SHA256SUMS` or the signature is missing or does not match, `flux-cli update` stops and installs nothing.
 An upload of the release can be incomplete for a short time, so try again later.
-When the release has no package for your architecture, `flux-cli update` runs `yay -S omarchy-flux`.
-`flux-cli update` uses only the files at `https://github.com/bjarneo/flux/releases/download/TAG/`.
-When GitHub gives a file of the release at another address, `flux-cli update` stops and does not run `yay`.
+When the release has no package for your architecture, `flux-cli update` stops and links the release page. The fork has no AUR package.
+`flux-cli update` uses only the files at `https://github.com/olafkfreund/nixarchy-flux/releases/download/TAG/`.
+When GitHub gives a file of the release at another address, `flux-cli update` stops.
 For a source install, it prints the commands for your checkout.
 
 When a newer release exists, the window shows **Flux 0.7.0 is available**.
@@ -312,12 +304,6 @@ Then restart the service once:
 
 ```sh
 systemctl --user restart fluxd
-```
-
-### Update an AUR install
-
-```sh
-yay -S omarchy-flux
 ```
 
 ### Update a release package

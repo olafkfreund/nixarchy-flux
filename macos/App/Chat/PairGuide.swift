@@ -56,7 +56,7 @@ private struct Paragraph: View {
 /// a computer, the pair step comes first. When macOS blocks the local
 /// network for Flux, the Local Network notice comes before the steps.
 private struct PairGuide: View {
-    static let installGuide = URL(string: "https://github.com/bjarneo/flux/blob/master/docs/install.md")!
+    static let installGuide = URL(string: "https://github.com/olafkfreund/nixarchy-flux/blob/master/docs/install.md")!
     static let setupCommand = "flux-cli setup"
     @Environment(AppModel.self) private var model
     @Environment(\.tn) private var tn

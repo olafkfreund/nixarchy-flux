@@ -12,7 +12,7 @@ See [security](docs/security.md) for what a paired device can do and which setti
 https://github.com/user-attachments/assets/4b8445fe-6734-4100-b200-92f57e1b353a
 
 
-**[Website](https://bjarneo.github.io/flux/)** · **[Install locally](docs/install.md)** · **[Set up Android](docs/android.md)** · **[Set up iOS](docs/ios.md)** · **[Set up macOS](docs/macos.md)** · **[Read the docs](docs/README.md)** · **[Use with agents](docs/agents.md)**
+**[Website](https://olafkfreund.github.io/nixarchy-flux/)** · **[Install locally](docs/install.md)** · **[Set up Android](docs/android.md)** · **[Set up iOS](docs/ios.md)** · **[Set up macOS](docs/macos.md)** · **[Read the docs](docs/README.md)** · **[Use with agents](docs/agents.md)**
 
 ## What you can do
 
@@ -65,8 +65,8 @@ sudo pacman -Syu --needed base-devel git go cmake ninja
 Clone this repository and setup:
 
 ```sh
-git clone https://github.com/bjarneo/flux.git
-cd flux/dist/arch
+git clone https://github.com/olafkfreund/nixarchy-flux.git
+cd nixarchy-flux/dist/arch
 makepkg -si
 flux-cli setup
 flux-cli doctor

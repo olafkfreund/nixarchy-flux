@@ -11,7 +11,7 @@ The Windows app is new. Its views run on the Windows runner of CI, but nobody ch
 
 ## Install
 
-Each release has the app as `flux-windows-VERSION.exe` on the [releases page](https://github.com/bjarneo/flux/releases). It is 1 file that holds .NET, so the computer needs no .NET runtime. Put it in a folder of your choice and start it.
+Each release has the app as `flux-windows-VERSION.exe` on the [releases page](https://github.com/olafkfreund/nixarchy-flux/releases). It is 1 file that holds .NET, so the computer needs no .NET runtime. Put it in a folder of your choice and start it.
 
 The file has no Authenticode signature yet. Windows SmartScreen then shows "Windows protected your PC". Check the file against `SHA256SUMS` of the release first:
 

@@ -320,7 +320,7 @@ public static class ChatNotices
 // active border.
 public static class PairGuide
 {
-    const string InstallGuide = "https://github.com/bjarneo/flux/blob/master/docs/install.md";
+    const string InstallGuide = "https://github.com/olafkfreund/nixarchy-flux/blob/master/docs/install.md";
     const string SetupCommand = "flux-cli setup";
 
     public static UIElement Build(AppModel model)

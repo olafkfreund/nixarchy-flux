@@ -60,6 +60,15 @@ everywhere.
 | P3 | §6 step 5.5: `adb install flux-android-0.20.0.apk` | `adb install "$dir/flux-android-0.20.0.apk"` | The download goes to `$dir`. The `cd` in step 5.2 runs in a subshell, so the bare filename would fail after upstream's app is already uninstalled. |
 | P4 | Order step 1 says `TestPublicKey` keeps the PR from merging | `build.yml` does not run on pull requests (`build.yml:3`). So the merge gate is the lead's step 8, with the PR kept a draft until then, not CI. Squash-merge, so that no commit on `master` has the fork's address without the key. | Codex and agy both found this. |
 
+## Implementation corrections
+
+| # | Step | Change | Why |
+| --- | --- | --- | --- |
+| R1 | 1 | The dummy-key check restores `sign.go` from a backup, not with `git checkout`. | `git checkout` also reverted the step's own comment edit. |
+| R2 | 4 | After the clone, `README.md:69` and `docs/install.md:31` run `cd nixarchy-flux` instead of `cd flux`. | The clone URL now creates a `nixarchy-flux` folder. |
+| R3 | 4 | `docs/install.md`: the update text drops the `yay` fallback and the line about skipping the signature check. "Install from AUR" is replaced by a short note that the AUR package is upstream's, and "Update an AUR install" is removed. | Steps 1-2 and the no-AUR decision make that text wrong. The spec listed only the links in this file. |
+| R4 | 5 | `docs/releasing.md`: cross-references use the guide's own section links instead of the spec's step numbers. The leftover "AUR job fails" paragraph is removed. | agy copied the spec's step numbers, which the guide does not have. |
+
 ## Steps
 
 1. **`internal/release/`** (codex)

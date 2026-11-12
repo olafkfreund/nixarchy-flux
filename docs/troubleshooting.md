@@ -205,7 +205,7 @@ The log of `fluxd` then shows `TLS handshake: EOF` for the phone every 30 second
 
 When the old app announces itself, `fluxd` logs `runs a Flux app older than 0.8` once.
 `flux-cli status` and `flux-cli doctor` then name the phone.
-Install the latest app from the [releases](https://github.com/bjarneo/flux/releases/latest).
+Install the latest app from the [releases](https://github.com/olafkfreund/nixarchy-flux/releases/latest).
 On Android, [install it with adb](android-setup.md#install-with-adb).
 `adb install -r` keeps the app data, so the phone stays paired.
 
@@ -216,7 +216,7 @@ A Flux app from before the port change uses the ports 1716 to 1764.
 On an Android phone, an iPhone, or a Mac, such an app does not find the computer, and `fluxd` does not connect to it.
 `flux-cli update --phone` cannot send it the new app, because it needs a connection.
 
-Install the latest app on each device from the [releases](https://github.com/bjarneo/flux/releases/latest).
+Install the latest app on each device from the [releases](https://github.com/olafkfreund/nixarchy-flux/releases/latest).
 On Android, [install it with adb](android-setup.md#install-with-adb).
 `adb install -r` keeps the app data, so the phone stays paired.
 On an iPhone, [install the release with a sideload tool](ios.md#install-a-release-with-a-sideload-tool).

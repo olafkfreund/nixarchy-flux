@@ -3,8 +3,8 @@
 [Documentation index](README.md)
 
 Stable tags build the complete desktop package and a signed Android APK.
-The release workflow publishes both with an AUR recipe, certificate details, SHA-256 checksums, and a signature of the checksums.
-An optional final job pushes the tested recipe to AUR.
+The release workflow publishes both with an AUR recipe archive, certificate details, SHA-256 checksums, and a signature of the checksums.
+The fork does not publish to AUR.
 
 ## Workflow map
 
@@ -12,12 +12,12 @@ An optional final job pushes the tested recipe to AUR.
 | --- | --- | --- |
 | `build.yml` | Push to `master` that changes more than the website or the Windows app, manual run, or reusable call | Arch package, Go tests, Android tests, lint, debug APK, unsigned release build, FluxKit tests, ad hoc signed macOS app, the iOS app with its simulator tests, an unsigned iOS Release build, and checks of its permission texts and privacy manifests. Pull requests run no build. |
 | `release.yml` | Push a `v*` tag or manually select an existing tag | Validated stable tag on `master`, tested desktop package, APK built without secrets and signed in a separate job, ad hoc signed macOS app, unsigned iOS app, the Windows app as `flux-windows-VERSION.exe` without an Authenticode signature, `SHA256SUMS` and its signature, and GitHub release |
-| `aur.yml` | Reusable call after release publication | AUR commit with `PKGBUILD`, `.SRCINFO`, and the install hook |
+| `aur.yml` | Reusable workflow, not called by `release.yml` | AUR commit with `PKGBUILD`, `.SRCINFO`, and the install hook; the fork does not publish to AUR |
 | `windows.yml` | Push to `master` that changes `windows/` or `windows.yml`, or manual run | FluxKit tests on Windows, FluxKit tests against `fluxd` on Linux, the UI checks of the Windows app, and the self-contained `Flux.exe` as the artifact `Flux-win-x64`. Pull requests run no build. |
 | `pages.yml` | Push to `master` that changes `site/` or `pages.yml`, or manual run | The website in `site/` on GitHub Pages, without `site/tools/` and `site/README.md` |
 
 The workflows live in [`.github/workflows/`](../.github/workflows/).
-The AUR flow follows cliamp's source-package pattern.
+The fork does not publish to AUR; `aur.yml` stays in the tree and is not called by `release.yml`.
 The APK flow follows the persistent-key release pattern from kleeamp in `cliamp-mobile`.
 
 ## First release setup
@@ -27,7 +27,6 @@ The APK flow follows the persistent-key release pattern from kleeamp in `cliamp-
 3. Create the [release environment](#release-environment).
 4. Configure the Android secrets below.
 5. Make the [release signing key](#release-signing-key).
-6. Configure AUR access if you want automatic publication.
 
 Flux uses the [MIT license](../LICENSE).
 The package sets `license=('MIT')` and installs `LICENSE` in `/usr/share/licenses/omarchy-flux/`.
@@ -36,7 +35,6 @@ Change the license file and the package metadata together.
 The release workflow accepts only stable `vMAJOR.MINOR.PATCH` tags, such as `v0.1.0`.
 Prerelease tags fail validation.
 The workflow also refuses a tag whose commit is not on `master`.
-The GitHub source archive must be public for AUR users to download it.
 
 ## Release environment
 
@@ -44,7 +42,6 @@ The jobs that use secrets run in the GitHub environment `release`:
 
 - `apk-sign` in `release.yml` signs the APK.
 - `sign` in `release.yml` signs `SHA256SUMS`.
-- `publish` in `aur.yml` pushes the recipe to AUR.
 
 Other jobs, pull requests, and branches do not get these secrets.
 Create the environment once:
@@ -52,19 +49,19 @@ Create the environment once:
 1. In **Settings > Environments**, create the environment `release`.
 2. Under **Deployment branches and tags**, select **Selected branches and tags**.
 3. Add the tag rule `v*` and the branch rule `master`. A manual rebuild runs from `master`.
-4. Optional: add a required reviewer. Then each job in the environment waits for an approval.
+4. Add the owner as required reviewer. Each release asks for two approvals: one for `apk-sign` and one for `sign`.
 
 Set each secret in the environment, not in the repository:
 
 ```sh
-gh secret set KEYSTORE_PASSWORD --env release
+gh secret set KEYSTORE_PASSWORD -R olafkfreund/nixarchy-flux --env release
 ```
 
 The workflows also read repository secrets with the same names, so an earlier setup continues to work.
 After you move a secret into the environment, remove the repository secret:
 
 ```sh
-gh secret delete KEYSTORE_PASSWORD
+gh secret delete KEYSTORE_PASSWORD -R olafkfreund/nixarchy-flux
 ```
 
 Protect the release refs with rulesets in **Settings > Rules**:
@@ -87,10 +84,10 @@ keytool -genkeypair \
   -dname 'CN=Flux Release'
 ```
 
-Keep a backup of the keystore and its passwords.
+**Back up the `.jks` file and both passwords in 1Password: one item, with the keystore attached.**
 Use the same key for every release so Android accepts app updates.
 
-Set these secrets in the [release environment](#release-environment) through GitHub settings or `gh secret set --env release`:
+Set these secrets in the [release environment](#release-environment) through GitHub settings or `gh secret set -R olafkfreund/nixarchy-flux --env release`:
 
 | Secret | Value |
 | --- | --- |
@@ -99,14 +96,24 @@ Set these secrets in the [release environment](#release-environment) through Git
 | `KEY_ALIAS` | The key alias, such as `flux` |
 | `KEY_PASSWORD` | Private-key password |
 
+With PKCS12, the default, `KEY_PASSWORD` equals the keystore password.
 From the GitHub checkout:
 
 ```sh
-base64 -w0 "$HOME/.local/share/flux-release/flux-release.jks" | gh secret set KEYSTORE_BASE64 --env release
-gh secret set KEYSTORE_PASSWORD --env release
-gh secret set KEY_ALIAS --env release
-gh secret set KEY_PASSWORD --env release
+base64 -w0 "$HOME/.local/share/flux-release/flux-release.jks" | gh secret set KEYSTORE_BASE64 -R olafkfreund/nixarchy-flux --env release
+gh secret set KEYSTORE_PASSWORD -R olafkfreund/nixarchy-flux --env release
+gh secret set KEY_ALIAS -R olafkfreund/nixarchy-flux --env release
+gh secret set KEY_PASSWORD -R olafkfreund/nixarchy-flux --env release
 ```
+
+Print the certificate digest and check that it is exactly 64 hex characters:
+
+```sh
+LC_ALL=C keytool -list -v -keystore "$HOME/.local/share/flux-release/flux-release.jks" -alias flux | sed -n 's/.*SHA256: //p' | tr -d : | tr A-F a-f
+```
+
+The digest is public.
+Keep it in the 1Password item, and give it for `CERT_SHA256`.
 
 The `apk` job builds `app-release-unsigned.apk` with Gradle and has no secrets.
 The `apk-sign` job gets that APK and checks its SHA-256 checksum from the `apk` job.
@@ -114,13 +121,7 @@ Then it aligns the APK with `zipalign` and signs it with `apksigner` from the An
 This job runs no Gradle and no third-party action, so build plugins and dependencies never see the key.
 The job restores the keystore in the runner's temporary directory and removes it at the end of the step.
 
-The job compares the signing certificate with `CERT_SHA256` in `release.yml` and fails for another certificate.
-The SHA-256 digest of the Flux release certificate is:
-
-```text
-a9af3fb3886f2c7cf4e2c9d93824aed23314d4e4fb36a364373064aa11700884
-```
-
+The job compares the signing certificate with the value of `CERT_SHA256` in `.github/workflows/release.yml` and fails for another certificate.
 The release includes `android-certificate.txt` with the output of `apksigner verify --print-certs`.
 
 A leaked key needs a key rotation.
@@ -156,53 +157,12 @@ The output is `android/app/build/outputs/apk/release/app-release.apk` relative t
 Without signing variables, Gradle produces `app-release-unsigned.apk` instead.
 Partial signing credentials stop the build.
 
-## AUR setup
-
-The package name is `omarchy-flux`.
-The AUR account must own or co-maintain that package.
-For a new package, its first valid push creates the AUR repository.
-
-Set these secrets in the [release environment](#release-environment):
-
-| Secret | Value |
-| --- | --- |
-| `AUR_SSH_PRIVATE_KEY` | Private key registered with the AUR account |
-| `AUR_USERNAME` | Commit author name for AUR updates |
-| `AUR_EMAIL` | Commit author email for AUR updates |
-| `AUR_KNOWN_HOSTS` | Verified SSH known-hosts entry for `aur.archlinux.org` |
-
-Obtain the host keys and compare their fingerprints with the [AUR SSH fingerprints](https://aur.archlinux.org/):
-
-```sh
-ssh-keyscan aur.archlinux.org > aur-known-hosts
-ssh-keygen -lf aur-known-hosts
-```
-
-After you verify the fingerprints, set the secrets:
-
-```sh
-gh secret set AUR_SSH_PRIVATE_KEY --env release < /path/to/aur-private-key
-gh secret set AUR_USERNAME --env release
-gh secret set AUR_EMAIL --env release
-gh secret set AUR_KNOWN_HOSTS --env release < aur-known-hosts
-gh variable set AUR_PUBLISH --body true
-```
-
-Replace `/path/to/aur-private-key` with your private-key path.
-The workflow uses strict SSH host verification.
-It passes author details through environment variables and does not store them in the recipe.
-
-With no `AUR_PUBLISH=true` variable, the release still produces the tested AUR recipe as a downloadable archive.
-The workflow publishes to AUR only after the GitHub release succeeds, and only for the highest stable tag.
-
 ## Release signing key
 
 The `sign` job signs `SHA256SUMS` with an Ed25519 key and publishes the signature as `SHA256SUMS.sig`.
 `flux-cli update` and `fluxd` check the signature with `PublicKey` in [`internal/release/sign.go`](../internal/release/sign.go).
 Then they check the download against `SHA256SUMS`.
-While `PublicKey` is empty, they check only `SHA256SUMS` and log that they do not check the signature.
-While `PublicKey` is empty and the `RELEASE_SIGNING_KEY` secret is not set, the `sign` job shows a warning, and the release has no `SHA256SUMS.sig`.
-After you set `PublicKey`, the `sign` job fails when the secret is not set or when its public key is not `PublicKey`.
+The `sign` job fails when the `RELEASE_SIGNING_KEY` secret is not set or when its public key is not `PublicKey`.
 
 To set up the key, do these steps in this order:
 
@@ -213,27 +173,19 @@ To set up the key, do these steps in this order:
    go run ./scripts/signsums keygen "$HOME/.local/share/flux-release/release-signing.key"
    ```
 
-   The command writes the private key to the file and prints the public key.
+   **Back it up in 1Password.**
+   The command writes the private key to the file and prints the public key, which is public.
+   Keep it in 1Password, and give it for `PublicKey`.
 
 2. Set the private key as a secret of the release environment:
 
    ```sh
-   gh secret set RELEASE_SIGNING_KEY --env release < "$HOME/.local/share/flux-release/release-signing.key"
+   gh secret set RELEASE_SIGNING_KEY -R olafkfreund/nixarchy-flux --env release < "$HOME/.local/share/flux-release/release-signing.key"
    ```
 
-3. Publish a release, and check its `SHA256SUMS.sig` with the public key from step 1:
+3. Set `PublicKey` in `internal/release/sign.go` to the public key from step 1.
 
-   ```sh
-   dir=$(mktemp -d)
-   gh release download v0.1.0 -D "$dir" -p 'SHA256SUMS*'
-   go run ./scripts/signsums verify "$dir/SHA256SUMS" PUBLIC_KEY
-   ```
-
-   Replace `v0.1.0` with the tag of the release, and `PUBLIC_KEY` with the public key from step 1.
-4. Set `PublicKey` in `internal/release/sign.go` to the public key from step 1.
-5. Release that change.
-
-A `flux-cli` or `fluxd` with a public key refuses a release without a valid `SHA256SUMS.sig`.
+`flux-cli` and `fluxd` refuse a release without a valid `SHA256SUMS.sig`.
 So keep the secret after you set `PublicKey`, and keep a backup of the private key.
 Without the key, the installed copies cannot update themselves, and users must install the next release by hand.
 
@@ -249,6 +201,38 @@ The private key is a GitHub secret.
 So the signature shows that the release workflow of this repository made `SHA256SUMS`, and that nobody changed the file after the workflow.
 It does not protect against a changed workflow.
 The [release environment](#release-environment) and the rulesets protect the workflow.
+
+## First release (v0.20.0)
+
+Do this only after ([Release environment](#release-environment), [Android release key](#android-release-key), and [Release signing key](#release-signing-key)), and after `PublicKey` and `CERT_SHA256` are on `master`:
+
+1. Tag `v0.20.0` on `master`.
+2. Approve both jobs (`apk-sign` and `sign`).
+3. Check the release with `signsums verify`.
+
+## First install on each phone and tablet
+
+1. From the checkout, run `dir=$(mktemp -d)`, then:
+
+   ```sh
+   gh release download -R olafkfreund/nixarchy-flux v0.20.0 -D "$dir" -p 'SHA256SUMS*' -p '*.apk'
+   ```
+
+2. Run `go run ./scripts/signsums verify "$dir/SHA256SUMS" <public key>`, then `(cd "$dir" && sha256sum --check --ignore-missing SHA256SUMS)`.
+3. Run `apksigner verify --print-certs "$dir/flux-android-0.20.0.apk"`.
+   Compare `Signer #1 certificate SHA-256 digest` with the digest kept in 1Password (see [Android release key](#android-release-key)). **Don't use the `android-certificate.txt` from the same download.**
+4. Only then uninstall upstream's Flux on the device.
+5. Run `adb install "$dir/flux-android-0.20.0.apk"`, or copy the file over and open it.
+6. Pair the device again, and enroll `flux-approve` again.
+
+## Desktops
+
+- A NixOS desktop rebuilds from a `master` that contains this change. Its fluxd has the key before it reads a fork release.
+- An Arch desktop on upstream's package installs the fork's v0.20.0 package once by hand, after the same checks as steps 1-2 of the [first install](#first-install-on-each-phone-and-tablet), with `sudo pacman -U`.
+
+## Later releases
+
+`flux-cli update --phone` sends them, and fluxd checks the signature first.
 
 ## Package contents
 
@@ -271,7 +255,7 @@ The source recipe also supports native `aarch64` builds, which require separate 
 ## Prepare the AUR source locally
 
 ```sh
-REPO=bjarneo/flux
+REPO=olafkfreund/nixarchy-flux
 python3 scripts/prepare-aur.py --tag v0.1.0 --repo "$REPO"
 cd dist/aur
 makepkg --printsrcinfo > .SRCINFO
@@ -324,7 +308,7 @@ Artifacts include:
 - `omarchy-flux-VERSION-aur.tar.gz` with `PKGBUILD`, `.SRCINFO`, and the install hook.
 - `android-certificate.txt`.
 - `SHA256SUMS`.
-- `SHA256SUMS.sig` when the [release signing key](#release-signing-key) is set.
+- `SHA256SUMS.sig`.
 
 Installed copies of Flux find their updates by these names.
 `flux-cli update` checks `SHA256SUMS.sig`, then checks `omarchy-flux-VERSION-PKGREL-ARCH.pkg.tar.zst` against `SHA256SUMS`.
@@ -335,7 +319,7 @@ Keep the names, `SHA256SUMS`, and `SHA256SUMS.sig` when you change the release w
 For a manual rebuild of an existing tag, run the workflow from `master`:
 
 ```sh
-gh workflow run release.yml --ref master -f tag=v0.1.0
+gh workflow run release.yml -R olafkfreund/nixarchy-flux --ref master -f tag=v0.1.0
 ```
 
 A manual run builds the source of the tag with the workflow files of the branch that you select with `--ref`.
@@ -343,7 +327,7 @@ The signing programs also come from that branch.
 The run makes the release a draft while it replaces the assets, so no update reads a mix of earlier and new files.
 During that time, GitHub gives the previous release as the latest release.
 The run writes the release notes again, so the checksums in the notes match the new assets.
-The AUR job refuses to replace a newer package version with an older release.
+The fork does not publish to AUR.
 
 ## Pinned tools
 
@@ -388,21 +372,18 @@ Add it together with automated dependency updates for Gradle.
 ## Check the result
 
 ```sh
-gh run list --workflow release.yml
-gh release view v0.1.0
+gh run list -R olafkfreund/nixarchy-flux --workflow release.yml
+gh release view -R olafkfreund/nixarchy-flux v0.1.0
 ```
 
 Download the assets, and check `SHA256SUMS.sig` and `SHA256SUMS` before a test install:
 
 ```sh
 dir=$(mktemp -d)
-gh release download v0.1.0 -D "$dir" -p 'SHA256SUMS*' -p '*.pkg.tar.zst' -p '*.apk'
+gh release download -R olafkfreund/nixarchy-flux v0.1.0 -D "$dir" -p 'SHA256SUMS*' -p '*.pkg.tar.zst' -p '*.apk'
 go run ./scripts/signsums verify "$dir/SHA256SUMS"
 (cd "$dir" && sha256sum --check --ignore-missing SHA256SUMS)
 ```
-
-While `PublicKey` is empty, `verify` needs the public key as the last argument.
-Without the [release signing key](#release-signing-key), the release has no `SHA256SUMS.sig`, so skip the `verify` command.
 
 The `apk-sign` job compares the Android certificate with the release certificate.
 Test a clean desktop install and an Android update with the same signing key.
@@ -425,8 +406,6 @@ Test the upgrade from the previous release on a computer with a paired phone:
 The release check of an installed `fluxd` finds the new release within 1 day.
 To see the offer at once, run `flux-cli update --check`.
 
-If the AUR job fails after publication, fix its credentials or host entry and rerun that failed job.
-The GitHub release remains available.
 
 ## TestFlight
 
