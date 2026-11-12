@@ -22,13 +22,13 @@ import org.omarchy.flux.core.FluxCore
 
 /** The web pages that the About page opens. */
 internal object AboutLinks {
-    const val RELEASE = "https://github.com/bjarneo/flux/releases/latest"
-    const val WEBSITE = "https://bjarneo.github.io/flux/"
-    const val SOURCE = "https://github.com/bjarneo/flux"
-    const val DOCS = "https://github.com/bjarneo/flux/blob/master/docs/README.md"
-    const val ISSUES = "https://github.com/bjarneo/flux/issues"
+    const val RELEASE = "https://github.com/olafkfreund/nixarchy-flux/releases/latest"
+    const val WEBSITE = "https://olafkfreund.github.io/nixarchy-flux/"
+    const val SOURCE = "https://github.com/olafkfreund/nixarchy-flux"
+    const val DOCS = "https://github.com/olafkfreund/nixarchy-flux/blob/master/docs/README.md"
+    const val ISSUES = "https://github.com/olafkfreund/nixarchy-flux/issues"
     const val X = "https://x.com/iamdothash"
-    const val LICENSE = "https://github.com/bjarneo/flux/blob/master/LICENSE"
+    const val LICENSE = "https://github.com/olafkfreund/nixarchy-flux/blob/master/LICENSE"
 }
 
 /**
@@ -78,8 +78,8 @@ fun AboutScreen(onBack: () -> Unit) {
         )
         SectionLabel("Project")
         Column(verticalArrangement = Arrangement.spacedBy(TileGap)) {
-            LinkRow(Ic.web, "Website", "bjarneo.github.io/flux") { openLink(context, AboutLinks.WEBSITE) }
-            LinkRow(Ic.codeFile, "Source code", "github.com/bjarneo/flux") { openLink(context, AboutLinks.SOURCE) }
+            LinkRow(Ic.web, "Website", "olafkfreund.github.io/nixarchy-flux") { openLink(context, AboutLinks.WEBSITE) }
+            LinkRow(Ic.codeFile, "Source code", "github.com/olafkfreund/nixarchy-flux") { openLink(context, AboutLinks.SOURCE) }
             LinkRow(Ic.docs, "Documentation", "Install, pair, and use Flux.") { openLink(context, AboutLinks.DOCS) }
             LinkRow(Ic.bug, "Report an issue", "Bugs and feature requests on GitHub.") { openLink(context, AboutLinks.ISSUES) }
             LinkRow(Ic.handle, "Follow on X", "@iamdothash") { openLink(context, AboutLinks.X) }

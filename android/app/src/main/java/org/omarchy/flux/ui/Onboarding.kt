@@ -27,7 +27,7 @@ import org.omarchy.flux.core.FluxCore
 import org.omarchy.flux.core.UiState
 
 /** The install guide of Flux on GitHub. It covers the package and `flux-cli setup`. */
-private const val INSTALL_GUIDE = "https://github.com/bjarneo/flux/blob/master/docs/install.md"
+private const val INSTALL_GUIDE = "https://github.com/olafkfreund/nixarchy-flux/blob/master/docs/install.md"
 
 /** The command that sets up Flux for the desktop user and starts fluxd. */
 private const val SETUP_COMMAND = "flux-cli setup"

@@ -138,6 +138,9 @@ func TestValidName(t *testing.T) {
 // TestFetch downloads a file, checks it, and reuses a complete file. A
 // file with a wrong checksum goes away.
 func TestFetch(t *testing.T) {
+	old := releaseKey
+	releaseKey = ""
+	t.Cleanup(func() { releaseKey = old })
 	body := []byte("apk")
 	fs, srv := newFileServer(t, map[string][]byte{
 		"/" + apkName: body,
@@ -182,6 +185,9 @@ func TestFetch(t *testing.T) {
 // TestFetchMissing checks that a release without SHA256SUMS or with a bad
 // file name gives an error before a download.
 func TestFetchMissing(t *testing.T) {
+	old := releaseKey
+	releaseKey = ""
+	t.Cleanup(func() { releaseKey = old })
 	fs, srv := newFileServer(t, map[string][]byte{"/" + apkName: []byte("apk")})
 	dir := t.TempDir()
 	a := Asset{Name: apkName, URL: srv.URL + "/" + apkName}
@@ -203,6 +209,9 @@ func TestFetchMissing(t *testing.T) {
 // TestFetchParallel runs 2 downloads of the same file at the same time.
 // Each has its own temporary file, so both succeed.
 func TestFetchParallel(t *testing.T) {
+	old := releaseKey
+	releaseKey = ""
+	t.Cleanup(func() { releaseKey = old })
 	body := bytes.Repeat([]byte("flux"), 64<<10)
 	fs, srv := newFileServer(t, map[string][]byte{
 		"/" + apkName: body,
@@ -241,6 +250,9 @@ func TestFetchParallel(t *testing.T) {
 // TestFetchSize checks the size limits. A file that is larger than the
 // release gives, or larger than the limit, does not stay on disk.
 func TestFetchSize(t *testing.T) {
+	old := releaseKey
+	releaseKey = ""
+	t.Cleanup(func() { releaseKey = old })
 	body := []byte("a longer apk than the release gives")
 	fs, srv := newFileServer(t, map[string][]byte{
 		"/" + apkName: body,

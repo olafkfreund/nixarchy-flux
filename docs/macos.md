@@ -43,7 +43,7 @@ The `macos` job in `.github/workflows/build.yml` runs `swift test` and builds a 
 Pull requests run no build.
 Each release attaches the same build as `flux-macos-VERSION.zip`.
 The window on the computer shows an update notice only for the Android app.
-To find a newer Mac app, check `https://github.com/bjarneo/flux/releases`.
+To find a newer Mac app, check `https://github.com/olafkfreund/nixarchy-flux/releases`.
 Flux 0.10.1 and earlier use other ports, see [Pair a Mac](#pair-a-mac).
 A Mac app of 0.10.1 or earlier cannot connect to a newer `fluxd`, and a newer Mac app cannot connect to an earlier `fluxd`.
 Update the Mac app and `fluxd` together.

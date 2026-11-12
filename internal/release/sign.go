@@ -7,16 +7,28 @@ import (
 	"strings"
 )
 
-// PublicKey is the Ed25519 public key of the Flux releases, in base64. The
+// PublicKey is the Ed25519 public key of the fork's releases, in base64. The
 // release workflow signs SHA256SUMS with the private key and publishes the
 // signature as SHA256SUMS.sig. Fetch accepts a release file only when the
-// signature matches. While PublicKey is empty, Flux does not check the
-// signature, and the callers of Fetch log that. docs/releasing.md tells
-// how to make the key pair.
-const PublicKey = ""
+// signature matches. docs/releasing.md tells how to make the key pair.
+const PublicKey = "YDs0bELLTbFCbPSnt2GTaJJbmSCgoIb735p/cZTTF1U="
 
 // releaseKey is the key that Fetch uses. Tests change it.
 var releaseKey = PublicKey
+
+// UseTestKey makes Fetch check signatures with a new key until t ends, and
+// returns the seed of that key for Sign. Tests in other packages call it,
+// because no test has the private key of PublicKey.
+func UseTestKey(t interface{ Cleanup(func()) }) string {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		panic(err)
+	}
+	old := releaseKey
+	releaseKey = base64.StdEncoding.EncodeToString(pub)
+	t.Cleanup(func() { releaseKey = old })
+	return base64.StdEncoding.EncodeToString(priv.Seed())
+}
 
 // Signed reports whether this build checks the signature of SHA256SUMS.
 func Signed() bool { return releaseKey != "" }

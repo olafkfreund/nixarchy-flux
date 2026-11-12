@@ -257,7 +257,7 @@ Window {
       view.appReplaced = false
       mock.setState(function (s) {
         s.self.version = "0.6.0"
-        s.update = { enabled: true, latest: "0.7.0", available: true, url: "https://github.com/bjarneo/flux/releases/tag/v0.7.0", apk: "", checkedAt: 0, error: "" }
+        s.update = { enabled: true, latest: "0.7.0", available: true, url: "https://github.com/olafkfreund/nixarchy-flux/releases/tag/v0.7.0", apk: "", checkedAt: 0, error: "" }
       })
     }],
     // A phone with an earlier Android app, and a computer with the latest release.
