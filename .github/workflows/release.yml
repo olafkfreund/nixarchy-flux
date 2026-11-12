@@ -133,7 +133,7 @@ jobs:
       # docs/releasing.md). Android installs an update only with the
       # certificate of the installed app. Change the value only for a planned
       # key rotation.
-      CERT_SHA256: a9af3fb3886f2c7cf4e2c9d93824aed23314d4e4fb36a364373064aa11700884
+      CERT_SHA256: 3fcac0e642b669ef80f21515faa1bc864253d84bee80505e90441a547eb9de02
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

@@ -11,7 +11,7 @@ import (
 // release workflow signs SHA256SUMS with the private key and publishes the
 // signature as SHA256SUMS.sig. Fetch accepts a release file only when the
 // signature matches. docs/releasing.md tells how to make the key pair.
-const PublicKey = ""
+const PublicKey = "YDs0bELLTbFCbPSnt2GTaJJbmSCgoIb735p/cZTTF1U="
 
 // releaseKey is the key that Fetch uses. Tests change it.
 var releaseKey = PublicKey
