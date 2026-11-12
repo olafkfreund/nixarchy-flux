@@ -5,13 +5,13 @@
 Flux for Android connects a phone to an Omarchy computer that runs `fluxd`.
 It uses Flux protocol version 8.
 Flux supports the Flux desktop and phone apps as a pair.
-The app requires Android 10 or later, API 29.
+The app requires Android 10 or later, API 29, on a 64-bit ARM device (`arm64-v8a`).
 
 ## Requirements
 
 | Item | Requirement |
 | --- | --- |
-| Phone | Android 10 or later |
+| Phone | Android 10 or later, 64-bit ARM (`arm64-v8a`) |
 | Computer | Flux installed and set up, as in [Install Flux](install.md). `flux-cli doctor` reports no errors. |
 | Network | The phone and the computer are on the same local network. |
 | Install with `adb` | `adb` on the computer, and **USB debugging** or **Wireless debugging** on the phone |
@@ -254,6 +254,8 @@ From the repository root, build a debug APK:
 make android
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+The debug APK also has `x86_64` libraries for emulators, without the tailnet node.
 
 The remaining commands in this guide run from `android/`:
 
