@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 45
 intent: intent/2026-11-12-45-resume-followups.md
 ---
