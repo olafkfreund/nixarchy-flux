@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 44
 spec: spec/2026-11-12-44-release-signing.md
 coders:
