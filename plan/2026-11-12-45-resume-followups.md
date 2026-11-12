@@ -293,3 +293,4 @@ Revert the commits. Nothing on disk or in the protocol changes.
 | R8 | (agy 6) nil maps | `queued` in the worker literal (line 169); `resumeRefusals` in `New` and lazily in `refused` | tests that build `&Daemon{}` without `New` |
 | R9 | (agy 7) reply and log details | the "done" reply carries `ID`; "(and N more)" only when N > 0; keyed by `dev.ID` | the sender drops a reply without an ID |
 | — | (Codex 6) `MkdirAll` position | first, in D1 step 2 | the spec says so |
+| R10 | (implementation, step 1) D2: `receiveResumable` keeps the record check | the record is checked once, in `checkResumable`; `receiveResumable` starts from `head.record` and keeps only `checkPeer` | a second read caught the save failure that `TestResumeStateSaveFailureKeepsFile` injects after publishing, and failed it. One worker per device means the record cannot change between the two calls |
