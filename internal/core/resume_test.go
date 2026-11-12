@@ -1414,3 +1414,22 @@ func TestResumeWorkerUsesTheCurrentDevice(t *testing.T) {
 		t.Errorf("worker uses the stale device")
 	}
 }
+
+// An unpair after the file is published leaves the transfer done.
+func TestResumeUnpairAfterPublishKeepsDone(t *testing.T) {
+	t.Cleanup(func() { renameFile = os.Rename })
+	r := newRx(t)
+	renameFile = func(old, new string) error {
+		r.b.mu.Lock()
+		r.peer.Paired = false
+		r.b.mu.Unlock()
+		return os.Rename(old, new)
+	}
+	f := mkfile(8, 2000)
+	r.expect2(r.offer(f), "offset")
+	r.expect2(r.chunk(f, 0, 2000), "done")
+	r.waitState(f, "done")
+	if !exists(filepath.Join(r.downloads, f.name)) {
+		t.Fatal("published file missing")
+	}
+}

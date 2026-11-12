@@ -312,7 +312,7 @@ func (d *Daemon) finishResumePacket(w *resumeWorker, pkt resumePacket, run *resu
 	if (stopped || run.ctx.Err() != nil) && !run.published && (err == nil || errors.Is(err, context.Canceled)) {
 		err = d.resumeStop(run)
 	}
-	if (err == nil || errors.Is(err, errLinkDown) || errors.Is(err, errTransport)) && !d.stillPaired(run.dev) {
+	if !run.published && (err == nil || errors.Is(err, errLinkDown) || errors.Is(err, errTransport)) && !d.stillPaired(run.dev) {
 		err = errReceiveUnpaired
 	}
 	if err != nil {
@@ -675,7 +675,9 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 			return nil
 		}}
 		n, err := io.CopyN(f, src, p.PayloadSize)
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		// io.CopyN returns io.EOF for a payload that ended short; read errors
+		// are already wrapped by transportReader.
+		if err == io.EOF {
 			err = fmt.Errorf("%w: %w", errTransport, err)
 		}
 		if syncErr := f.Sync(); err == nil {
@@ -726,6 +728,12 @@ func (d *Daemon) receiveResumable(ctx context.Context, dev *Device, l *lan.Link,
 		}
 		if dev.link != l {
 			return errLinkDown
+		}
+		// The link can close before its reader clears dev.link.
+		select {
+		case <-l.Done():
+			return errLinkDown
+		default:
 		}
 		if run.transfer.State == "canceled" {
 			return context.Canceled
