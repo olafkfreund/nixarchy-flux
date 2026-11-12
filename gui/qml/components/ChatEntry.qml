@@ -27,6 +27,8 @@ Item {
   readonly property string link: clip && !isImageClip ? Fmt.webLink(clip.text) : ""
 
   readonly property bool moving: !!file && ["waiting", "queued", "active"].indexOf(file.state) >= 0
+  readonly property bool finished: !!file && file.state === "done" && !!file.path
+  readonly property bool crowded: meta.implicitWidth + 16 + actions.implicitWidth > col.width
   readonly property real progress: !file ? 0 : (file.size > 0 ? (file.done || 0) / file.size : (file.state === "done" ? 1 : 0))
   // A file that is an image on this computer: a sent image, or a received
   // image after the last byte.
@@ -96,6 +98,11 @@ Item {
     v.call("clipboard.copy", { id: clip.id }, function () { v.toast("Copied to the clipboard") })
   }
 
+  function copyFile() {
+    var v = view
+    v.call("transfer.copy", { id: file.id }, function () { v.toast("Copied to the clipboard") })
+  }
+
   // The folder of a path as a file URL.
   function folderUrl(path) {
     return Fmt.fileUrl(path.slice(0, Math.max(1, path.lastIndexOf("/"))))
@@ -127,11 +134,11 @@ Item {
       // The kind, the state, and the time. The actions are at the end.
       Item {
         width: parent.width
-        height: Math.max(meta.implicitHeight, actions.implicitHeight)
+        height: root.crowded ? meta.implicitHeight + 6 + actions.implicitHeight : Math.max(meta.implicitHeight, actions.implicitHeight)
 
         Row {
           id: meta
-          anchors.verticalCenter: parent.verticalCenter
+          y: root.crowded ? 0 : (parent.height - height) / 2
           spacing: 6
           Icon {
             anchors.verticalCenter: parent.verticalCenter
@@ -157,7 +164,7 @@ Item {
         Row {
           id: actions
           anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
+          y: root.crowded ? parent.height - height : (parent.height - height) / 2
           spacing: 2
 
           IconAction {
@@ -190,11 +197,29 @@ Item {
             onClicked: root.view.call("clipboard.delete", { id: root.clip.id })
           }
 
-          // The actions of a file are words, because each one has its own
-          // state.
+          // Open and Copy match clip icons; other file actions have state-specific words.
+          IconAction {
+            objectName: "fileOpen"
+            ink: root.dim
+            visible: root.finished
+            icon: "open"
+            tip: "Open"
+            onClicked: root.view.call("transfer.open", { id: root.file.id })
+          }
+          IconAction {
+            objectName: "fileCopy"
+            ink: root.dim
+            visible: root.finished
+            icon: "copy"
+            tip: "Copy"
+            onClicked: root.copyFile()
+          }
+
           Row {
             visible: !!root.file
             anchors.verticalCenter: parent.verticalCenter
+            // Clears the 4 px hit margin of a TextAction from the Copy icon.
+            leftPadding: root.finished && !root.mine ? 4 : 0
             spacing: 14
             TextAction {
               visible: !!root.file && root.file.state === "waiting"
@@ -207,7 +232,7 @@ Item {
               onClicked: root.view.call("transfer.cancel", { id: root.file.id })
             }
             TextAction {
-              visible: !!root.file && !root.mine && root.file.state === "done" && !!root.file.path
+              visible: root.finished && !root.mine
               text: "Show in folder"
               onClicked: Qt.openUrlExternally(root.folderUrl(root.file.path))
             }

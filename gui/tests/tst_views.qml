@@ -24,6 +24,11 @@ Item {
   }
 
   Component {
+    id: entryComponent
+    ChatEntry { width: 500 }
+  }
+
+  Component {
     id: keyedComponent
     KeyedModel {}
   }
@@ -681,6 +686,23 @@ Item {
       tryVerify(function () { var t = findBy(view, "message", msg); return !!t && t.visible })
     }
 
+    function test_fileCopyErrorShowsInToast() {
+      var view = createTemporaryObject(viewComponent, top)
+      var t3 = mock.state.transfers.filter(function (t) { return t.id === "t3" })[0]
+      verify(!!t3)
+      var entry = createTemporaryObject(entryComponent, top, {
+        view: view, entry: { key: "t3", at: Date.now(), file: t3 }, width: 500
+      })
+      var copy = findBy(entry, "objectName", "fileCopy")
+      verify(!!copy && copy.visible)
+      var msg = "a.png no longer exists"
+      mock.failures = { "transfer.copy": { code: "not_found", message: msg } }
+      copy.clicked()
+      verify(!findVisibleBy(view, "message", "Copied to the clipboard"))
+      tryVerify(function () { return !!findVisibleBy(view, "message", msg) })
+      verify(!findVisibleBy(view, "message", "Copied to the clipboard"))
+    }
+
     function test_clipboardDeleteCallsApi() {
       var view = createTemporaryObject(viewComponent, top)
       view.tab = "chat"
@@ -1001,6 +1023,106 @@ Item {
       // A stream to another device shows on the page of that device.
       mock.setState(function (s) { s.speaker = { active: true, to: "another", toName: "Other" } })
       verify(card.idle)
+    }
+  }
+
+  TestCase {
+    name: "ChatEntry"
+
+    Component {
+      id: standInComponent
+      QtObject {
+        property string devName: "Pixel"
+        property var requests: []
+        property var toasts: []
+        function call(method, params, cb) {
+          requests.push({ method: method, params: params })
+          if (cb) cb()
+        }
+        function toast(text) { toasts.push(text) }
+      }
+    }
+
+    function file(dir, state, path) {
+      return { id: "t3", dir: dir, state: state, path: path, name: "a.png", size: 1 }
+    }
+
+    function test_receivedActions() {
+      var standIn = createTemporaryObject(standInComponent, top)
+      var entry = createTemporaryObject(entryComponent, top, {
+        view: standIn, entry: { key: "t3", at: Date.now(), file: file("in", "done", "/tmp/a.png") }
+      })
+      var open = findBy(entry, "objectName", "fileOpen")
+      var copy = findBy(entry, "objectName", "fileCopy")
+      verify(!!open && open.visible)
+      verify(!!copy && copy.visible)
+      open.clicked()
+      compare(standIn.requests.length, 1)
+      compare(standIn.requests[0].method, "transfer.open")
+      compare(JSON.stringify(standIn.requests[0].params), '{"id":"t3"}')
+      compare(standIn.toasts.length, 0)
+      copy.clicked()
+      compare(standIn.requests.length, 2)
+      compare(standIn.requests[1].method, "transfer.copy")
+      compare(JSON.stringify(standIn.requests[1].params), '{"id":"t3"}')
+      compare(JSON.stringify(standIn.toasts), '["Copied to the clipboard"]')
+      // Show in folder follows Copy, and its hit area does not reach it.
+      var folder = findBy(entry, "text", "Show in folder")
+      verify(!!folder && folder.visible)
+      verify(folder.mapToItem(entry, 0, 0).x - 4 >= copy.mapToItem(entry, 0, 0).x + copy.width)
+    }
+
+    function test_sentActions() {
+      var standIn = createTemporaryObject(standInComponent, top)
+      var entry = createTemporaryObject(entryComponent, top, {
+        view: standIn, entry: { key: "t3", at: Date.now(), file: file("out", "done", "/tmp/a.png") }
+      })
+      verify(findBy(entry, "objectName", "fileOpen").visible)
+      verify(findBy(entry, "objectName", "fileCopy").visible)
+      verify(!findBy(entry, "text", "Show in folder").visible)
+    }
+
+    function test_unfinishedActions() {
+      var cases = ["active", "queued", "waiting", "failed", "canceled"]
+      var standIn = createTemporaryObject(standInComponent, top)
+      for (var i = 0; i < cases.length + 1; i++) {
+        var state = i < cases.length ? cases[i] : "done"
+        var path = i < cases.length ? "/tmp/a.png" : ""
+        var entry = createTemporaryObject(entryComponent, top, {
+          view: standIn, entry: { key: "t3", at: Date.now(), file: file("in", state, path) }
+        })
+        verify(!findBy(entry, "objectName", "fileOpen").visible, state)
+        verify(!findBy(entry, "objectName", "fileCopy").visible, state)
+      }
+    }
+
+    function test_clipHasNoFileActions() {
+      var standIn = createTemporaryObject(standInComponent, top)
+      var entry = createTemporaryObject(entryComponent, top, {
+        view: standIn, entry: { key: "c", at: Date.now(), clip: { id: "c", dir: "in", text: "x" } }
+      })
+      verify(!findBy(entry, "objectName", "fileOpen").visible)
+      verify(!findBy(entry, "objectName", "fileCopy").visible)
+    }
+
+    function test_crowdedHeader() {
+      var standIn = createTemporaryObject(standInComponent, top)
+      var entry = createTemporaryObject(entryComponent, top, {
+        view: standIn, width: 280,
+        entry: { key: "t3", at: Date.now(), file: file("in", "done", "/tmp/a.png") }
+      })
+      var actions = findBy(entry, "objectName", "fileOpen").parent
+      var meta = findBy(entry, "text", "Received").parent
+      tryCompare(entry, "crowded", true)
+      tryVerify(function () {
+        return actions.mapToItem(entry, 0, 0).y >= meta.mapToItem(entry, 0, 0).y + meta.height
+      })
+      entry.width = 500
+      tryCompare(entry, "crowded", false)
+      tryVerify(function () {
+        return Math.abs(actions.mapToItem(entry, 0, 0).y + actions.height / 2
+          - meta.mapToItem(entry, 0, 0).y - meta.height / 2) < 0.01
+      })
     }
   }
 
