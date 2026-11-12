@@ -1216,8 +1216,20 @@ func TestResumeCrossFsCopyFails(t *testing.T) {
 func TestResumeCrossFsCopyLinkDrop(t *testing.T) {
 	shortIdle(t, 400*time.Millisecond)
 	var r *rx
-	renameFile = func(_, _ string) error { return syscall.EXDEV }
+	// The hooks stay installed until cleanup; the flag turns them off, so
+	// the test never writes a variable that the worker may be reading.
+	var hooked atomic.Bool
+	hooked.Store(true)
+	renameFile = func(old, new string) error {
+		if !hooked.Load() {
+			return os.Rename(old, new)
+		}
+		return syscall.EXDEV
+	}
 	copyAcross = func(dst io.Writer, src io.Reader) (int64, error) {
+		if !hooked.Load() {
+			return io.Copy(dst, src)
+		}
 		n, err := io.CopyN(dst, src, 1000)
 		if err != nil {
 			return n, err
@@ -1251,7 +1263,7 @@ func TestResumeCrossFsCopyLinkDrop(t *testing.T) {
 		t.Fatal("run failed before idle")
 	}
 	r.attach()
-	renameFile, copyAcross = os.Rename, io.Copy
+	hooked.Store(false)
 	if rep := r.offer(f); rep.Action != "done" {
 		t.Fatal(rep)
 	}

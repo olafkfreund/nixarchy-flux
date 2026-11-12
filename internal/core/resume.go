@@ -358,7 +358,9 @@ func (d *Daemon) sweepResumeRuns(w *resumeWorker) {
 	}
 	d.mu.Unlock()
 	for id, run := range w.runs {
-		if run.ctx.Err() != nil {
+		// d.ctx closes its Done channel before it cancels the run contexts,
+		// so the last sweep when the daemon stops checks it too.
+		if run.ctx.Err() != nil || d.ctx.Err() != nil {
 			d.endResumeRun(w, id, d.resumeStop(run))
 		} else if !d.stillPaired(run.dev) {
 			d.endResumeRun(w, id, errReceiveUnpaired)
