@@ -7,12 +7,10 @@ import (
 	"strings"
 )
 
-// PublicKey is the Ed25519 public key of the Flux releases, in base64. The
+// PublicKey is the Ed25519 public key of the fork's releases, in base64. The
 // release workflow signs SHA256SUMS with the private key and publishes the
 // signature as SHA256SUMS.sig. Fetch accepts a release file only when the
-// signature matches. While PublicKey is empty, Flux does not check the
-// signature, and the callers of Fetch log that. docs/releasing.md tells
-// how to make the key pair.
+// signature matches. docs/releasing.md tells how to make the key pair.
 const PublicKey = ""
 
 // releaseKey is the key that Fetch uses. Tests change it.

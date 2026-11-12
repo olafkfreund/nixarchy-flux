@@ -20,11 +20,11 @@ import (
 )
 
 // DefaultURL is the GitHub API address of the latest release.
-const DefaultURL = "https://api.github.com/repos/bjarneo/flux/releases/latest"
+const DefaultURL = "https://api.github.com/repos/olafkfreund/nixarchy-flux/releases/latest"
 
 // downloadURL is the start of the address of each file of a release on
 // GitHub.
-const downloadURL = "https://github.com/bjarneo/flux/releases/download/"
+const downloadURL = "https://github.com/olafkfreund/nixarchy-flux/releases/download/"
 
 // URL returns FLUX_RELEASES_URL, or DefaultURL. Tests set the variable to
 // a local server. Flux uses the variable only with an https address, or
