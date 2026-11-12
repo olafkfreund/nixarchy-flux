@@ -48,14 +48,15 @@ type Daemon struct {
 	// clipDir holds the images of the clipboard history. clipSend stops
 	// the image that fluxd sends to the phones, when a newer copy replaces
 	// it.
-	clipDir       string
-	clipSend      context.CancelFunc
-	transfers     []*Transfer
-	outbox        *outbox
-	resumeReplies map[string]chan resumeMessage
-	resumeWorkers map[string]*resumeWorker
-	resumeDir     string
-	automationQ   chan automationEvent
+	clipDir        string
+	clipSend       context.CancelFunc
+	transfers      []*Transfer
+	outbox         *outbox
+	resumeReplies  map[string]chan resumeMessage
+	resumeWorkers  map[string]*resumeWorker
+	resumeRefusals map[string]*refusalLog
+	resumeDir      string
+	automationQ    chan automationEvent
 
 	opts Options
 	clip clipboard
@@ -381,6 +382,7 @@ func New(ctx context.Context, logger *log.Logger, opts Options) (*Daemon, error)
 	}
 	d.resumeReplies = map[string]chan resumeMessage{}
 	d.resumeWorkers = map[string]*resumeWorker{}
+	d.resumeRefusals = map[string]*refusalLog{}
 	if err := d.loadOutbox(); err != nil {
 		return nil, err
 	}

@@ -77,6 +77,8 @@ func waitWorkers(t *testing.T, d *Daemon) {
 			// The mutex orders the last reads of the worker before the restore.
 			d.mu.Lock()
 			d.mu.Unlock()
+			testSweepMu.Lock()
+			testSweepMu.Unlock()
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -653,6 +655,7 @@ func TestResumeCancelDeletesPartialAndRefusesRetry(t *testing.T) {
 // With the event channel full and no later packet, the cancel still ends
 // the run and deletes the partial once the worker is free (R4).
 func TestResumeCancelWithFullEvents(t *testing.T) {
+	shortIdle(t, 200*time.Millisecond)
 	s := stubSpace(t)
 	r := newRx(t)
 	a, b := mkfile(1, 3000), mkfile(2, 3000)
@@ -676,9 +679,13 @@ func TestResumeCancelWithFullEvents(t *testing.T) {
 	if err := r.b.CancelTransfer(id); err != nil {
 		t.Fatal(err)
 	}
+	<-w.events
 	release()
 	r.expect2(r.next(), "offset")
 	waitFor(t, "partial deleted", func() bool { return !exists(r.partial(a)) })
+	if rec, _ := r.record(a); !rec.Canceled {
+		t.Fatal("cancel tombstone missing")
+	}
 }
 
 func TestResumeCancelRacesCompletion(t *testing.T) {
@@ -714,6 +721,557 @@ func TestResumeCancelRacesCompletion(t *testing.T) {
 	}
 }
 
+func TestResumeCancelBeforePublishWins(t *testing.T) {
+	s := stubSpace(t)
+	r := newRx(t)
+	f := mkfile(1, 2000)
+	r.expect2(r.offer(f), "offset")
+	r.expect2(r.chunk(f, 0, 1000), "offset")
+	id, _, _ := r.find(f)
+	release := s.stall()
+	r.sendChunk(f, 1000, 1000)
+	select {
+	case <-s.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("space check did not stall")
+	}
+	if err := r.b.CancelTransfer(id); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	r.expect2(r.next(), "error")
+	r.waitState(f, "canceled")
+	waitFor(t, "canceled record", func() bool { rec, _ := r.record(f); return rec.Canceled && !exists(r.partial(f)) })
+	if exists(filepath.Join(r.downloads, f.name)) {
+		t.Fatal("canceled file published")
+	}
+}
+
+func TestResumeCancelAfterPublishKeepsFile(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	renameFile = func(old, new string) error { close(entered); <-release; return os.Rename(old, new) }
+	t.Cleanup(func() { renameFile = os.Rename })
+	r := newRx(t)
+	f := mkfile(1, 2000)
+	r.expect2(r.offer(f), "offset")
+	r.expect2(r.chunk(f, 0, 1000), "offset")
+	id, _, _ := r.find(f)
+	r.sendChunk(f, 1000, 1000)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rename not reached")
+	}
+	if err := r.b.CancelTransfer(id); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	r.expect2(r.next(), "done")
+	r.waitState(f, "done")
+	rec, _ := r.record(f)
+	if rec.Path == "" || rec.Canceled || !exists(filepath.Join(r.downloads, f.name)) {
+		t.Fatalf("record %+v", rec)
+	}
+}
+
+func TestResumeRefusalsAddNoHistory(t *testing.T) {
+	cases := []string{"chunk without offer", "canceled retry", "unfinished limit", "low space new", "low space partial", "fifth active"}
+	for _, tc := range cases {
+		t.Run(tc, func(t *testing.T) {
+			s := stubSpace(t)
+			r := newRx(t)
+			f := mkfile(1, 100)
+			wantReceives := 0
+			record := incomingRecord{Name: f.name, Size: int64(len(f.data)), Hash: f.msg("offer", 0).Hash, Device: r.peer.ID}
+			switch tc {
+			case "canceled retry":
+				record.Canceled = true
+				if err := saveJSON(filepath.Join(r.folder(f), "state.json"), record); err != nil {
+					t.Fatal(err)
+				}
+			case "unfinished limit":
+				for n := range maxPartials {
+					r.seed(r.peer.ID, 1000+n, incomingRecord{}, time.Hour)
+				}
+			case "low space new":
+				s.low.Store(true)
+			case "low space partial":
+				if err := saveJSON(filepath.Join(r.folder(f), "state.json"), record); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(r.partial(f), f.data[:50], 0o600); err != nil {
+					t.Fatal(err)
+				}
+				s.low.Store(true)
+			case "fifth active":
+				for n := 2; n <= 5; n++ {
+					r.expect2(r.offer(mkfile(n, 100)), "offset")
+				}
+				wantReceives = 4
+			}
+			r.b.mu.Lock()
+			before := len(r.b.transfers)
+			r.b.mu.Unlock()
+			var rep resumeMessage
+			if tc == "chunk without offer" {
+				rep = r.chunk(f, 0, 50)
+			} else {
+				rep = r.offer(f)
+			}
+			if rep.Action != "error" || rep.ID != f.id {
+				t.Fatal(rep)
+			}
+			switch tc {
+			case "canceled retry":
+				if rep.Error != "the transfer was canceled" {
+					t.Fatal(rep)
+				}
+			case "low space new", "low space partial":
+				if !strings.Contains(rep.Error, "almost full") {
+					t.Fatal(rep)
+				}
+			}
+			r.b.mu.Lock()
+			gotHistory, gotReceives := len(r.b.transfers), r.b.content.receives[r.peer.ID]
+			r.b.mu.Unlock()
+			if gotHistory != before || gotReceives != wantReceives {
+				t.Fatalf("history %d->%d, receives %d want %d", before, gotHistory, gotReceives, wantReceives)
+			}
+		})
+	}
+}
+
+func TestResumeFifthOfferKeepsRecords(t *testing.T) {
+	r := newRx(t)
+	var folders []string
+	for n := range maxRecords - 4 {
+		rec := incomingRecord{Path: "/done"}
+		if n == 0 {
+			rec = incomingRecord{Canceled: true}
+		}
+		folders = append(folders, r.seed(r.peer.ID, 1000+n, rec, time.Hour))
+	}
+	for n := 1; n <= 4; n++ {
+		f := mkfile(n, 100)
+		r.expect2(r.offer(f), "offset")
+		folders = append(folders, r.folder(f))
+	}
+	if rep := r.offer(mkfile(5, 100)); rep.Action != "error" {
+		t.Fatal(rep)
+	}
+	for _, folder := range folders {
+		if !exists(folder) {
+			t.Fatalf("record removed: %s", folder)
+		}
+	}
+}
+
+func TestResumeExpiredPartialsArePruned(t *testing.T) {
+	r := newRx(t)
+	var folders []string
+	for n := range maxPartials {
+		folders = append(folders, r.seed(r.peer.ID, 1000+n, incomingRecord{}, 8*24*time.Hour))
+	}
+	if rep := r.offer(mkfile(1, 100)); rep.Action != "offset" || rep.Offset != 0 {
+		t.Fatal(rep)
+	}
+	for _, folder := range folders {
+		if exists(folder) {
+			t.Fatalf("expired record remains: %s", folder)
+		}
+	}
+}
+
+func TestResumeReofferDoneWhileBusy(t *testing.T) {
+	r := newRx(t)
+	f := mkfile(1, 100)
+	r.expect2(r.offer(f), "offset")
+	r.expect2(r.chunk(f, 0, 100), "done")
+	for n := 2; n <= 5; n++ {
+		r.expect2(r.offer(mkfile(n, 100)), "offset")
+	}
+	r.b.mu.Lock()
+	before := len(r.b.transfers)
+	r.b.mu.Unlock()
+	if rep := r.offer(f); rep.Action != "done" || rep.Offset != 100 {
+		t.Fatal(rep)
+	}
+	r.b.mu.Lock()
+	after := len(r.b.transfers)
+	r.b.mu.Unlock()
+	if after != before {
+		t.Fatalf("history %d -> %d", before, after)
+	}
+}
+
+type testLogBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+var testSweepSink atomic.Pointer[chan struct{}]
+var testSweepMu sync.Mutex
+
+func init() {
+	afterSweep = func() {
+		testSweepMu.Lock()
+		defer testSweepMu.Unlock()
+		if sink := testSweepSink.Load(); sink != nil {
+			select {
+			case *sink <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
+func (b *testLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.Write(p)
+}
+func (b *testLogBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.Buffer.String() }
+
+func TestResumeRefusalLogIsLimited(t *testing.T) {
+	shortIdle(t, 200*time.Millisecond)
+	r := newRx(t)
+	logs := &testLogBuffer{}
+	r.b.logger = log.New(logs, "", 0)
+	f := mkfile(1, 100)
+	for range 3 {
+		r.expect2(r.chunk(f, 0, 50), "error")
+	}
+	if got := strings.Count(logs.String(), "resumable transfer from"); got != 1 {
+		t.Fatalf("%d log lines: %s", got, logs.String())
+	}
+	time.Sleep(300 * time.Millisecond)
+	r.expect2(r.chunk(f, 0, 50), "error")
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 2 || !strings.HasSuffix(lines[1], "(and 2 more)") {
+		t.Fatalf("logs: %q", logs.String())
+	}
+}
+
+func TestResumeQueuedPacketIsNotStalled(t *testing.T) {
+	shortIdle(t, 200*time.Millisecond)
+	s := stubSpace(t)
+	r := newRx(t)
+	a, b := mkfile(1, 3000), mkfile(2, 3000)
+	for _, f := range []rfile{a, b} {
+		r.expect2(r.offer(f), "offset")
+		r.expect2(r.chunk(f, 0, 1000), "offset")
+	}
+	id, _, _ := r.find(b)
+	release := s.stall()
+	r.sendChunk(a, 1000, 1000)
+	select {
+	case <-s.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("space check not stalled")
+	}
+	r.sendChunk(b, 1000, 1000)
+	time.Sleep(300 * time.Millisecond)
+	release()
+	for range 2 {
+		r.expect2(r.next(), "offset")
+	}
+	if got, state, _ := r.find(b); got != id || state == "failed" {
+		t.Fatalf("B %s %s, want %s active", got, state, id)
+	}
+}
+
+func TestResumeBusyWorkerStillStallsSilentRun(t *testing.T) {
+	shortIdle(t, 200*time.Millisecond)
+	s := stubSpace(t)
+	r := newRx(t)
+	a, b := mkfile(1, 3000), mkfile(2, 3000)
+	for _, f := range []rfile{a, b} {
+		r.expect2(r.offer(f), "offset")
+		r.expect2(r.chunk(f, 0, 1000), "offset")
+	}
+	release := s.stall()
+	r.sendChunk(a, 1000, 1000)
+	select {
+	case <-s.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("space check not stalled")
+	}
+	gate := make(chan struct{})
+	defer close(gate)
+	r.sendReader(a.msg("chunk", 2000), io.MultiReader(bytes.NewReader(a.data[2000:2500]), gateReader{gate}, bytes.NewReader(a.data[2500:3000])), 1000)
+	waitFor(t, "second A packet queued", func() bool {
+		r.b.mu.Lock()
+		defer r.b.mu.Unlock()
+		return len(r.b.resumeWorkers[r.peer.ID].queued[a.id]) >= 2
+	})
+	r.b.handleResumable(r.peer, r.onPhone, proto.New(proto.TypeFluxTransfer, a.msg("offer", 0)))
+	time.Sleep(300 * time.Millisecond)
+	release()
+	r.expect2(r.next(), "offset")
+	waitFor(t, "second A chunk started", func() bool { return r.size(r.partial(a)) >= 2500 })
+	r.waitState(b, "failed")
+	if _, _, msg := r.find(b); msg != errStalled.Error() {
+		t.Fatalf("B error %q", msg)
+	}
+	r.b.mu.Lock()
+	w := r.b.resumeWorkers[r.peer.ID]
+	r.b.mu.Unlock()
+	if w == nil {
+		t.Fatal("A run ended")
+	}
+	// The worker owns runs; a live transfer state proves A was kept.
+	if state := r.state(a); state != "active" {
+		t.Fatalf("A state %s", state)
+	}
+}
+
+func TestResumeReconnectKeepsRun(t *testing.T) {
+	shortIdle(t, 400*time.Millisecond)
+	sweeps := make(chan struct{}, 16)
+	testSweepSink.Store(&sweeps)
+	t.Cleanup(func() { testSweepSink.Store(nil) })
+	r := newRx(t)
+	f := mkfile(1, 3000)
+	r.expect2(r.offer(f), "offset")
+	r.expect2(r.chunk(f, 0, 1000), "offset")
+	id, _, _ := r.find(f)
+	old := r.onPhone
+	r.onDesk.Close()
+	select {
+	case <-old.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("link did not close")
+	}
+	select {
+	case <-sweeps:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no sweep")
+	}
+	r.attach()
+	r.expect2(r.chunk(f, 1000, 1000), "offset")
+	r.expect2(r.chunk(f, 2000, 1000), "done")
+	if got, state, _ := r.find(f); got != id || state != "done" {
+		t.Fatalf("transfer %s %s", got, state)
+	}
+	r.b.mu.Lock()
+	defer r.b.mu.Unlock()
+	for _, tr := range r.b.transfers {
+		if tr.Name == f.name && tr.State == "failed" {
+			t.Fatal("failed history entry")
+		}
+	}
+}
+
+func TestResumeStaleLinkPacketKeepsRun(t *testing.T) {
+	r := newRx(t)
+	f := mkfile(1, 3000)
+	r.expect2(r.offer(f), "offset")
+	r.expect2(r.chunk(f, 0, 1000), "offset")
+	id, _, _ := r.find(f)
+	stale := r.onPhone
+	r.attach()
+	r.b.handleResumable(r.peer, stale, proto.New(proto.TypeFluxTransfer, f.msg("chunk", 1000)))
+	r.expect2(r.next(), "error")
+	if got, _, _ := r.find(f); got != id {
+		t.Fatalf("run changed: %s -> %s", id, got)
+	}
+	if rep := r.chunk(f, 1000, 1000); rep.Action != "offset" || rep.Offset != 2000 {
+		t.Fatal(rep)
+	}
+}
+
+func TestResumeLinkDropMidChunkKeepsRun(t *testing.T) {
+	r := newRx(t)
+	f := mkfile(1, 3000)
+	r.expect2(r.offer(f), "offset")
+	id, _, _ := r.find(f)
+	old := r.onPhone
+	r.sendReader(f.msg("chunk", 0), io.MultiReader(bytes.NewReader(f.data[:500]), closeLinkReader{link: r.onDesk}), 1000)
+	select {
+	case <-old.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("link stayed open")
+	}
+	waitFor(t, "500 bytes received", func() bool { return r.size(r.partial(f)) == 500 })
+	r.attach()
+	if rep := r.offer(f); rep.Action != "offset" || rep.Offset != 500 {
+		t.Fatal(rep)
+	}
+	if got, state, _ := r.find(f); got != id || state != "active" {
+		t.Fatalf("transfer %s %s", got, state)
+	}
+}
+
+type closeLinkReader struct{ link *lan.Link }
+
+func (r closeLinkReader) Read([]byte) (int, error) { r.link.Close(); return 0, io.EOF }
+
+func TestResumeFailingPacketsDoNotExtendRun(t *testing.T) {
+	shortIdle(t, 400*time.Millisecond)
+	r := newRx(t)
+	f := mkfile(1, 3000)
+	r.expect2(r.offer(f), "offset")
+	r.expect2(r.chunk(f, 0, 1000), "offset")
+	last := time.Now()
+	stale := r.onPhone
+	r.attach()
+	for time.Since(last) < 700*time.Millisecond && r.state(f) != "failed" {
+		r.b.handleResumable(r.peer, stale, proto.New(proto.TypeFluxTransfer, f.msg("chunk", 1000)))
+		r.expect2(r.next(), "error")
+		time.Sleep(100 * time.Millisecond)
+	}
+	if state := r.state(f); state != "failed" || time.Since(last) > 700*time.Millisecond {
+		t.Fatalf("state %s after %v", state, time.Since(last))
+	}
+	if _, _, msg := r.find(f); msg != errStalled.Error() && msg != errLinkDown.Error() {
+		t.Fatalf("error %q", msg)
+	}
+}
+
+func TestResumeUnpairEndsIdleRun(t *testing.T) {
+	shortIdle(t, 400*time.Millisecond)
+	r := newRx(t)
+	f := mkfile(1, 100)
+	r.expect2(r.offer(f), "offset")
+	start := time.Now()
+	r.b.mu.Lock()
+	r.peer.Paired = false
+	r.b.mu.Unlock()
+	r.waitState(f, "failed")
+	if elapsed := time.Since(start); elapsed >= 250*time.Millisecond {
+		t.Fatalf("unpair took %v", elapsed)
+	}
+	if _, _, msg := r.find(f); msg != errReceiveUnpaired.Error() {
+		t.Fatalf("error %q", msg)
+	}
+}
+
+func TestResumePayloadStall(t *testing.T) {
+	shortIdle(t, 400*time.Millisecond)
+	chunkTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { chunkTimeout = time.Minute })
+	r := newRx(t)
+	f := mkfile(1, 3000)
+	r.expect2(r.offer(f), "offset")
+	gate := make(chan struct{})
+	r.sendReader(f.msg("chunk", 0), io.MultiReader(bytes.NewReader(f.data[:500]), gateReader{gate}), 1000)
+	r.expect2(r.next(), "error")
+	close(gate)
+	r.waitState(f, "failed")
+	if n := r.size(r.partial(f)); n != 500 {
+		t.Fatalf("partial %d bytes", n)
+	}
+	if rep := r.offer(f); rep.Action != "offset" || rep.Offset != 500 {
+		t.Fatal(rep)
+	}
+}
+
+func assertNoDownloadParts(t *testing.T, dir, name string) {
+	t.Helper()
+	if exists(filepath.Join(dir, name)) {
+		t.Fatal("published file exists")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), partPrefix) && strings.HasSuffix(entry.Name(), partSuffix) {
+			t.Fatalf("temporary file %s remains", entry.Name())
+		}
+	}
+}
+
+func TestResumeCrossFsCopyFails(t *testing.T) {
+	renameFile = func(_, _ string) error { return syscall.EXDEV }
+	copyAcross = func(dst io.Writer, src io.Reader) (int64, error) {
+		n, err := io.CopyN(dst, src, 1000)
+		if err != nil {
+			return n, err
+		}
+		return n, fmt.Errorf("disk failed")
+	}
+	t.Cleanup(func() { renameFile, copyAcross = os.Rename, io.Copy })
+	r := newRx(t)
+	f := mkfile(1, 2000)
+	r.expect2(r.offer(f), "offset")
+	r.expect2(r.chunk(f, 0, 2000), "error")
+	r.waitState(f, "failed")
+	assertNoDownloadParts(t, r.downloads, f.name)
+	if rec, _ := r.record(f); rec.Path != "" {
+		t.Fatalf("record path %q", rec.Path)
+	}
+	if n := r.size(r.partial(f)); n != 2000 {
+		t.Fatalf("partial %d bytes", n)
+	}
+	renameFile, copyAcross = os.Rename, io.Copy
+	if rep := r.offer(f); rep.Action != "done" {
+		t.Fatal(rep)
+	}
+	if !exists(filepath.Join(r.downloads, f.name)) {
+		t.Fatal("file not published")
+	}
+}
+
+func TestResumeCrossFsCopyLinkDrop(t *testing.T) {
+	shortIdle(t, 400*time.Millisecond)
+	var r *rx
+	// The hooks stay installed until cleanup; the flag turns them off, so
+	// the test never writes a variable that the worker may be reading.
+	var hooked atomic.Bool
+	hooked.Store(true)
+	renameFile = func(old, new string) error {
+		if !hooked.Load() {
+			return os.Rename(old, new)
+		}
+		return syscall.EXDEV
+	}
+	copyAcross = func(dst io.Writer, src io.Reader) (int64, error) {
+		if !hooked.Load() {
+			return io.Copy(dst, src)
+		}
+		n, err := io.CopyN(dst, src, 1000)
+		if err != nil {
+			return n, err
+		}
+		r.onDesk.Close()
+		<-r.onPhone.Done()
+		<-src.(ctxReader).ctx.Done()
+		more, err := io.Copy(dst, src)
+		return n + more, err
+	}
+	t.Cleanup(func() { renameFile, copyAcross = os.Rename, io.Copy })
+	r = newRx(t)
+	f := mkfile(1, 2000)
+	r.expect2(r.offer(f), "offset")
+	r.sendChunk(f, 0, 2000)
+	select {
+	case <-r.onPhone.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("link stayed open")
+	}
+	waitFor(t, "partial complete", func() bool { return r.size(r.partial(f)) == 2000 })
+	waitFor(t, "failed copy cleanup", func() bool {
+		if exists(filepath.Join(r.downloads, f.name)) {
+			return false
+		}
+		entries, _ := os.ReadDir(r.downloads)
+		return len(entries) == 0
+	})
+	assertNoDownloadParts(t, r.downloads, f.name)
+	if state := r.state(f); state == "failed" {
+		t.Fatal("run failed before idle")
+	}
+	r.attach()
+	hooked.Store(false)
+	if rep := r.offer(f); rep.Action != "done" {
+		t.Fatal(rep)
+	}
+	if !exists(filepath.Join(r.downloads, f.name)) {
+		t.Fatal("file not published")
+	}
+}
+
 // A packet that arrives while the idle worker retires is still handled (R2).
 func TestResumePacketRacesWorkerRetirement(t *testing.T) {
 	shortIdle(t, 40*time.Millisecond)
@@ -742,18 +1300,42 @@ func TestResumeIdleEndsRunBetweenPackets(t *testing.T) {
 // A chunk that takes longer than the idle time does not end the run.
 func TestResumeSlowChunkIsNotIdle(t *testing.T) {
 	shortIdle(t, 150*time.Millisecond)
+	sweeps := make(chan struct{}, 16)
+	testSweepSink.Store(&sweeps)
+	t.Cleanup(func() { testSweepSink.Store(nil) })
 	r := newRx(t)
 	f := mkfile(1, 3000)
 	r.expect2(r.offer(f), "offset")
+	id, _, _ := r.find(f)
 	gate := make(chan struct{})
 	time.AfterFunc(450*time.Millisecond, func() { close(gate) })
 	rd := io.MultiReader(bytes.NewReader(f.data[:500]), gateReader{gate}, bytes.NewReader(f.data[500:1000]))
 	r.sendReader(f.msg("chunk", 0), rd, 1000)
 	r.expect2(r.next(), "offset")
-	if s := r.state(f); s == "failed" {
-		t.Fatal("the idle check ended a working run")
+	for range 2 {
+		select {
+		case <-sweeps:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no idle sweep")
+		}
 	}
-	r.expect2(r.chunk(f, 1000, 1000), "offset")
+	if got, state, _ := r.find(f); got != id || state != "active" {
+		t.Fatalf("transfer %s %s, want %s active", got, state, id)
+	}
+	r.b.mu.Lock()
+	count := 0
+	for _, tr := range r.b.transfers {
+		if tr.Name == f.name {
+			count++
+		}
+	}
+	r.b.mu.Unlock()
+	if count != 1 {
+		t.Fatalf("%d history entries", count)
+	}
+	if rep := r.chunk(f, 1000, 1000); rep.Action != "offset" {
+		t.Fatal(rep)
+	}
 }
 
 // The state cannot be saved after the rename: the published file stays (R6).
@@ -842,5 +1424,24 @@ func TestResumeWorkerUsesTheCurrentDevice(t *testing.T) {
 	t.Logf("re-paired device offer: %+v", rep)
 	if rep.Action != "offset" {
 		t.Errorf("worker uses the stale device")
+	}
+}
+
+// An unpair after the file is published leaves the transfer done.
+func TestResumeUnpairAfterPublishKeepsDone(t *testing.T) {
+	t.Cleanup(func() { renameFile = os.Rename })
+	r := newRx(t)
+	renameFile = func(old, new string) error {
+		r.b.mu.Lock()
+		r.peer.Paired = false
+		r.b.mu.Unlock()
+		return os.Rename(old, new)
+	}
+	f := mkfile(8, 2000)
+	r.expect2(r.offer(f), "offset")
+	r.expect2(r.chunk(f, 0, 2000), "done")
+	r.waitState(f, "done")
+	if !exists(filepath.Join(r.downloads, f.name)) {
+		t.Fatal("published file missing")
 	}
 }
