@@ -100,8 +100,7 @@ func packageArch() string {
 	return "x86_64"
 }
 
-// installPackage installs the release package with pacman. Without a
-// package for this architecture, an AUR helper builds it. A release with
+// installPackage installs the release package with pacman. A release with
 // the package but without SHA256SUMS is an error, because the upload of the
 // release can be incomplete. A release with files that Latest removed is
 // also an error, because a removed file can be the package.
@@ -111,13 +110,7 @@ func installPackage(r release.Release, pkg string) error {
 		return fmt.Errorf("GitHub gives %s of the release %s at an address outside the Flux repository, so flux-cli does not install this release. See %s", strings.Join(r.Dropped, ", "), r.Tag, r.Page)
 	}
 	if !ok {
-		for _, helper := range []string{"yay", "paru"} {
-			if _, err := exec.LookPath(helper); err == nil {
-				fmt.Printf("The release has no %s package. %s builds it from AUR\n", packageArch(), helper)
-				return run(helper, "-S", pkg)
-			}
-		}
-		return fmt.Errorf("the release has no %s package. To build it, run: yay -S %s", packageArch(), pkg)
+		return fmt.Errorf("the release %s has no %s package, and Flux has no AUR package to build it from. See %s", r.Tag, packageArch(), r.Page)
 	}
 	sums, ok := r.Find(func(n string) bool { return n == "SHA256SUMS" })
 	if !ok {

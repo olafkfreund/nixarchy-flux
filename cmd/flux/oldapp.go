@@ -3,7 +3,7 @@ package main
 import "fmt"
 
 // latestRelease is the page with the latest apps.
-const latestRelease = "https://github.com/bjarneo/flux/releases/latest"
+const latestRelease = "https://github.com/olafkfreund/nixarchy-flux/releases/latest"
 
 // oldAppFix is the fix for a device with a Flux app from before 0.8. That
 // app cannot connect to this fluxd, so flux-cli update --phone cannot send

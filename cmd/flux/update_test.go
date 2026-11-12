@@ -107,8 +107,8 @@ func TestRootInstall(t *testing.T) {
 	}
 }
 
-// TestInstallPackageNoAUR checks that a release that flux-cli cannot check
-// does not switch to an AUR build. A fake yay records each run.
+// TestInstallPackageNoAUR checks that missing or untrusted packages never
+// trigger an AUR build. A fake yay records each run.
 func TestInstallPackageNoAUR(t *testing.T) {
 	bin := t.TempDir()
 	mark := filepath.Join(t.TempDir(), "yay.ran")
@@ -117,7 +117,7 @@ func TestInstallPackageNoAUR(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)
-	const dir = "https://github.com/bjarneo/flux/releases/download/v0.7.0/"
+	const dir = "https://github.com/olafkfreund/nixarchy-flux/releases/download/v0.7.0/"
 	name := "omarchy-flux-0.7.0-1-" + packageArch() + ".pkg.tar.zst"
 	sums := release.Asset{Name: "SHA256SUMS", URL: dir + "SHA256SUMS", Size: 100}
 	cases := []struct {
@@ -136,12 +136,18 @@ func TestInstallPackageNoAUR(t *testing.T) {
 		}
 	}
 
-	// A complete release without a package for this architecture gets an
-	// AUR build. This case shows that the fake yay works.
-	if err := installPackage(release.Release{Tag: "v0.7.0", Assets: []release.Asset{sums}}, "omarchy-flux"); err != nil {
-		t.Fatal(err)
+	// A release without a package for this architecture points to its page.
+	r := release.Release{Tag: "v0.7.0", Page: "https://github.com/olafkfreund/nixarchy-flux/releases/tag/v0.7.0", Assets: []release.Asset{sums}}
+	err := installPackage(r, "omarchy-flux")
+	if err == nil {
+		t.Fatal("no error for a release without the package")
 	}
-	if _, err := os.Stat(mark); err != nil {
-		t.Errorf("yay did not run for a release without the package: %v", err)
+	for _, want := range []string{r.Tag, packageArch(), "no AUR package", r.Page} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+	if _, err := os.Stat(mark); !os.IsNotExist(err) {
+		t.Errorf("yay ran for a release without the package: %v", err)
 	}
 }
