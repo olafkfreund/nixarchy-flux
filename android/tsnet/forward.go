@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"net"
@@ -104,16 +105,17 @@ func (w drainWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// exitOnStdinEOF cancels cancel when stdin closes. The app holds the write
-// end, so the node exits when the app process does.
-func exitOnStdinEOF(cancel func()) {
-	var b [64]byte
-	for {
-		if _, err := os.Stdin.Read(b[:]); err != nil {
-			cancel()
-			return
+// readStdin cancels cancel when stdin closes, and calls recheck on each
+// "net" line. The app holds the write end, so the node exits when the app
+// process does.
+func readStdin(r io.Reader, cancel func(), recheck func()) {
+	s := bufio.NewScanner(r)
+	for s.Scan() {
+		if s.Text() == "net" {
+			recheck()
 		}
 	}
+	cancel()
 }
 
 // watchParent cancels cancel when the process pid no longer exists, so that

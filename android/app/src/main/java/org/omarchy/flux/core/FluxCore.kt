@@ -4,12 +4,17 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import org.omarchy.flux.net.LanBackend
 import org.omarchy.flux.net.Link
+import org.omarchy.flux.net.TsnetNode
 import org.omarchy.flux.protocol.Identity
 import org.omarchy.flux.protocol.LocalCertificate
 import org.omarchy.flux.protocol.Packet
@@ -48,6 +53,15 @@ object FluxCore {
 
     val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { Thread(it, "flux-timer").apply { isDaemon = true } }
     val io = Executors.newCachedThreadPool { Thread(it, "flux-io").apply { isDaemon = true } }
+
+    /** The tailnet settings, as [TsnetNode] reads and writes them. */
+    private val tailnetStore = object : TsnetNode.Store {
+        override val key get() = settings.tailnetAuthKey
+        override val node get() = settings.tailnetNode
+        override val dir get() = settings.tailnetDir
+        override fun save(key: String, node: NodeState, dir: String) =
+            settings.saveTailnet(key, node, dir).also { publish() }
+    }
 
     private val lock = Any()
     private val devices = LinkedHashMap<String, Device>()
@@ -126,13 +140,21 @@ object FluxCore {
         }
         trust = TrustStore(app)
         settings = Settings(app)
+        val tailnetId = local.deviceId.lowercase().filter { it.isLetterOrDigit() || it == '-' }.take(20)
+        TsnetNode.configure(
+            File(app.applicationInfo.nativeLibraryDir, "libflux_tsnet.so"), app.filesDir,
+            "flux-" + tailnetId.ifBlank { "phone" }, android.os.Process.myPid(), tailnetStore,
+            { Log.i("FluxTsnet", it) }, { toast(it) },
+        )
         MotionCues.init(app)
         // The trust store holds only entries with a readable certificate.
         for (t in trust.all()) {
             val identity = Identity(t.id, t.name, t.type, 8, emptyList(), emptyList())
             val d = Device(this, identity)
             d.pairState = PairState.Paired
-            d.lastIp = t.lastIp
+            // Builds before #50 stored the tailnet node's 127.0.0.1.
+            if (isLoopbackText(t.lastIp)) trust.update(t.id) { it.copy(lastIp = "") }
+            d.lastIp = t.lastIp.takeUnless { isLoopbackText(it) }.orEmpty()
             d.wake = t.wake
             d.certificate = trust.certificate(t.id)
             devices[t.id] = d
@@ -147,6 +169,8 @@ object FluxCore {
         // The service starts the network after the first frame, so the paired computers show as connecting until then.
         if (settings.enabled) startConnectGrace()
         publish()
+        // The computer rows show "via tailnet" only while the node is up.
+        CoroutineScope(SupervisorJob() + Dispatchers.Default).launch { TsnetNode.state.collect { publish() } }
     }
 
     /**
@@ -335,7 +359,7 @@ object FluxCore {
             if (old != null && old !== link) MotionCues.onLinkLost(d)
             if (old != null && old !== link) old.close()
             d.certificate = link.peerCertificate
-            d.lastIp = link.address.hostAddress ?: ""
+            d.lastIp = nextLastIp(d.lastIp, link.address)
             if (pinned != null) {
                 d.pairState = PairState.Paired
                 trust.update(id) { it.copy(name = link.identity.deviceName, lastIp = d.lastIp) }
@@ -476,6 +500,7 @@ object FluxCore {
                 enabled = settings.enabled,
                 remoteAccess = settings.remoteAccess,
                 tailnetKeySet = settings.tailnetAuthKey.isNotBlank(),
+                tailnetNode = settings.tailnetNode,
                 theme = settings.theme,
                 touchpadScroll = settings.touchpadScroll,
                 computerTheme = ComputerThemes.current(),
@@ -607,20 +632,11 @@ object FluxCore {
     val remoteAccess: Boolean get() = settings.remoteAccess
 
     /**
-     * Starts or stops the userspace tailnet node after a setting changed.
+     * Runs the userspace tailnet node while Flux and Remote access are on.
      * The node joins the tailnet without a VPN interface, so another VPN
      * app keeps the VPN slot.
      */
-    fun applyTsnet() {
-        if (!settings.enabled || !settings.remoteAccess || settings.tailnetAuthKey.isBlank()) {
-            io.execute { org.omarchy.flux.net.TsnetNode.stop() }
-            return
-        }
-        val key = settings.tailnetAuthKey
-        val id = local.deviceId.lowercase().filter { it.isLetterOrDigit() || it == '-' }.take(20)
-        val host = "flux-" + id.ifBlank { "phone" }
-        io.execute { org.omarchy.flux.net.TsnetNode.start(app, key, host) }
-    }
+    fun applyTsnet() = TsnetNode.apply(settings.enabled && settings.remoteAccess)
 
     fun setRemoteAccess(on: Boolean) {
         settings.remoteAccess = on
@@ -628,15 +644,17 @@ object FluxCore {
         applyTsnet()
     }
 
-    fun setTailnetAuthKey(key: String) {
-        settings.tailnetAuthKey = key.trim()
+    /** Saves a new tailnet key. The node tries it on a new node while Remote access is on. */
+    fun setTailnetAuthKey(key: String) = TsnetNode.setKey(key)
+
+    /** Removes the tailnet node from this phone and turns Remote access off. */
+    fun forgetTailnet() {
+        settings.remoteAccess = false
         publish()
-        if (settings.remoteAccess) applyTsnet()
+        TsnetNode.forget()
     }
 
-    fun stopTsnet() {
-        io.execute { org.omarchy.flux.net.TsnetNode.stop() }
-    }
+    fun stopTsnet() = TsnetNode.apply(false)
 
     fun setTheme(mode: ThemeMode) {
         settings.theme = mode

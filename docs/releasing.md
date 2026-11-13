@@ -364,6 +364,10 @@ The workflows use fixed versions, so an upstream change does not reach a release
     --gradle-distribution-sha256-sum "$(curl -fsSL https://services.gradle.org/distributions/gradle-9.3.1-bin.zip.sha256)"
   ```
 
+- The tailnet node pins `tailscale.com` in `android/tsnet/go.mod`.
+  After a bump, `go test ./...` in `android/tsnet` must pass; it checks that no logs are uploaded or buffered.
+  Also read the diff of `logpolicy`, `logtail`, `tsnet.startLogger`, `tsd`, and the `NetMon` and `MagicSock` methods that `recheck` in `main.go` calls: `Sys()` is not a stable API.
+
 - The Xcode builds copy `macos/Package.resolved` into the generated project and pass `-onlyUsePackageVersionsFromResolvedFile`.
   So the apps get the Swift package versions that `swift test` tests.
   A pin that does not fit `macos/Package.swift` stops the build.

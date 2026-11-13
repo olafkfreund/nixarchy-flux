@@ -2,6 +2,9 @@ package org.omarchy.flux.core
 
 import android.content.Context
 
+/** Whether the tailnet node enrolled. See [org.omarchy.flux.net.TsnetNode]. */
+enum class NodeState { None, Enrolled, NeedsLogin }
+
 /** The switches on the device home screen. */
 class Settings(context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -28,10 +31,25 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("remoteAccess", false)
         set(v) = prefs.edit().putBoolean("remoteAccess", v).apply()
 
-    /** The Tailscale auth key of the userspace node. Empty until the user enters one. */
-    var tailnetAuthKey: String
+    /** The Tailscale auth key, until the node it enrolled is up. Only [saveTailnet] writes it. */
+    val tailnetAuthKey: String
         get() = prefs.getString("tailnetAuthKey", "").orEmpty()
-        set(v) = prefs.edit().putString("tailnetAuthKey", v).apply()
+
+    /** Whether the tailnet node enrolled. */
+    val tailnetNode: NodeState
+        get() = NodeState.entries.firstOrNull { it.name == prefs.getString("tailnetNode", null) } ?: NodeState.None
+
+    /** The dir of the tailnet node in the app's files: "tsnet" or "tsnet-2". */
+    val tailnetDir: String
+        get() = prefs.getString("tailnetDir", null) ?: "tsnet"
+
+    /** The tailnet node's settings, saved together and at once. Returns false when they weren't written. */
+    fun saveTailnet(key: String, node: NodeState, dir: String): Boolean =
+        prefs.edit().apply {
+            if (key.isEmpty()) remove("tailnetAuthKey") else putString("tailnetAuthKey", key)
+            putString("tailnetNode", node.name)
+            putString("tailnetDir", dir)
+        }.commit()
 
     /** The descriptions of the shortcuts that the Omarchy panel pins, or null for the defaults. */
     var pinnedShortcuts: List<String>?

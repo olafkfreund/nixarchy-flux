@@ -64,11 +64,12 @@ object Wake {
     /**
      * The addresses that a magic packet goes to: the broadcast address of
      * each target, the broadcast address of each network of this phone,
-     * 255.255.255.255, and the last address of the computer.
+     * 255.255.255.255, and the last address of the computer. Loopback
+     * addresses are left out: a send there always succeeds.
      */
     fun destinations(targets: List<WakeTarget>, phoneBroadcasts: List<String>, lastIp: String): List<String> =
         (targets.map { it.broadcast } + phoneBroadcasts + "255.255.255.255" + lastIp)
-            .filter { IPV4.matches(it) }.distinct()
+            .filter { IPV4.matches(it) && !isLoopbackText(it) }.distinct()
 
     /**
      * Sends a magic packet for each target of computer [d], on a background

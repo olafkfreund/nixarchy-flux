@@ -44,6 +44,7 @@ import org.omarchy.flux.core.Android
 import org.omarchy.flux.core.CaptureKind
 import org.omarchy.flux.core.CaptureWatch
 import org.omarchy.flux.core.FluxCore
+import org.omarchy.flux.core.NodeState
 import org.omarchy.flux.core.NotificationSync
 import org.omarchy.flux.core.SmsSync
 import org.omarchy.flux.core.UiState
@@ -257,21 +258,23 @@ private fun RemoteAccessSection(state: UiState) {
     val nodeState by TsnetNode.state.collectAsState()
     var showKey by rememberSaveable { mutableStateOf(false) }
     var keyText by rememberSaveable { mutableStateOf("") }
+    var showForget by rememberSaveable { mutableStateOf(false) }
+    val enrolled = state.tailnetNode == NodeState.Enrolled
 
     fun askKey() {
         keyText = ""
         showKey = true
     }
     fun toggle() {
-        if (!state.remoteAccess && !state.tailnetKeySet) askKey()
+        if (!state.remoteAccess && !state.tailnetKeySet && !enrolled) askKey()
         else FluxCore.setRemoteAccess(!state.remoteAccess)
     }
 
     val detail = when (val n = nodeState) {
         is TsnetNode.State.Ready -> "Address ${n.address}. Add it as an extra address on the computer."
-        is TsnetNode.State.Starting -> "Connecting to the tailnet."
+        is TsnetNode.State.Starting -> n.note ?: "Connecting to the tailnet."
         is TsnetNode.State.Failed -> n.reason
-        else -> if (state.tailnetKeySet) "Reach this phone away from home without a VPN app." else "Needs a tailnet auth key."
+        else -> if (state.tailnetKeySet || enrolled) "Reach this phone away from home without a VPN app." else "Needs a tailnet auth key."
     }
 
     Column(Modifier.padding(top = 24.dp), verticalArrangement = Arrangement.spacedBy(TileGap)) {
@@ -294,6 +297,9 @@ private fun RemoteAccessSection(state: UiState) {
             }
             TextButton(onClick = { askKey() }) { Text("Change key") }
         }
+        if (state.tailnetKeySet || state.tailnetNode != NodeState.None) {
+            TextButton(onClick = { showForget = true }) { Text("Forget node") }
+        }
     }
 
     if (showKey) {
@@ -301,13 +307,21 @@ private fun RemoteAccessSection(state: UiState) {
             onDismissRequest = { showKey = false },
             title = { Text("Tailnet auth key") },
             text = {
-                OutlinedTextField(
-                    value = keyText,
-                    onValueChange = { keyText = it },
-                    label = { Text("tskey-auth-...") },
-                    singleLine = false,
-                    minLines = 3,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (enrolled) {
+                        Text(
+                            "A new key makes a new node with a new address. Add the new address on " +
+                                "each computer. Remove the old node in the admin console.",
+                        )
+                    }
+                    OutlinedTextField(
+                        value = keyText,
+                        onValueChange = { keyText = it },
+                        label = { Text("tskey-auth-...") },
+                        singleLine = false,
+                        minLines = 3,
+                    )
+                }
             },
             confirmButton = {
                 TextButton(
@@ -320,6 +334,21 @@ private fun RemoteAccessSection(state: UiState) {
                 ) { Text("Save") }
             },
             dismissButton = { TextButton(onClick = { showKey = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (showForget) {
+        AlertDialog(
+            onDismissRequest = { showForget = false },
+            title = { Text("Forget node") },
+            text = { Text("Remove the tailnet node from this phone? Remove it in the Tailscale admin console too.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showForget = false
+                    FluxCore.forgetTailnet()
+                }) { Text("Forget") }
+            },
+            dismissButton = { TextButton(onClick = { showForget = false }) { Text("Cancel") } },
         )
     }
 }

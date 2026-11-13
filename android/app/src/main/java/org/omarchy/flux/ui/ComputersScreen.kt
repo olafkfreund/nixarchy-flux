@@ -176,13 +176,16 @@ private fun PhoneRow(state: UiState) {
     }
 }
 
-/** The link of a computer in words: "Connected · Wi-Fi", "Connected · Tailscale", or "Offline". */
+/** The link of a computer in words: "Connected · Wi-Fi", "Connected · Tailscale", "Connected · via tailnet", or "Offline". */
 private fun linkLine(d: DeviceUi, onWifi: Boolean): String {
     if (!d.online) return "Offline"
     // Only an address with digits, dots, colons, and hex letters goes to the parser, so that it never looks up a name.
     val tailscale = d.ip.isNotBlank() && d.ip.none { it.isLetter() && it !in 'a'..'f' && it !in 'A'..'F' } &&
         runCatching { isTailscale(InetAddress.getByName(d.ip)) }.getOrDefault(false)
     return when {
+        d.viaTailnet -> "Connected · via tailnet"
+        // A loopback link while the node isn't up: from the node or from an app on this phone.
+        d.ip.isBlank() -> "Connected"
         tailscale -> "Connected · Tailscale"
         onWifi -> "Connected · Wi-Fi"
         else -> "Connected"
