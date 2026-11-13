@@ -448,3 +448,10 @@ Check the phone connection, enrolled key, fingerprint setup, and approval timeou
 A new fingerprint can invalidate the phone key and require enrollment again.
 Keep the password fallback active while you diagnose approval.
 See [approval setup](approvals.md).
+
+## Approve, Enroll, Pair, or Start does nothing
+
+The phone says that another window covered Flux, and nothing else happens.
+Flux refuses a tap while a window of another app lies over it, so that an app cannot draw a false request over Flux and make you tap it.
+Bubbles and floating buttons of other apps do this, and on Samsung devices the S Pen Air Command button.
+Move the window off the button, or close it, then tap **Approve**, **Enroll**, **Pair**, **Start**, or **Play on phone** again before the request times out.
