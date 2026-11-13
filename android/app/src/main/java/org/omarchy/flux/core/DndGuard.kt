@@ -39,6 +39,17 @@ class DndGuard(private val settleMs: Long = 3_000) {
         return true
     }
 
+    /**
+     * Puts the guard back on the state the phone really has, after a write
+     * that the phone refused: a retry of the same state must apply again.
+     */
+    @Synchronized
+    fun reset(on: Boolean) {
+        known = on
+        valid = true
+        pending = false
+    }
+
     /** Takes a state from a computer. Returns true when the phone must apply it. */
     @Synchronized
     fun remote(on: Boolean, now: Long): Boolean {

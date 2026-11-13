@@ -68,6 +68,17 @@ class DndSyncTest {
     }
 
     @Test
+    fun retryAfterARefusedWriteApplies() {
+        val env = Fake(refuse = true)
+        val l = logic()
+        l.onSet(env, true)
+        env.refuse = false
+        env.log.clear()
+        l.onSet(env, true)
+        assertEquals(listOf("set true", "report set true all"), env.log)
+    }
+
+    @Test
     fun refusedSyncWriteIsNotForwarded() {
         val env = Fake(refuse = true)
         logic().onPacket(env, "pc1", true)

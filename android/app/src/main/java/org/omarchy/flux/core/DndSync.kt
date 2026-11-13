@@ -120,14 +120,14 @@ class DndLogic(private val guard: DndGuard) {
 
     fun onPacket(env: Env, from: String, on: Boolean) = env.async {
         if (env.usable() && guard.remote(on, env.now())) {
-            if (env.setFilter(on)) env.forward(on, except = from)
+            if (env.setFilter(on)) env.forward(on, except = from) else guard.reset(env.isOn())
             env.report("sync", env.current(), null)
         }
     }
 
     fun onSet(env: Env, on: Boolean) = env.async {
         // Marked remote: the change is not a local one, so it is not sent as flux.dnd.
-        if (env.usable() && guard.remote(on, env.now())) env.setFilter(on)
+        if (env.usable() && guard.remote(on, env.now()) && !env.setFilter(on)) guard.reset(env.isOn())
         // The state the phone has now, not the one asked for: a refused write shows.
         env.report("set", env.current(), null)
     }
