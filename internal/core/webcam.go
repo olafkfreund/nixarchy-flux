@@ -126,6 +126,7 @@ type webcamConfig struct {
 	Contrast     *float64 `json:"contrast,omitempty"`
 	Saturation   *float64 `json:"saturation,omitempty"`
 	Warmth       *float64 `json:"warmth,omitempty"`
+	Torch        *bool    `json:"torch,omitempty"`
 }
 
 // webcamCaps is what the camera of the phone supports.
@@ -138,6 +139,7 @@ type webcamCaps struct {
 	Cameras      []string `json:"cameras,omitempty"`
 	Aspects      []string `json:"aspects,omitempty"`
 	Resolutions  []int    `json:"resolutions,omitempty"`
+	Torch        *bool    `json:"torch,omitempty"`
 }
 
 // cleanWebcamConfig checks the settings from the phone and returns them

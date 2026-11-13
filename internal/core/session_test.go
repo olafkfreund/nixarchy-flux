@@ -525,6 +525,8 @@ func TestCleanWebcamConfig(t *testing.T) {
 		{`{"zoom":1e300}`, ``},
 		{``, `{"cameras":["` + strings.Repeat("x", maxWebcamJSON) + `"]}`},
 		{`[1,2]`, ``},
+		{`{"torch":"yes"}`, ``},
+		{``, `{"torch":"yes"}`},
 	}
 	for _, c := range bad {
 		if _, _, err := cleanWebcamConfig(rawOrNil(c.config), rawOrNil(c.caps)); err == nil {
@@ -544,6 +546,10 @@ func TestCleanWebcamConfig(t *testing.T) {
 	if !strings.Contains(string(caps), `"alexandra's iphone 15 pro max camera"]`) {
 		t.Fatalf("the long camera name is missing: %s", caps)
 	}
+	cfg, caps, err = cleanWebcamConfig(rawOrNil(`{"torch":false}`), rawOrNil(`{"torch":false}`))
+	if err != nil || string(cfg) != `{"torch":false}` || string(caps) != `{"torch":false}` {
+		t.Fatalf("torch false: %s %s %v", cfg, caps, err)
+	}
 }
 
 // fluxd sends only the known webcam settings, with the same limits as the
@@ -556,7 +562,7 @@ func TestConfigureWebcamChecksSettings(t *testing.T) {
 	}
 	for _, c := range []string{
 		`{"resolution":1e300}`, `{"resolution":-9.2e18}`, `{"resolution":-720}`, `{"resolution":720.5}`,
-		`{"zoom":1e300}`, `{"brightness":-1e9}`, `{"mirror":"yes"}`, `{"extra":1}`,
+		`{"zoom":1e300}`, `{"brightness":-1e9}`, `{"mirror":"yes"}`, `{"torch":"yes"}`, `{"extra":1}`,
 		`{"camera":"` + strings.Repeat("x", maxWebcamText+1) + `"}`, `{}`, `[1]`, `null`,
 	} {
 		var e *Error
@@ -578,6 +584,15 @@ func TestConfigureWebcamChecksSettings(t *testing.T) {
 	l.mu.Unlock()
 	want := map[string]any{"resolution": 1080.0, "zoom": 2.5, "mirror": true, "camera": "front"}
 	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sent %#v", got)
+	}
+	if err := d.ConfigureWebcam(json.RawMessage(`{"torch":false}`), false); err != nil {
+		t.Fatal(err)
+	}
+	l.mu.Lock()
+	got = l.sent[1]["config"]
+	l.mu.Unlock()
+	if !reflect.DeepEqual(got, map[string]any{"torch": false}) {
 		t.Fatalf("sent %#v", got)
 	}
 }
