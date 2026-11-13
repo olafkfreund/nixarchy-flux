@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
@@ -31,6 +33,7 @@ import androidx.compose.ui.input.pointer.motionEventSpy
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -71,6 +74,7 @@ fun StreamRequestSheet(r: StreamRequest, onStart: () -> Unit, onDismiss: () -> U
     }
     // The sheet has its own window, so the touch check of MainActivity does not see its touches.
     var obscured by remember { mutableStateOf(false) }
+    var blocked by remember(r) { mutableStateOf(false) }
     // The uptime of the last touch down that no tap used yet. A click of TalkBack has no touch.
     var downAt by remember { mutableLongStateOf(Long.MAX_VALUE) }
     val icon = when (r.kind) {
@@ -95,6 +99,7 @@ fun StreamRequestSheet(r: StreamRequest, onStart: () -> Unit, onDismiss: () -> U
                         MotionEvent.ACTION_UP -> obscured = obscured || Overlays.obscured(ev)
                     }
                 }
+                .verticalScroll(rememberScrollState())
                 .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -106,6 +111,7 @@ fun StreamRequestSheet(r: StreamRequest, onStart: () -> Unit, onDismiss: () -> U
                 )
             }
             T(body, size = 14, color = Tn.sub, lineHeight = 1.35f)
+            BlockedNotice(blocked, align = TextAlign.Start)
             Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(TileGap)) {
                 FluxButton("Not now", onDismiss, Modifier.weight(1f).fillMaxHeight(), kind = ButtonKind.Outlined)
                 FluxButton(
@@ -116,8 +122,11 @@ fun StreamRequestSheet(r: StreamRequest, onStart: () -> Unit, onDismiss: () -> U
                         when {
                             // The finger was down before Start was ready.
                             down < armedAt -> Unit
-                            obscured -> FluxCore.toast("Another app draws over Flux. Close that app, then try again.")
-                            else -> onStart()
+                            obscured -> blocked = true
+                            else -> {
+                                blocked = false
+                                onStart()
+                            }
                         }
                     },
                     Modifier.weight(1f).fillMaxHeight(),
