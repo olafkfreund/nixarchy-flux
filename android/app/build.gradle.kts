@@ -55,10 +55,18 @@ android {
 
     buildTypes {
         release {
+            // shortcut: arm64 only (#23). The tailnet node exists only for
+            // arm64-v8a, and every supported device is 64-bit ARM. Add an ABI
+            // here, and to buildTsnet, if a device needs one.
+            ndk { abiFilters += "arm64-v8a" }
             signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+        debug {
+            // x86_64 keeps the emulator workflow of docs/android.md.
+            ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         }
     }
 
