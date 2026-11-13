@@ -246,7 +246,7 @@ func (d *Daemon) dropTrustLocked(dev *Device) ([]uint32, error) {
 	dev.notifDesktop = map[string]uint32{}
 	dev.conversations = map[int64]*Conversation{}
 	dev.outbox = nil
-	dev.callOK, dev.missedOK = false, false
+	dev.callOK, dev.missedOK, dev.dndOK = false, false, false
 	dev.sshKey, dev.sshSPKI = nil, ""
 	if dev.link != nil {
 		dev.link.SetPaired(false)

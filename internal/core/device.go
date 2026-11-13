@@ -64,6 +64,8 @@ type Device struct {
 	callOK        bool
 	missed        MissedView
 	missedOK      bool
+	dnd           DndView
+	dndOK         bool
 
 	// pairLink and pairCert are the link and the certificate on which the
 	// open pairing started. pairKey comes from pairCert, and only pairCert
@@ -268,6 +270,7 @@ func (dev *Device) plugins() []string {
 		{"streamrequest", dev.accepts(proto.TypeFluxStreamRequest)},
 		// The device can play the audio of this computer, and start it
 		// after a request of this computer and a tap of its user.
+		{"dnd", dev.accepts(proto.TypeFluxDndSet) && dev.supports(proto.TypeFluxDndState)},
 		{"speaker", dev.accepts(proto.TypeFluxSpeaker) && dev.accepts(proto.TypeFluxStreamRequest)},
 	}
 	out := []string{}
@@ -295,6 +298,7 @@ type DeviceView struct {
 	Battery       *Battery             `json:"battery"`
 	Call          *CallView            `json:"call,omitempty"`
 	MissedCall    *MissedView          `json:"missedCall,omitempty"`
+	Dnd           *DndView             `json:"dnd,omitempty"`
 	Plugins       []string             `json:"plugins"`
 	Notifications []*PhoneNotification `json:"notifications"`
 	Conversations []*Conversation      `json:"conversations"`
@@ -348,6 +352,10 @@ func (dev *Device) view() DeviceView {
 	if dev.missedOK && now().Unix()-dev.missed.At < int64((10*time.Minute)/time.Second) {
 		missed := dev.missed
 		v.MissedCall = &missed
+	}
+	if dev.dndOK {
+		dnd := dev.dnd
+		v.Dnd = &dnd
 	}
 	if v.Notifications == nil {
 		v.Notifications = []*PhoneNotification{}

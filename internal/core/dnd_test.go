@@ -177,3 +177,80 @@ func TestHandleDndAfterUnpair(t *testing.T) {
 		t.Fatalf("sets %v", dnd.sets)
 	}
 }
+
+// A flux.dnd.state report is stored and shown. It never reaches the desktop.
+func TestHandleDndState(t *testing.T) {
+	dnd := &slowDnd{release: make(chan struct{}), started: make(chan struct{})}
+	d := &Daemon{cfg: &config.Config{SyncDnd: true}, devices: map[string]*Device{}, dnd: dnd, logger: log.New(io.Discard, "", 0)}
+	dev := &Device{ID: "p1", Name: "Pixel 8", Paired: true}
+	d.handleDndState(dev, proto.New(proto.TypeFluxDndState, map[string]any{"on": true, "by": "set"}))
+	d.handleDndState(dev, proto.New(proto.TypeFluxDndState, map[string]any{"on": nil, "by": "bogus"}))
+	waitIdle(t, d, &d.content.dndQ)
+	if len(dnd.sets) != 0 {
+		t.Fatalf("the desktop got %v", dnd.sets)
+	}
+	d.mu.Lock()
+	v := dev.view()
+	d.mu.Unlock()
+	if v.Dnd == nil || v.Dnd.On != nil || v.Dnd.By != "" || v.Dnd.At == 0 {
+		t.Fatalf("dnd %+v", v.Dnd)
+	}
+	d.handleDndState(dev, proto.New(proto.TypeFluxDndState, map[string]any{"on": true, "by": "phone"}))
+	d.mu.Lock()
+	on, by := dev.dnd.On, dev.dnd.By
+	dev.dndOK = false
+	gone := dev.view().Dnd
+	d.mu.Unlock()
+	if on == nil || !*on || by != "phone" || gone != nil {
+		t.Fatalf("on %v by %q gone %v", on, by, gone)
+	}
+}
+
+// dnd.set sends one flux.dnd.set and leaves the desktop alone.
+func TestDndSetMethod(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	onDesk, onPhone, _, phoneID := linkPair(t, ctx)
+	got := make(chan *proto.Packet, 4)
+	go onPhone.Receive(func(p *proto.Packet) { got <- p })
+	dnd := &slowDnd{release: make(chan struct{}), started: make(chan struct{})}
+	d := &Daemon{cfg: &config.Config{SyncDnd: true}, devices: map[string]*Device{}, dnd: dnd, logger: log.New(io.Discard, "", 0), ctx: ctx}
+	dev := &Device{ID: phoneID, Name: "Pixel 8", Paired: true, link: onDesk}
+	d.devices[phoneID] = dev
+	call := func(raw string) error {
+		_, err := d.Call(ctx, "dnd.set", []byte(raw))
+		return err
+	}
+	if c := errCode(call(`{"device":"Pixel 8"}`)); c != "bad_params" {
+		t.Fatalf("no on: %q", c)
+	}
+	if c := errCode(call(`{"device":"Pixel 8","on":true}`)); c != "not_supported" {
+		t.Fatalf("no capability: %q", c)
+	}
+	dev.Incoming, dev.Outgoing = []string{proto.TypeFluxDndSet}, []string{proto.TypeFluxDndState}
+	if p := dev.plugins(); !slices.Contains(p, "dnd") {
+		t.Fatalf("plugins %v", p)
+	}
+	if err := call(`{"device":"Pixel 8","on":true}`); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case p := <-got:
+		var b struct{ On bool }
+		if p.Type != proto.TypeFluxDndSet || p.Decode(&b) != nil || !b.On {
+			t.Fatalf("packet %+v", p)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no flux.dnd.set")
+	}
+	waitIdle(t, d, &d.content.dndQ)
+	if len(dnd.sets) != 0 {
+		t.Fatalf("the desktop got %v", dnd.sets)
+	}
+	d.mu.Lock()
+	dev.link = nil
+	d.mu.Unlock()
+	if c := errCode(call(`{"device":"Pixel 8","on":false}`)); c != "offline" {
+		t.Fatalf("offline: %q", c)
+	}
+}

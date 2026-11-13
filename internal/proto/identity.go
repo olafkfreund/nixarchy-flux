@@ -55,6 +55,12 @@ const (
 	// TypeFluxDnd carries the Do Not Disturb state, {"on": bool}. Each side
 	// sends it after a local change. Both sides send it.
 	TypeFluxDnd = "flux.dnd"
+	// TypeFluxDndSet asks the phone to set its own Do Not Disturb state,
+	// {"on": bool}. The computer sends it.
+	TypeFluxDndSet = "flux.dnd.set"
+	// TypeFluxDndState reports the Do Not Disturb state of the phone,
+	// {"on": bool|null, "by": string}. The phone sends it.
+	TypeFluxDndState = "flux.dnd.state"
 	// TypeFluxMic starts and stops the phone as a microphone. Both sides
 	// send it.
 	TypeFluxMic = "flux.mic"
@@ -137,7 +143,7 @@ var Incoming = []string{
 	TypeShare, TypeShareUpdate, TypeNotification, TypeRunCommandRequest,
 	TypeMprisRequest, TypeSftpRequest,
 	TypeSmsMessages, TypeTelephony,
-	TypeFluxTunnel, TypeFluxWebcam, TypeFluxDnd, TypeFluxMic, TypeFluxScreen,
+	TypeFluxTunnel, TypeFluxWebcam, TypeFluxDnd, TypeFluxDndState, TypeFluxMic, TypeFluxScreen,
 	TypeFluxApprove, TypeFluxHerdr, TypeFluxClipboardImage, TypeMousepadRequest,
 	TypeFluxDesktop, TypeFluxShortcuts, TypeFluxTransfer,
 	TypeFluxAudioRequest,
@@ -151,7 +157,7 @@ var Outgoing = []string{
 	TypeNotification, TypeNotificationRequest, TypeNotificationReply, TypeNotificationAction,
 	TypeFindMyPhone, TypeRunCommand, TypeMpris,
 	TypeSmsRequest, TypeSmsConversations,
-	TypeSmsConversation, TypeSftp, TypeFluxWebcam, TypeFluxDnd,
+	TypeSmsConversation, TypeSftp, TypeFluxWebcam, TypeFluxDnd, TypeFluxDndSet,
 	TypeFluxMic, TypeFluxScreen, TypeFluxApprove, TypeFluxHerdr,
 	TypeFluxClipboardImage, TypeFluxInput, TypeFluxDesktop, TypeFluxShortcuts, TypeFluxTransfer,
 	TypeFluxTheme, TypeFluxStreamRequest,

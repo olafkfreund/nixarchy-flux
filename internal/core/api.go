@@ -148,7 +148,7 @@ func (d *Daemon) Snapshot() json.RawMessage {
 			// The phone data of a device that is not paired stays out of
 			// the state, also after an unpair.
 			v.Battery, v.Notifications, v.Conversations = nil, []*PhoneNotification{}, []*Conversation{}
-			v.Call, v.MissedCall = nil, nil
+			v.Call, v.MissedCall, v.Dnd = nil, nil, nil
 			v.Outbox = []OutboxMessage{}
 		}
 		v.AppUpdate = d.appUpdateLocked(dev)
@@ -255,6 +255,7 @@ type params struct {
 	Reset     bool            `json:"reset"`
 	All       bool            `json:"all"`
 	Expires   int64           `json:"expires"`
+	On        *bool           `json:"on"`
 }
 
 // Call runs one API method.
@@ -487,6 +488,20 @@ func (d *Daemon) Call(ctx context.Context, method string, raw json.RawMessage) (
 		return ok, d.SendSms(dev, p.Addresses, p.Body)
 	case "update.sendApp":
 		return ok, d.sendAppUpdate(dev)
+	case "dnd.set":
+		if p.On == nil {
+			return nil, apiErr("bad_params", "dnd.set needs on")
+		}
+		d.mu.Lock()
+		can, online := dev.accepts(proto.TypeFluxDndSet) && dev.supports(proto.TypeFluxDndState), dev.link != nil
+		d.mu.Unlock()
+		if !can {
+			return nil, apiErr("not_supported", "%s cannot set Do Not Disturb from this computer", name)
+		}
+		if !online {
+			return nil, apiErr("offline", "%s is offline", name)
+		}
+		return map[string]any{"sent": true}, d.send(dev, proto.New(proto.TypeFluxDndSet, map[string]any{"on": *p.On}))
 	}
 	return nil, apiErr("unknown_method", "Unknown method %q", method)
 }
@@ -496,7 +511,7 @@ var deviceMethods = map[string]bool{
 	"device.settings": true, "device.settings.set": true,
 	"pair.request": true, "pair.accept": true, "pair.reject": true, "pair.unpair": true,
 	"addresses.add": true, "addresses.remove": true,
-	"ring": true, "ping": true,
+	"ring": true, "ping": true, "dnd.set": true,
 	"clipboard.send": true, "share.files": true, "share.text": true, "share.url": true,
 	"notification.dismiss": true, "notification.dismissAll": true, "notification.reply": true, "notification.action": true,
 	"sms.refresh": true, "sms.thread": true, "sms.send": true,

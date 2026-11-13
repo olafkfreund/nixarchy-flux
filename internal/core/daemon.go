@@ -1089,6 +1089,7 @@ func (d *Daemon) receive(dev *Device, l *lan.Link) {
 	current := dev.link == l
 	if current {
 		dev.link = nil
+		dev.dndOK = false
 		dev.LastSeen = time.Now()
 	}
 	var note uint32

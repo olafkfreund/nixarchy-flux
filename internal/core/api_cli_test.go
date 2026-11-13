@@ -195,6 +195,33 @@ func TestSnapshotHidesDataOfUnpairedDevice(t *testing.T) {
 	}
 }
 
+// The state carries the call, missed call, dnd and approvals keys, and
+// approvals is [] when nothing waits.
+func TestSnapshotNewKeys(t *testing.T) {
+	d, dev := approveDaemon()
+	now := true
+	dev.dnd, dev.dndOK = DndView{On: &now, By: "phone", At: 1}, true
+	dev.call, dev.callOK = CallView{State: "ringing", Caller: "Ann", Since: 1}, true
+	dev.missed, dev.missedOK = MissedView{Caller: "Bob", At: time.Now().Unix()}, true
+	var s struct {
+		Approvals json.RawMessage `json:"approvals"`
+		Devices   []struct {
+			Call       *CallView   `json:"call"`
+			MissedCall *MissedView `json:"missedCall"`
+			Dnd        *DndView    `json:"dnd"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(d.Snapshot(), &s); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.Approvals) != "[]" || len(s.Devices) != 1 {
+		t.Fatalf("approvals %s devices %d", s.Approvals, len(s.Devices))
+	}
+	if v := s.Devices[0]; v.Call == nil || v.MissedCall == nil || v.Dnd == nil || v.Dnd.On == nil || !*v.Dnd.On {
+		t.Fatalf("device %+v", v)
+	}
+}
+
 // An unpair that cannot change devices.json returns an error, because the
 // device is paired again after a restart.
 func TestUnpairReportsATrustError(t *testing.T) {
