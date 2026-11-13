@@ -149,11 +149,17 @@ func (d *Daemon) acceptPair(dev *Device, want string) (string, error) {
 	if err := l.Send(proto.New(proto.TypePair, map[string]any{"pair": true})); err != nil {
 		// The device did not get the answer, so the pin goes away again.
 		var notes []uint32
+		dropped := false
 		d.mu.Lock()
 		if dev.Paired && dev.Cert.Equal(cert) {
 			notes, _ = d.dropTrustLocked(dev)
+			dropped = true
 		}
+		dropAt := time.Now() // (taken under d.mu: a request after it, on a new link, stays)
 		d.mu.Unlock()
+		if dropped {
+			d.dropApprovals(dev.ID, dropAt)
+		}
 		d.closeNotes(notes...)
 		d.markDirty()
 		d.logf("%s: send the pair answer: %v", name, err)
@@ -207,7 +213,9 @@ func (d *Daemon) Unpair(dev *Device) error {
 		delete(d.devices, dev.ID)
 	}
 	name := dev.Name
+	dropAt := time.Now() // (taken under d.mu: a request after it, on a new link, stays)
 	d.mu.Unlock()
+	d.dropApprovals(dev.ID, dropAt)
 	d.closeNotes(append(notes, note)...)
 	d.clearDeviceOutbox(dev.ID)
 	d.markDirty()
@@ -240,6 +248,7 @@ func (d *Daemon) dropTrustLocked(dev *Device) ([]uint32, error) {
 	dev.notifDesktop = map[string]uint32{}
 	dev.conversations = map[int64]*Conversation{}
 	dev.outbox = nil
+	dev.callOK, dev.missedOK, dev.dndOK = false, false, false
 	dev.sshKey, dev.sshSPKI = nil, ""
 	if dev.link != nil {
 		dev.link.SetPaired(false)
@@ -294,7 +303,11 @@ func (d *Daemon) handlePair(dev *Device, l *lan.Link, p *proto.Packet) {
 			// loop.
 			dev.pairEnded = time.Now()
 		}
+		dropAt := time.Now() // (taken under d.mu: a request after it, on a new link, stays)
 		d.mu.Unlock()
+		if paired {
+			d.dropApprovals(dev.ID, dropAt)
+		}
 		d.closeNotes(append(notes, note)...)
 		switch {
 		case paired:
@@ -358,7 +371,11 @@ func (d *Daemon) handlePair(dev *Device, l *lan.Link, p *proto.Packet) {
 	}
 	if refuse != "" {
 		notes = append(notes, dev.clearPairingLocked())
+		dropAt := time.Now() // (taken under d.mu: a request after it, on a new link, stays)
 		d.mu.Unlock()
+		if paired {
+			d.dropApprovals(dev.ID, dropAt)
+		}
 		d.closeNotes(notes...)
 		_ = l.Send(proto.New(proto.TypePair, map[string]any{"pair": false}))
 		switch refuse {
@@ -388,7 +405,11 @@ func (d *Daemon) handlePair(dev *Device, l *lan.Link, p *proto.Packet) {
 	d.startPairTimerLocked(dev)
 	// Tests change pairTimeout, so it is read under d.mu.
 	key, replaces, timeout := dev.pairKey, dev.pairNote, pairTimeout
+	dropAt := time.Now() // (taken under d.mu: a request after it, on a new link, stays)
 	d.mu.Unlock()
+	if paired {
+		d.dropApprovals(dev.ID, dropAt)
+	}
 	d.closeNotes(notes...)
 	// A new request of the device replaces its old notification, so each
 	// device has at most 1.

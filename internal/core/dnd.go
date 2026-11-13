@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"flux/internal/lan"
@@ -156,6 +157,40 @@ func (d *Daemon) handleDnd(dev *Device, p *proto.Packet) {
 	// state runs. Fast changes on the phone then end with the last state,
 	// and start 1 process at a time.
 	d.runContent(&d.content.dndQ, 0, func() { d.applyDnd(dev, l, on) })
+}
+
+// DndView is the Do Not Disturb state that a phone reported about itself.
+// On is nil when the phone cannot read or set it. At is when fluxd received
+// the report.
+type DndView struct {
+	On *bool  `json:"on"`
+	By string `json:"by"`
+	At int64  `json:"at"`
+}
+
+// handleDndState stores the state that a phone reports about itself. It
+// never applies the state to this computer.
+func (d *Daemon) handleDndState(dev *Device, l *lan.Link, p *proto.Packet) {
+	var body struct {
+		On *bool  `json:"on"`
+		By string `json:"by"`
+	}
+	if p.Decode(&body) != nil {
+		return
+	}
+	if !slices.Contains([]string{"phone", "sync", "set", "connect"}, body.By) {
+		body.By = ""
+	}
+	d.mu.Lock()
+	// A report from a replaced link or after an unpair is old: it must not
+	// overwrite the report of the current link.
+	if !dev.Paired || dev.link != l {
+		d.mu.Unlock()
+		return
+	}
+	dev.dnd, dev.dndOK = DndView{On: body.On, By: body.By, At: now().Unix()}, true
+	d.mu.Unlock()
+	d.markDirty()
 }
 
 // applyDnd sets the Do Not Disturb state of this computer to a state that

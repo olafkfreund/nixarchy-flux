@@ -108,6 +108,8 @@ They are on the **Sync** screen in **Computers**:
 
 Each switch applies to every paired computer, not only to the computer whose page shows it.
 See [sync switches](android-setup.md#sync-switches).
+
+`call` and `missedCall` put caller names and numbers in `state`, for the same local clients that already see notification text.
 Flux for iOS and Flux for macOS send less, because their systems give apps less access.
 See [Flux for iOS](ios.md#features) and [Flux for macOS](macos.md#features).
 

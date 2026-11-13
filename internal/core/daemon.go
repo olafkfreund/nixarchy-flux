@@ -330,6 +330,8 @@ func New(ctx context.Context, logger *log.Logger, opts Options) (*Daemon, error)
 		releaseWake:      make(chan struct{}, 1),
 		automationQ:      make(chan automationEvent, 128),
 	}
+	d.approvals.dirty = d.markDirty
+	d.sshSigns.dirty = d.markDirty
 	d.ready = make(chan struct{})
 	if exe, err := os.Executable(); err == nil {
 		d.binDir = filepath.Dir(exe)
@@ -1087,6 +1089,7 @@ func (d *Daemon) receive(dev *Device, l *lan.Link) {
 	current := dev.link == l
 	if current {
 		dev.link = nil
+		dev.dndOK = false
 		dev.LastSeen = time.Now()
 	}
 	var note uint32
@@ -1097,7 +1100,11 @@ func (d *Daemon) receive(dev *Device, l *lan.Link) {
 		note = dev.pairLinkEndedLocked()
 	}
 	name, paired := dev.Name, dev.Paired
+	dropAt := time.Now() // (taken under d.mu: a request after it, on a new link, stays)
 	d.mu.Unlock()
+	if current {
+		d.dropApprovals(dev.ID, dropAt)
+	}
 	if current && paired && d.ctx.Err() == nil {
 		d.watchDisconnect(dev)
 	}

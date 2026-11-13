@@ -45,6 +45,7 @@ var waitSlice = 50 * time.Second
 // approvalResult is the answer of the phone, as approve.wait returns it.
 type approvalResult struct {
 	State     string `json:"state"`
+	Error     string `json:"error,omitempty"`
 	Signature string `json:"signature,omitempty"`
 	PublicKey string `json:"publicKey,omitempty"`
 	Message   string `json:"message,omitempty"`
@@ -55,14 +56,22 @@ type approval struct {
 	kind     string // "request" or "enroll"
 	device   string
 	deadline time.Time
+	since    time.Time
 	done     chan struct{}
 	result   *approvalResult
 }
 
 // approvalBook holds the requests that wait for a phone.
 type approvalBook struct {
-	mu   sync.Mutex
-	byID map[string]*approval
+	mu    sync.Mutex
+	byID  map[string]*approval
+	dirty func()
+}
+
+type ApprovalView struct {
+	Kind   string `json:"kind"`
+	Device string `json:"device"`
+	Since  int64  `json:"since"`
 }
 
 // add stores a new request. A phone has at most 1 request at a time.
@@ -85,7 +94,22 @@ func (b *approvalBook) add(a *approval) error {
 	}
 	a.done = make(chan struct{})
 	b.byID[a.id] = a
+	if b.dirty != nil {
+		b.dirty()
+	}
 	return nil
+}
+
+func (b *approvalBook) views() []ApprovalView {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []ApprovalView
+	for _, a := range b.byID {
+		if a.kind == "request" && a.result == nil && time.Now().Before(a.deadline) {
+			out = append(out, ApprovalView{Kind: "sudo", Device: a.device, Since: a.since.Unix()})
+		}
+	}
+	return out
 }
 
 // pending returns the number of requests that wait for an answer.
@@ -123,7 +147,27 @@ func (b *approvalBook) deliver(device, id string, r approvalResult) bool {
 	}
 	a.result = &r
 	close(a.done)
+	if b.dirty != nil {
+		b.dirty()
+	}
 	return true
+}
+
+func (b *approvalBook) cancel(id string) (device string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if a := b.byID[id]; a != nil {
+		device = a.device
+		if a.result == nil {
+			a.result = &approvalResult{State: "failed", Error: "cancelled", Message: "the request was cancelled because Flux lost the phone"}
+			close(a.done)
+		}
+		delete(b.byID, id)
+		if b.dirty != nil {
+			b.dirty()
+		}
+	}
+	return device
 }
 
 // wait blocks until the phone answers, the request expires, or slice ends.
@@ -164,6 +208,9 @@ func (b *approvalBook) remove(id string) (device string) {
 	if a := b.byID[id]; a != nil {
 		device = a.device
 		delete(b.byID, id)
+		if b.dirty != nil {
+			b.dirty()
+		}
 	}
 	return device
 }
@@ -233,10 +280,12 @@ func (d *Daemon) ApproveRequest(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	timeout := d.approveTimeout()
-	a := &approval{id: newApprovalID(), kind: "request", device: dev.ID, deadline: time.Now().Add(time.Duration(timeout) * time.Second)}
+	since := time.Now()
+	a := &approval{id: newApprovalID(), kind: "request", device: dev.ID, since: since, deadline: since.Add(time.Duration(timeout) * time.Second)}
 	if err := d.approvals.add(a); err != nil {
 		return nil, err
 	}
+	time.AfterFunc(time.Until(a.deadline), d.markDirty)
 	body := map[string]any{
 		"kind": "request", "id": a.id, "host": req.Host, "user": req.User, "service": req.Service,
 		"tty": req.TTY, "rhost": req.RHost, "time": req.Time, "nonce": req.Nonce, "timeout": timeout,
@@ -270,6 +319,7 @@ func (d *Daemon) ApproveEnroll(raw json.RawMessage) (any, error) {
 	if err := d.approvals.add(a); err != nil {
 		return nil, err
 	}
+	time.AfterFunc(time.Until(a.deadline), d.markDirty)
 	body := map[string]any{
 		"kind": "enroll", "id": a.id, "host": e.Host, "user": e.User, "time": e.Time, "nonce": e.Nonce, "timeout": enrollTimeout,
 	}
@@ -318,12 +368,33 @@ func (d *Daemon) ApproveWait(ctx context.Context, id string) (any, error) {
 
 // ApproveCancel ends a request and closes it on the phone.
 func (d *Daemon) ApproveCancel(id string) error {
-	device := d.approvals.remove(id)
+	device := d.approvals.cancel(id)
 	if device == "" {
 		return apiErr("not_found", "No request with ID %s", id)
 	}
 	d.cancelApproval(device, id)
 	return nil
+}
+
+// dropApprovals cancels the sudo requests of devID that started before
+// the trust or the link went away. A request that started after it, on a
+// link that came back at once, stays. The phone is told to close each
+// cancelled prompt while it still has a link.
+func (d *Daemon) dropApprovals(devID string, before time.Time) {
+	d.approvals.mu.Lock()
+	var ids []string
+	for id, a := range d.approvals.byID {
+		// An answered request keeps its result for approve.wait (Codex PR review).
+		if a.device == devID && a.kind == "request" && a.result == nil && !a.since.After(before) {
+			ids = append(ids, id)
+		}
+	}
+	d.approvals.mu.Unlock()
+	for _, id := range ids {
+		if d.approvals.cancel(id) != "" {
+			d.cancelApproval(devID, id)
+		}
+	}
 }
 
 func (d *Daemon) cancelApproval(device, id string) {

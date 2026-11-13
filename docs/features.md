@@ -503,6 +503,11 @@ Enable **Sync Do Not Disturb** in **Computers > Sync** on the phone.
 Android requests Do Not Disturb access the first time.
 Each side sends state only after a change, so daemon startup does not change either side.
 
+With the updated Android app, the phone also reports its own Do Not Disturb state to `fluxd` on connect and after each change.
+`fluxd` exposes that report in the `dnd` field of the device in `state` (`on`, `by`, and `at`) without changing the computer's Do Not Disturb state.
+When **Sync Do Not Disturb** is off on the phone or Android has not granted Do Not Disturb access, `on` is `null`.
+Local IPC clients can set Do Not Disturb on one phone with `dnd.set`, which requires the updated Android app and does not change the computer or other phones.
+
 The desktop reads the Omarchy shell notification state every two seconds.
 Without the Omarchy shell, it uses mako's `do-not-disturb` mode.
 The daemon log identifies the selected service.

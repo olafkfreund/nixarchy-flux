@@ -56,6 +56,7 @@ type sshAnswer struct {
 type sshSign struct {
 	id     string
 	device string
+	since  time.Time
 	done   chan struct{}
 	answer *sshAnswer
 }
@@ -68,6 +69,7 @@ type sshBook struct {
 	byID   map[string]*sshSign
 	turns  map[string]chan struct{}
 	noteAt time.Time
+	dirty  func()
 }
 
 // turn returns the channel that gives 1 request at a time to device.
@@ -93,13 +95,44 @@ func (b *sshBook) add(device string) *sshSign {
 	}
 	s := &sshSign{id: newApprovalID(), device: device, done: make(chan struct{})}
 	b.byID[s.id] = s
+	if b.dirty != nil {
+		b.dirty()
+	}
 	return s
+}
+
+func (b *sshBook) started(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if s := b.byID[id]; s != nil {
+		s.since = time.Now()
+		if b.dirty != nil {
+			b.dirty()
+		}
+	}
+}
+
+func (b *sshBook) views() []ApprovalView {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []ApprovalView
+	for _, s := range b.byID {
+		if !s.since.IsZero() && s.answer == nil {
+			out = append(out, ApprovalView{Kind: "ssh", Device: s.device, Since: s.since.Unix()})
+		}
+	}
+	return out
 }
 
 func (b *sshBook) remove(id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	delete(b.byID, id)
+	if _, ok := b.byID[id]; ok {
+		delete(b.byID, id)
+		if b.dirty != nil {
+			b.dirty()
+		}
+	}
 }
 
 // pending returns the number of sign requests that wait for a phone.
@@ -120,6 +153,9 @@ func (b *sshBook) deliver(device, id string, a sshAnswer) bool {
 	}
 	s.answer = &a
 	close(s.done)
+	if b.dirty != nil {
+		b.dirty()
+	}
 	return true
 }
 
@@ -271,6 +307,7 @@ func (d *Daemon) SSHSign(ctx context.Context, keyBlob, data []byte, peer sshagen
 	if err := d.send(dev, proto.New(proto.TypeFluxSSH, body)); err != nil {
 		return nil, d.sshFailed("Flux could not reach %s: %v", name, err)
 	}
+	d.sshSigns.started(s.id)
 	d.logf("ssh agent: %s asks %s for %s", program, name, what)
 
 	tick := time.NewTicker(sshLinkPoll)

@@ -42,6 +42,12 @@ object Types {
     /** The Do Not Disturb state, {"on": bool}, after a local change. Both sides send it. */
     const val FLUX_DND = "flux.dnd"
 
+    /** A computer asks this phone to set its own Do Not Disturb state, {"on": bool}. */
+    const val FLUX_DND_SET = "flux.dnd.set"
+
+    /** This phone reports its Do Not Disturb state, {"on": bool|null, "by": string}. */
+    const val FLUX_DND_STATE = "flux.dnd.state"
+
     /** This phone streams its microphone to the computer as a virtual source. */
     const val FLUX_MIC = "flux.mic"
 
@@ -117,7 +123,7 @@ val INCOMING = listOf(
     Types.PING, Types.BATTERY, Types.CLIPBOARD, Types.CLIPBOARD_CONNECT,
     Types.SHARE, Types.SHARE_UPDATE, Types.NOTIFICATION, Types.NOTIFICATION_REQUEST, Types.NOTIFICATION_REPLY,
     Types.NOTIFICATION_ACTION, Types.FIND_MY_PHONE, Types.RUN_COMMAND, Types.MPRIS,
-    Types.SFTP, Types.FLUX_TUNNEL, Types.FLUX_WEBCAM, Types.FLUX_DND,
+    Types.SFTP, Types.FLUX_TUNNEL, Types.FLUX_WEBCAM, Types.FLUX_DND, Types.FLUX_DND_SET,
     Types.FLUX_MIC, Types.FLUX_SCREEN, Types.FLUX_APPROVE, Types.FLUX_HERDR, Types.FLUX_INPUT,
     Types.FLUX_DESKTOP, Types.FLUX_SHORTCUTS, Types.FLUX_THEME, Types.FLUX_STREAM_REQUEST, Types.FLUX_TRANSFER,
     Types.FLUX_WAKE,
@@ -131,7 +137,7 @@ val INCOMING = listOf(
 val OUTGOING = listOf(
     Types.PING, Types.BATTERY, Types.CLIPBOARD, Types.CLIPBOARD_CONNECT, Types.SHARE,
     Types.SHARE_UPDATE, Types.NOTIFICATION, Types.RUN_COMMAND_REQUEST, Types.MPRIS_REQUEST,
-    Types.SFTP_REQUEST, Types.TELEPHONY, Types.FLUX_TUNNEL, Types.FLUX_WEBCAM, Types.FLUX_DND,
+    Types.SFTP_REQUEST, Types.TELEPHONY, Types.FLUX_TUNNEL, Types.FLUX_WEBCAM, Types.FLUX_DND, Types.FLUX_DND_STATE,
     Types.FLUX_MIC, Types.FLUX_SCREEN, Types.FLUX_APPROVE, Types.FLUX_HERDR, Types.FLUX_CLIPBOARD_IMAGE,
     Types.MOUSEPAD_REQUEST, Types.FLUX_DESKTOP, Types.FLUX_SHORTCUTS, Types.FLUX_TRANSFER,
     Types.FLUX_AUDIO_REQUEST,

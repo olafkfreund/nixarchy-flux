@@ -249,6 +249,36 @@ func TestSSHSign(t *testing.T) {
 	if d.sshSigns.pending() != 0 {
 		t.Error("a request stayed in the book")
 	}
+	if len(d.sshSigns.views()) != 0 {
+		t.Error("an answered SSH approval stayed visible")
+	}
+}
+
+func TestSSHApprovalViewStartsAfterSend(t *testing.T) {
+	d, _, phone, pub := sshSetup(t)
+	phone.setMode("silent")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = d.SSHSign(ctx, pub.Marshal(), sshSigData(), sshagent.Peer{})
+	}()
+	waitFor(t, "the SSH prompt", func() bool {
+		signs, _ := phone.counts()
+		return signs == 1 && len(d.sshSigns.views()) == 1
+	})
+	var state struct {
+		Approvals []ApprovalView `json:"approvals"`
+	}
+	if err := json.Unmarshal(d.Snapshot(), &state); err != nil || len(state.Approvals) != 1 || state.Approvals[0].Kind != "ssh" {
+		t.Fatalf("SSH approval view: %+v, %v", state.Approvals, err)
+	}
+	cancel()
+	<-done
+	if len(d.sshSigns.views()) != 0 {
+		t.Fatal("ended SSH prompt stayed visible")
+	}
 }
 
 func TestSSHSignRefusesBeforeThePhone(t *testing.T) {
@@ -279,10 +309,16 @@ func TestSSHSignTimeoutAndHangup(t *testing.T) {
 	if _, err := d.SSHSign(context.Background(), pub.Marshal(), sshSigData(), sshagent.Peer{}); err == nil || !strings.Contains(err.Error(), "did not answer") {
 		t.Fatalf("a phone that does not answer: %v", err)
 	}
+	if len(d.sshSigns.views()) != 0 {
+		t.Fatal("a timed-out SSH approval stayed visible")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(50*time.Millisecond, cancel)
 	if _, err := d.SSHSign(ctx, pub.Marshal(), sshSigData(), sshagent.Peer{}); err == nil {
 		t.Fatal("a client that closed got a signature")
+	}
+	if len(d.sshSigns.views()) != 0 {
+		t.Fatal("a closed SSH approval stayed visible")
 	}
 	// Each ended request closes on the phone.
 	deadline := time.Now().Add(3 * time.Second)
