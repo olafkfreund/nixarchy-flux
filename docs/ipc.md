@@ -58,10 +58,11 @@ Method names and parameter handling live in `internal/core/api.go`.
 ## State and events
 
 Call `state` for a snapshot.
-The snapshot includes `self`, `devices`, `clipboard`, `transfers`, `commands`, `settings`, `webcam`, `mic`, `screen`, `desktop`, `speaker`, `browse`, and `herdr`.
-The snapshot includes `self`, `devices`, `clipboard`, `transfers`, `commands`, `settings`, `webcam`, `mic`, `screen`, `desktop`, `browse`, `herdr`, and `motion`.
+The snapshot includes `self`, `devices`, `approvals`, `clipboard`, `transfers`, `commands`, `settings`, `webcam`, `mic`, `screen`, `desktop`, `speaker`, `browse`, `herdr`, and `motion`.
 `motion` is the state of the [motion cues](motion-cues.md): `running`, the feeding `device` and its `deviceName`, `auto` for a start of vehicle detection, `active` while fresh motion arrives, and the last phone `error`.
 `browse` lists the [Browse PC](features.md#browse-pc) sessions, the oldest first: the `device` ID, the `name`, and `since`, the Unix time of the start.
+`approvals` lists the requests that wait for a phone, `sudo` before `ssh`, then the oldest first: `kind` (`sudo` or `ssh`), the `device` ID, and `since`, the Unix time when the wait started.
+It is `[]` when no request waits.
 
 `self` describes this computer:
 
@@ -93,7 +94,7 @@ To receive events, send:
 Events use `event` and `data` fields:
 
 ```json
-{"event":"state","data":{"devices":[]}}
+{"event":"state","data":{"devices":[],"approvals":[]}}
 ```
 
 The example omits the other state fields.
@@ -101,6 +102,12 @@ Events can arrive before the subscription response.
 fluxd sends a `state` event only when the state changed.
 The other event is `toast`, with a short `text` for the window.
 A client that reads slowly gets only the newest `state` event.
+
+### Snapshot semantics
+
+The snapshot is a level, not an event log.
+fluxd waits 100 ms before it sends a `state` event and sends only the newest snapshot, so short transitions can be skipped.
+Each call, missed call, Do Not Disturb report, and approval carries a stable `since` or `at` timestamp so a client can tell a new event from a repeat.
 
 Next to the newest `state` event, fluxd queues at most 256 messages for each connection: the responses and the `toast` events.
 When a `toast` event does not fit in the queue, the client loses its connection.
@@ -154,8 +161,11 @@ Each device in `devices` has these fields:
 | `pairKey` | The verification key of an open pairing: 16 uppercase hex digits. The apps show it in 4 groups of 4. |
 | `ip`, `addresses`, `lastSeen` | The address of the last link, the [extra addresses](#extra-addresses), and the Unix time of the last packet. |
 | `battery`, `notifications`, `conversations` | The phone data. A device that is not paired has none. |
+| `call` | The active phone call: `state` (`ringing` or `talking`), `caller`, `number`, and `since` (Unix seconds). Omitted when no call is active, after the link closes, or when the device is not paired. |
+| `missedCall` | The last missed call: `caller`, `number`, and `at` (Unix seconds). Omitted when none is recent, after 10 minutes, after a new call starts, or when the device is not paired. |
+| `dnd` | The Do Not Disturb state that the phone reported for itself: `on` (`true`, `false`, or `null` when the phone cannot read or set it), `by` (`phone`, `sync`, `set`, or `connect`), and `at` (Unix seconds when fluxd received the report). Omitted when the device has no link or is not paired. |
 | `outbox` | The text messages that `sms.send` sent through the device and that the device did not report yet. See [the outbox](#outbox). A device that is not paired has an empty list. |
-| `plugins` | The features that the device offers. `streamrequest` means that the device can start its camera and its microphone when this computer asks. `speaker` means that the device can also play the audio of this computer when this computer asks. |
+| `plugins` | The features that the device offers. `streamrequest` means that the device can start its camera and its microphone when this computer asks. `speaker` means that the device can also play the audio of this computer when this computer asks. `dnd` means that the device reports its Do Not Disturb state and accepts `dnd.set`. |
 | `app` | The Flux program of the device: `android`, `android-debug`, `ios`, `macos`, or `fluxd`. An earlier app sends none. |
 | `appVersion` | The version of that program, such as `0.7.0`. |
 | `appUpdate` | The version of a newer Android app in the latest release, or an empty string. |
@@ -169,7 +179,7 @@ A device that is not paired shows only while it has a link.
 | State | `state`, `subscribe`, `discover` |
 | Pairing | `pair.address`, `pair.request`, `pair.accept`, `pair.reject`, `pair.unpair` |
 | Addresses | `addresses.add`, `addresses.remove` |
-| Device | `ring`, `ping` |
+| Device | `ring`, `ping`, `dnd.set` |
 | Sharing | `clipboard.send`, `clipboard.copy`, `share.files`, `share.text`, `share.url`, `transfer.cancel`, `transfer.open`, `transfer.copy` |
 | Commands | `commands.add`, `commands.remove`, `commands.run` |
 | Notifications | `notification.dismiss`, `notification.dismissAll`, `notification.reply`, `notification.action`, `notify.send` |
@@ -203,6 +213,7 @@ Without `device`, a method uses the only connected paired device.
 | `addresses.add`, `addresses.remove` | `device`, `address` |
 | `ring` | `device` |
 | `ping` | `device`, and an optional `message` |
+| `dnd.set` | `device`, and `on` (`true` or `false`). It sets Do Not Disturb on that phone only and returns `{"sent":true}`. |
 | `clipboard.send` | `device`, and `text`. Without `text`, the clipboard of the computer. |
 | `clipboard.copy` | `id` of an entry, or `text`, or `path` of an image in the history |
 | `share.files` | `device`, and `paths`, a list of absolute paths. The result has the IDs of the new `transfers`. |
@@ -368,6 +379,9 @@ An `approve.request` or `approve.enroll` belongs to the connection that started 
 When that connection closes, `fluxd` ends the request and closes it on the phone.
 So a stopped `sudo` does not keep the phone busy until the timeout.
 The helper connects only to `/run/user/<uid>/flux/fluxd.sock`. It does not read `FLUX_SOCKET` or `XDG_RUNTIME_DIR`.
+While a `sudo` approval or an SSH sign request waits on a phone, `approvals` in `state` lists its `kind` (`sudo` or `ssh`), `device`, and `since`.
+It omits enrollments and never includes the PAM service, user, command, key, fingerprint, or signature.
+A disconnect or an unpair cancels the waiting `sudo` request of that device at once.
 
 ## Clipboard
 

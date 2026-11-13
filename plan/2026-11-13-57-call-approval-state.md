@@ -277,3 +277,16 @@ owner's OK:
 
 Revert the PR. All fields are additive, and old clients ignore them. The Android types are new: an old daemon ignores
 `flux.dnd.state`, and the phone falls back to plain `flux.dnd` behaviour.
+
+## Deviations
+
+- **Step 4** (coder):
+  - The access-change report is in `FluxCore.refreshAccess`, not `FluxService.kt:82-86`. The service receiver already
+    calls `FluxCore.refresh()`, which reaches it.
+  - A `flux.dnd.set` that repeats the known state skips the filter write but still reports.
+  - It isn't compiled locally, because the host has no Android SDK. `build.yml` runs `testDebugUnitTest` on the PR.
+- **Step 5** (agy): the `security.md` sentence was moved below the switch list by the lead, so it doesn't join the last
+  bullet.
+- **Step 6** (lead): 10 existing tests in `internal/core`, `internal/desktop`, `internal/approve` and `cmd/flux` fail on this NixOS host before and
+  after the change. Their fakes call `/usr/bin/cat`, `stat` and similar, or expect a umask that this host does not use. Step 6 checks that the set of
+  failures is unchanged.
