@@ -384,7 +384,8 @@ func (d *Daemon) dropApprovals(devID string, before time.Time) {
 	d.approvals.mu.Lock()
 	var ids []string
 	for id, a := range d.approvals.byID {
-		if a.device == devID && a.kind == "request" && !a.since.After(before) {
+		// An answered request keeps its result for approve.wait (Codex PR review).
+		if a.device == devID && a.kind == "request" && a.result == nil && !a.since.After(before) {
 			ids = append(ids, id)
 		}
 	}

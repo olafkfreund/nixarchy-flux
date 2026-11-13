@@ -321,3 +321,23 @@ func TestDropApprovalsKeepsLaterRequest(t *testing.T) {
 		t.Fatal("a drop cancelled a request that started after it")
 	}
 }
+
+// A request the phone answered just before it dropped keeps its answer.
+func TestDropApprovalsKeepsAnsweredRequest(t *testing.T) {
+	d, dev := approveDaemon()
+	a := &approval{id: "answered", kind: "request", device: dev.ID, since: time.Now().Add(-time.Second), deadline: time.Now().Add(time.Minute)}
+	if err := d.approvals.add(a); err != nil {
+		t.Fatal(err)
+	}
+	if !d.approvals.deliver(dev.ID, a.id, approvalResult{State: "approved"}) {
+		t.Fatal("deliver failed")
+	}
+	d.dropApprovals(dev.ID, time.Now())
+	v, err := d.ApproveWait(context.Background(), a.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, ok := v.(approvalResult); !ok || r.State != "approved" {
+		t.Fatalf("result %+v", v)
+	}
+}
