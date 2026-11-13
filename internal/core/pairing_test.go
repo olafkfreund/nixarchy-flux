@@ -486,11 +486,17 @@ func TestAcceptSendFails(t *testing.T) {
 	dev.link, dev.pairLink, dev.pairCert, dev.pairState = l, l, l.Cert, "incoming"
 	d.mu.Unlock()
 	l.Close()
+	if err := d.approvals.add(&approval{id: "accept-failed", kind: "request", device: dev.ID, deadline: time.Now().Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.AcceptPair(dev, ""); err == nil {
 		t.Fatal("AcceptPair succeeded without the answer")
 	}
 	if field(d, func() bool { return dev.Paired }) || pinned(t, d, dev.ID) != nil {
 		t.Fatal("the pin stays after the answer failed")
+	}
+	if d.approvals.pending() != 0 {
+		t.Fatal("failed pair answer kept an approval")
 	}
 }
 
@@ -610,10 +616,16 @@ func TestHandlePairChecks(t *testing.T) {
 
 	// A paired device that asks again loses its trust, and the user must
 	// compare the key again.
+	if err := d.approvals.add(&approval{id: "re-pair", kind: "request", device: dev.ID, deadline: time.Now().Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
 	send(map[string]any{"pair": true, "timestamp": time.Now().Unix()})
 	waitFor(t, "a new request of a paired device", func() bool { return state() == "incoming" })
 	if pinned(t, d, dev.ID) != nil || field(d, func() bool { return dev.Paired }) {
 		t.Fatal("a paired device that asks again keeps its trust")
+	}
+	if d.approvals.pending() != 0 {
+		t.Fatal("re-pair kept an approval")
 	}
 	if err := d.AcceptPair(dev, ""); err != nil {
 		t.Fatal(err)
@@ -621,10 +633,16 @@ func TestHandlePairChecks(t *testing.T) {
 	nextPair(t, fromDesk)
 
 	// The device unpairs. fluxd removes the trust and closes the link.
+	if err := d.approvals.add(&approval{id: "peer-unpair", kind: "request", device: dev.ID, deadline: time.Now().Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
 	send(map[string]any{"pair": false})
 	waitClosed(t, onDesk)
 	if pinned(t, d, dev.ID) != nil || field(d, func() bool { return dev.Paired }) {
 		t.Fatal("the device keeps its trust after it unpaired")
+	}
+	if d.approvals.pending() != 0 {
+		t.Fatal("peer unpair kept an approval")
 	}
 }
 
@@ -659,6 +677,38 @@ func TestPairRequestsOff(t *testing.T) {
 	if c := pinned(t, d, dev.ID); c == nil || !c.Equal(phoneCert.Leaf) {
 		t.Fatal("a pairing that this computer started did not pin the phone")
 	}
+	if err := d.approvals.add(&approval{id: "refused-re-pair", kind: "request", device: dev.ID, deadline: time.Now().Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	dev.pairAt = time.Time{}
+	d.mu.Unlock()
+	if err := onPhone.Send(proto.New(proto.TypePair, map[string]any{"pair": true, "timestamp": time.Now().Unix()})); err != nil {
+		t.Fatal(err)
+	}
+	nextPair(t, fromDesk)
+	if d.approvals.pending() != 0 {
+		t.Fatal("refused re-pair kept an approval")
+	}
+}
+
+func TestApprovalEndsWithLink(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d, _, _, dev, _, onPhone, fromDesk := phonePair(t, ctx)
+	if err := onPhone.Send(proto.New(proto.TypePair, map[string]any{"pair": true, "timestamp": time.Now().Unix()})); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "incoming pair", func() bool { return field(d, func() string { return dev.pairState }) == "incoming" })
+	if err := d.AcceptPair(dev, ""); err != nil {
+		t.Fatal(err)
+	}
+	nextPair(t, fromDesk)
+	if err := d.approvals.add(&approval{id: "link-drop", kind: "request", device: dev.ID, deadline: time.Now().Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	onPhone.Close()
+	waitFor(t, "approval cancelled on disconnect", func() bool { return d.approvals.pending() == 0 })
 }
 
 // TestPairTimeout checks that a request ends after pairTimeout, and that
@@ -710,6 +760,9 @@ func TestUnpairClosesLink(t *testing.T) {
 	dev.conversations = map[int64]*Conversation{1: {}}
 	dev.outbox = []OutboxMessage{{Thread: 1, Body: "On my way", Pending: true}}
 	d.mu.Unlock()
+	if err := d.approvals.add(&approval{id: "local-unpair", kind: "request", device: dev.ID, deadline: time.Now().Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := d.Unpair(dev); err != nil {
 		t.Fatal(err)
@@ -723,6 +776,9 @@ func TestUnpairClosesLink(t *testing.T) {
 	d.mu.Unlock()
 	if left || pinned(t, d, dev.ID) != nil {
 		t.Fatal("the device keeps its trust or its data after Unpair")
+	}
+	if d.approvals.pending() != 0 {
+		t.Fatal("local unpair kept an approval")
 	}
 	if err := d.Unpair(dev); errCode(err) != "not_paired" {
 		t.Fatalf("Unpair of a device that is not paired: %v", err)

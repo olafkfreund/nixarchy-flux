@@ -8,7 +8,9 @@ import (
 	"io"
 	"log"
 	"math"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -119,6 +121,123 @@ func TestApprovalBook(t *testing.T) {
 	}
 	if _, _, _, err := b.wait(context.Background(), "a1", time.Second); errCode(err) != "not_found" {
 		t.Fatalf("a request after its answer: %v", err)
+	}
+}
+
+func TestApprovalViewsAndCancel(t *testing.T) {
+	d, _ := approveDaemon()
+	stamp := time.Now()
+	for _, a := range []*approval{
+		{id: "sudo", kind: "request", device: "phone1", since: stamp, deadline: stamp.Add(time.Minute)},
+		{id: "enroll", kind: "enroll", device: "phone2", deadline: stamp.Add(time.Minute)},
+		{id: "expired", kind: "request", device: "phone3", deadline: stamp.Add(-time.Second)},
+	} {
+		if err := d.approvals.add(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := d.approvals.views(); !slices.Equal(got, []ApprovalView{{Kind: "sudo", Device: "phone1", Since: stamp.Unix()}}) {
+		t.Fatalf("sudo views: %+v", got)
+	}
+	s := d.sshSigns.add("phone4")
+	if got := d.sshSigns.views(); len(got) != 0 {
+		t.Fatalf("queued SSH view: %+v", got)
+	}
+	d.sshSigns.started(s.id)
+	var state struct {
+		Approvals []ApprovalView `json:"approvals"`
+	}
+	if err := json.Unmarshal(d.Snapshot(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Approvals) != 2 || state.Approvals[0].Kind != "sudo" || state.Approvals[1].Kind != "ssh" {
+		t.Fatalf("snapshot approvals: %+v", state.Approvals)
+	}
+	d.sshSigns.deliver("phone4", s.id, sshAnswer{denied: true})
+	d.sshSigns.remove(s.id)
+	d.approvals.deliver("phone1", "sudo", approvalResult{State: "denied"})
+	if got := d.approvals.views(); len(got) != 0 {
+		t.Fatalf("answered approval stayed visible: %+v", got)
+	}
+	d.approvals.cancel("sudo")
+	d.approvals.remove("enroll")
+	d.approvals.remove("expired")
+	if err := json.Unmarshal(d.Snapshot(), &state); err != nil || state.Approvals == nil || len(state.Approvals) != 0 {
+		t.Fatalf("empty approvals: %+v, %v", state.Approvals, err)
+	}
+}
+
+func TestApprovalSnapshotConcurrent(t *testing.T) {
+	d, _ := approveDaemon()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range 100 {
+			var state struct {
+				Approvals []ApprovalView `json:"approvals"`
+			}
+			if err := json.Unmarshal(d.Snapshot(), &state); err != nil || state.Approvals == nil {
+				t.Errorf("snapshot approvals: %+v, %v", state.Approvals, err)
+				return
+			}
+		}
+	}()
+	for range 100 {
+		id := newApprovalID()
+		if err := d.approvals.add(&approval{id: id, kind: "request", device: "phone1", since: time.Now(), deadline: time.Now().Add(time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
+		d.approvals.cancel(id)
+	}
+	wg.Wait()
+}
+
+func TestApproveCancelWakesWait(t *testing.T) {
+	d, dev := approveDaemon()
+	a := &approval{id: "a1", kind: "request", device: dev.ID, since: time.Now(), deadline: time.Now().Add(time.Minute)}
+	if err := d.approvals.add(a); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan approvalResult, 1)
+	go func() {
+		v, _ := d.ApproveWait(context.Background(), a.id)
+		if r, ok := v.(approvalResult); ok {
+			result <- r
+		}
+	}()
+	time.Sleep(10 * time.Millisecond)
+	d.dropApprovals(dev.ID)
+	select {
+	case r := <-result:
+		if r.State != "failed" || r.Error != "cancelled" {
+			t.Fatalf("cancel result: %+v", r)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("cancel did not wake approve.wait within 100 ms")
+	}
+	if d.approvals.pending() != 0 {
+		t.Fatal("cancel left a pending approval")
+	}
+}
+
+func TestApprovalExpiryPublishes(t *testing.T) {
+	d, dev, _, _ := sshSetup(t)
+	d.mu.Lock()
+	dev.Incoming = append(dev.Incoming, proto.TypeFluxApprove)
+	d.cfg.ApproveTimeout = 5
+	d.dirty = make(chan struct{}, 1)
+	d.mu.Unlock()
+	if _, err := d.ApproveRequest(approveRaw(t, map[string]any{"device": dev.ID})); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-d.dirty:
+		if got := d.approvals.views(); len(got) != 0 {
+			t.Fatalf("expired approval visible: %+v", got)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("expiry did not publish to idle subscribers")
 	}
 }
 

@@ -111,6 +111,18 @@ func (d *Daemon) pickMatch(key string, match func(*Device) bool) (*Device, error
 // and encodes the copy after the unlock, so that the packets of the devices
 // do not wait for the encode.
 func (d *Daemon) Snapshot() json.RawMessage {
+	approvals := append([]ApprovalView{}, d.approvals.views()...)
+	approvals = append(approvals, d.sshSigns.views()...)
+	sort.Slice(approvals, func(i, j int) bool {
+		a, b := approvals[i], approvals[j]
+		if a.Kind != b.Kind {
+			return a.Kind == "sudo"
+		}
+		if a.Since != b.Since {
+			return a.Since < b.Since
+		}
+		return a.Device < b.Device
+	})
 	d.mu.Lock()
 	devs := make([]*Device, 0, len(d.devices))
 	for _, dev := range d.devices {
@@ -161,6 +173,7 @@ func (d *Daemon) Snapshot() json.RawMessage {
 			"pendingVersion": d.pendingVersion,
 		},
 		"devices":   views,
+		"approvals": approvals,
 		"update":    d.updateViewLocked(),
 		"clipboard": clip,
 		"transfers": transfers,
