@@ -44,6 +44,7 @@ object DndSync {
         override fun access() = hasAccess(core.app)
         override fun isOn() = isOn(core.app)
         override fun now() = SystemClock.elapsedRealtime()
+        override fun sleep(ms: Long) = Thread.sleep(ms)
         override fun async(block: () -> Unit) = queue.execute(block)
         override fun setFilter(on: Boolean): Boolean {
             val filter = if (on) NotificationManager.INTERRUPTION_FILTER_PRIORITY else NotificationManager.INTERRUPTION_FILTER_ALL
@@ -96,6 +97,7 @@ class DndLogic(private val guard: DndGuard) {
         fun access(): Boolean
         fun isOn(): Boolean
         fun now(): Long
+        fun sleep(ms: Long)
         fun async(block: () -> Unit)
         /** Sets the filter; false when the phone refused it. */
         fun setFilter(on: Boolean): Boolean
@@ -106,6 +108,15 @@ class DndLogic(private val guard: DndGuard) {
     private fun Env.usable() = syncOn() && access()
 
     private fun Env.current(): Boolean? = if (usable()) isOn() else null
+
+    // Android can report the old filter for a moment after a write, and the broadcast that follows is the guard's own
+    // change, so it is never reported: wait up to a second for the state to settle before reporting it.
+    private fun Env.settle(on: Boolean) {
+        repeat(10) {
+            if (isOn() == on) return
+            sleep(100)
+        }
+    }
 
     // Every decision runs on env.async, one at a time, so the guard and the
     // filter never disagree and a later request never runs before an earlier one.
@@ -120,14 +131,19 @@ class DndLogic(private val guard: DndGuard) {
 
     fun onPacket(env: Env, from: String, on: Boolean) = env.async {
         if (env.usable() && guard.remote(on, env.now())) {
-            if (env.setFilter(on)) env.forward(on, except = from) else guard.reset(env.isOn())
+            if (env.setFilter(on)) {
+                env.settle(on)
+                env.forward(on, except = from)
+            } else guard.reset(env.isOn())
             env.report("sync", env.current(), null)
         }
     }
 
     fun onSet(env: Env, on: Boolean) = env.async {
         // Marked remote: the change is not a local one, so it is not sent as flux.dnd.
-        if (env.usable() && guard.remote(on, env.now()) && !env.setFilter(on)) guard.reset(env.isOn())
+        if (env.usable() && guard.remote(on, env.now())) {
+            if (env.setFilter(on)) env.settle(on) else guard.reset(env.isOn())
+        }
         // The state the phone has now, not the one asked for: a refused write shows.
         env.report("set", env.current(), null)
     }

@@ -5,17 +5,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DndSyncTest {
-    private class Fake(var sync: Boolean = true, var access: Boolean = true, var on: Boolean = false, var refuse: Boolean = false) : DndLogic.Env {
+    private class Fake(var sync: Boolean = true, var access: Boolean = true, var on: Boolean = false, var refuse: Boolean = false, var lag: Int = 0) : DndLogic.Env {
         val log = mutableListOf<String>()
         override fun syncOn() = sync
         override fun access() = access
-        override fun isOn() = on
+        private var pending: Boolean? = null
+        override fun isOn(): Boolean {
+            val p = pending
+            if (p != null) { if (lag > 0) lag-- else { on = p; pending = null } }
+            return on
+        }
+        override fun sleep(ms: Long) {}
         override fun now() = 0L
         override fun async(block: () -> Unit) = block()
         override fun setFilter(on: Boolean): Boolean {
             log += "set $on"
             if (refuse) return false
-            this.on = on
+            if (lag > 0) pending = on else this.on = on
             return true
         }
         override fun forward(on: Boolean, except: String?) {
@@ -97,5 +103,12 @@ class DndSyncTest {
         assertEquals(2, queued.size)
         queued.forEach { it() }
         assertEquals(false, env.isOn())
+    }
+
+    @Test
+    fun setReportsTheSettledState() {
+        val env = Fake(lag = 3)
+        logic().onSet(env, true)
+        assertEquals(listOf("set true", "report set true all"), env.log)
     }
 }
