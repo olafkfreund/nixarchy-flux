@@ -1054,3 +1054,7 @@ finding was checked against the code.
 
 | # | Step | What changed and why |
 | --- | --- | --- |
+| P2-P3, P7 | 3, 4 | Applied as described under the refinements (P2 `control` as `State<Boolean>`; P3 the local function is `act`; P7 every finger of the first event goes to the class). Commits f7443e2, edb2d7d. |
+| P1 | 4 | The existing 450 ms hold constant is reused; no `TRACKPAD_HOLD_MS`. Commit edb2d7d. |
+| P4-P6 | 2 | Applied as described (P4 the 0.01 move threshold; P5 the 0.02 dp remainder test; P6 a replaced finger in Pending ends the touch). Commit f5ed563. |
+| R1 | 2 | Accepted (agy code review): coalesced or synthetic pointer-up edge cases in `TrackpadGesture.change()` are left to device check 5, as the plan's unverified Compose cancel behaviour. |
