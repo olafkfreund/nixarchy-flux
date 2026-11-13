@@ -82,6 +82,14 @@ fun addSend(list: List<SendEntry>, e: SendEntry, max: Int = MAX_SEND_LOG): List<
     }
 }
 
+/** Drops the ended entries of the computer [deviceId]. Running files stay, so their progress and end still find them. */
+fun clearSends(list: List<SendEntry>, deviceId: String): List<SendEntry> =
+    list.filter { it.deviceId != deviceId || it.state == TransferState.Running }
+
+/** Drops the entry [id] when it has ended. A running file stays. */
+fun removeSend(list: List<SendEntry>, id: Long): List<SendEntry> =
+    list.filter { it.id != id || it.state == TransferState.Running }
+
 /** Sets the bytes of the running file [id] that went through, and its [size] when it is 0 or more. */
 fun progressSend(list: List<SendEntry>, id: Long, done: Long, size: Long = -1): List<SendEntry> =
     list.map { if (it.id == id && it.state == TransferState.Running) it.copy(done = done, size = if (size >= 0) size else it.size) else it }
@@ -208,6 +216,20 @@ object SendLog {
             resumeSend(list, id, done)
         }
         return found
+    }
+
+    /** Drops the ended entries of the computer [deviceId], and returns how many of its files still run. */
+    fun clear(deviceId: String): Int {
+        var running = 0
+        _entries.update { list ->
+            clearSends(list, deviceId).also { kept -> running = kept.count { it.deviceId == deviceId } }
+        }
+        return running
+    }
+
+    /** Drops the ended entry [id]. */
+    fun remove(id: Long) {
+        _entries.update { removeSend(it, id) }
     }
 
     /** Debug builds only: shows [list] in the place of the entries, for the sample computers. */
