@@ -89,9 +89,12 @@ import kotlinx.coroutines.delay
 import org.omarchy.flux.core.DeviceUi
 import org.omarchy.flux.core.FluxCore
 import org.omarchy.flux.core.RemoteInput
+import org.omarchy.flux.core.ScrollMode
 import org.omarchy.flux.desktop.DesktopSession
 import org.omarchy.flux.desktop.DesktopViewport
 import org.omarchy.flux.desktop.ExtendSize
+import org.omarchy.flux.desktop.Finger
+import org.omarchy.flux.desktop.TrackpadGesture
 import org.omarchy.flux.protocol.Packet
 import org.omarchy.flux.voice.Dictation
 import org.omarchy.flux.voice.rememberVoiceTyping
@@ -121,7 +124,7 @@ private const val EXTEND_SETTLE_MS = 300L
  * monitor. The monitor goes away when the stream stops.
  */
 @Composable
-fun DesktopScreen(d: DeviceUi, onBack: () -> Unit, extend: Boolean = false) {
+fun DesktopScreen(d: DeviceUi, scroll: ScrollMode, onBack: () -> Unit, extend: Boolean = false) {
     val audio by DesktopSession.audio.collectAsState()
     val volume by DesktopSession.volume.collectAsState()
     val audioText = Tn.text
@@ -146,6 +149,9 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit, extend: Boolean = false) {
     // In landscape, a rail at the side holds the buttons, so that the video has the full height.
     val wide = ready && landscape
     val shown = panel.takeIf { control }
+    // The trackpad mode lasts for this visit. It is off without remote input.
+    var trackpad by rememberSaveable(d.id) { mutableStateOf(false) }
+    val pad = trackpad && control
     // A click, a dictation, or the Omarchy panel can move the cursor of the computer, so the type field then starts again.
     // It also starts again when the keys hide.
     val typing = remember(d.id) { RemoteTyping() }
@@ -184,6 +190,10 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit, extend: Boolean = false) {
         if (ready && control) {
             if (d.shortcutsSupported) PanelButton(Ic.grid, "Omarchy", shown == Panel.Omarchy) { toggle(Panel.Omarchy) }
             PanelButton(Ic.keyboard, "Keys", shown == Panel.Keys) { toggle(Panel.Keys) }
+            PanelButton(Ic.touchpad, "Trackpad", pad) {
+                trackpad = !trackpad
+                FluxCore.toast(if (trackpad) "Trackpad: 1 finger moves the pointer, a tap clicks" else "Touch: a tap clicks at the finger")
+            }
             if (voice.available) {
                 // Green marks a live microphone, as the privacy dot of Android does.
                 PanelButton(Ic.mic, if (dictating) "Stop dictation" else "Dictate", dictating, Tn.green) {
@@ -242,7 +252,7 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit, extend: Boolean = false) {
                         }
                     }
                     Column(Modifier.weight(1f).fillMaxHeight()) {
-                        RemoteDesktop(d, monitor, extend, extendSize, wide, hint = shown == null && !wide, onClick = typing::end)
+                        RemoteDesktop(d, monitor, extend, extendSize, wide, hint = shown == null && !wide, trackpad = pad, scroll = scroll, onClick = typing::end)
                     }
                     if (wide) {
                         when (shown) {
@@ -330,7 +340,8 @@ private fun sendInput(d: DeviceUi, p: Packet) {
  * The video of the computer screen, with its gestures. The stream runs
  * while the app shows. [hint] shows the gestures under the video.
  * [onClick] runs for each click and each drag on the computer. With
- * [extend], the stream starts after the video has its size in landscape,
+ * [trackpad], the video works as a touchpad, see trackpadGestures. [scroll]
+ * is the touchpad's scroll setting. With [extend], the stream starts after the video has its size in landscape,
  * see [wide], and [extendSize] keeps that size.
  */
 @Composable
@@ -341,6 +352,8 @@ private fun ColumnScope.RemoteDesktop(
     extendSize: MutableState<ExtendSize?>,
     wide: Boolean,
     hint: Boolean,
+    trackpad: Boolean,
+    scroll: ScrollMode,
     onClick: () -> Unit,
 ) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -415,15 +428,32 @@ private fun ColumnScope.RemoteDesktop(
     val release by rememberUpdatedState { RemoteInput.send(FluxCore, d.id, RemoteInput.hold(false)); Unit }
     // The gestures start once per key, so they read control through this state.
     val controlState = rememberUpdatedState(control)
+    // The gestures start once per key, so they read the direction through this state.
+    val natural = rememberUpdatedState(RemoteInput.naturalScroll(scroll, d.naturalScroll))
     val clicked by rememberUpdatedState { p: Pair<Float, Float> ->
         focus = p
         if (control) onClick()
     }
+    // A trackpad click has no position on the view, so the view keeps its center when the keyboard opens.
+    val padClicked by rememberUpdatedState {
+        focus = null
+        if (control) onClick()
+    }
+    LaunchedEffect(trackpad) { if (trackpad) focus = null }
     // The gestures work only on a live video. Over a wait or an error, a tap must not click on the computer.
-    val gestures = if (live && status.width > 0) {
-        Modifier.desktopGestures(viewport, controlState, { viewport.value = it }, { send(it) }, { release() }, { clicked(it) }) { haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
-    } else {
-        Modifier
+    val gestures = when {
+        !(live && status.width > 0) -> Modifier
+        trackpad -> Modifier.trackpadGestures(viewport, natural, { viewport.value = it }, { send(it) }, { release() }, { padClicked() }) {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        }
+        else -> Modifier.desktopGestures(viewport, controlState, { viewport.value = it }, { send(it) }, { release() }, { clicked(it) }) {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        }
+    }
+    // The pointer starts where the user looks. A relative move can't find it on another monitor.
+    val videoReady = live && status.width > 0 && box != IntSize.Zero
+    LaunchedEffect(trackpad, videoReady, status.monitor) {
+        if (trackpad && videoReady) vp.toVideo(box.width / 2f, box.height / 2f, clamp = true)?.let { (x, y) -> send(RemoteInput.at(x, y)) }
     }
     Box(Modifier.weight(1f).fillMaxWidth().clipToBounds().background(Color.Black).onSizeChanged { box = it }.then(gestures)) {
         if (box != IntSize.Zero) {
@@ -453,8 +483,11 @@ private fun ColumnScope.RemoteDesktop(
     }
     if (hint) {
         T(
-            if (control) "Tap clicks · hold for the right button · hold, then move to drag\n2 fingers scroll · pinch zooms · 1 finger moves the zoomed view"
-            else "View only · pinch zooms · 1 finger moves the zoomed view",
+            when {
+                trackpad -> "1 finger moves the pointer · tap clicks · hold, then move to drag\n2 fingers scroll · tap with 2 for the right button · pinch zooms · 3 fingers move the zoomed view"
+                control -> "Tap clicks · hold for the right button · hold, then move to drag\n2 fingers scroll · pinch zooms · 1 finger moves the zoomed view"
+                else -> "View only · pinch zooms · 1 finger moves the zoomed view"
+            },
             Modifier.fillMaxWidth().padding(horizontal = TiledGutter, vertical = 8.dp),
             size = 11, color = Tn.sub, align = TextAlign.Center, lineHeight = 1.5f,
         )
@@ -664,6 +697,79 @@ private fun Modifier.desktopGestures(
         }
     }
 }
+
+/**
+ * The gestures of the trackpad mode, see TrackpadGesture. The video box
+ * has no child that takes touches, so a change that arrives consumed is a
+ * cancelled touch. A child that takes touches must change that test.
+ * [onClick] runs for each click and each hold, [onHold] when a finger holds.
+ */
+private fun Modifier.trackpadGestures(
+    viewport: State<DesktopViewport>,
+    natural: State<Boolean>,
+    onViewport: (DesktopViewport) -> Unit,
+    send: (Packet) -> Unit,
+    release: () -> Unit,
+    onClick: () -> Unit,
+    onHold: () -> Unit,
+): Modifier = pointerInput("trackpad", viewport) {
+    val slop = viewConfiguration.touchSlop
+    val dpPerPx = 1f / 1.dp.toPx()
+    awaitEachGesture {
+        val g = TrackpadGesture(slop, dpPerPx)
+        fun act(outs: List<TrackpadGesture.Out>) = outs.forEach { o ->
+            when (o) {
+                is TrackpadGesture.Out.Move -> send(RemoteInput.move(o.dx, o.dy))
+                is TrackpadGesture.Out.Scroll -> send(RemoteInput.touchpadScroll(o.dx, o.dy, natural.value))
+                is TrackpadGesture.Out.Click -> {
+                    onClick()
+                    send(RemoteInput.click(o.button))
+                }
+                is TrackpadGesture.Out.Hold -> if (o.down) {
+                    onHold()
+                    onClick()
+                    send(RemoteInput.hold(true))
+                } else {
+                    release()
+                }
+                is TrackpadGesture.Out.Pan -> onViewport(viewport.value.pan(o.dx, o.dy))
+                is TrackpadGesture.Out.Zoom -> onViewport(viewport.value.zoom(o.factor, o.x, o.y, o.dx, o.dy))
+            }
+        }
+        try {
+            val first = awaitFirstDown(requireUnconsumed = false)
+            val holdAt = first.uptimeMillis + DESKTOP_HOLD_MS
+            // Two fingers can land in the first event.
+            val firstDown = currentEvent.changes.filter { it.pressed }.ifEmpty { listOf(first) }
+            act(g.fingers(firstDown.map { it.finger() }, viewport.value.scale))
+            while (true) {
+                val event = if (g.waitsForHold) {
+                    val left = holdAt - SystemClock.uptimeMillis()
+                    if (left > 0) withTimeoutOrNull(left) { awaitPointerEvent() } else null
+                } else {
+                    awaitPointerEvent()
+                }
+                if (event == null) {
+                    act(g.holdTimeout())
+                    continue
+                }
+                val down = event.changes.filter { it.pressed }
+                if (down.isEmpty()) {
+                    // Compose marks the changes of a cancelled touch as consumed when they arrive.
+                    act(g.end(cancelled = event.changes.any { it.isConsumed }))
+                    break
+                }
+                act(g.fingers(down.map { it.finger() }, viewport.value.scale))
+                event.changes.forEach { it.consume() }
+            }
+        } finally {
+            // The gesture's coroutine ends without a lift: a mode change, the stream or the screen stops.
+            if (g.pressed) release()
+        }
+    }
+}
+
+private fun PointerInputChange.finger() = Finger(id.value, position.x, position.y)
 
 private fun centroid(down: List<PointerInputChange>): Offset {
     var sum = Offset.Zero
