@@ -155,6 +155,16 @@ class SmsTest {
     }
 
     @Test
+    fun changesSendAnMmsWhoseTextCameLater() {
+        val c = SmsChanges()
+        val mms = msg(1, read = false, mms = true).copy(body = "")
+        c.watch(mms)
+        assertEquals(emptyList<TextMessage>(), c.changed(listOf(mms)))
+        val withText = mms.copy(body = "Hi")
+        assertEquals(listOf(withText), c.changed(listOf(withText)))
+    }
+
+    @Test
     fun changesForgetDeletedMessages() {
         val c = SmsChanges()
         c.watch(msg(1, read = false))
