@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 50
 spec: spec/2026-11-13-50-tsnet-findings.md
 coders:
