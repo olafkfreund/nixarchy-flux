@@ -660,7 +660,7 @@ private fun ReceivedClip(e: SendEntry, context: Context) {
             "Copied" to null
         } else {
             "Copy" to {
-                if (Plugins.putRemoteText(FluxCore, e.computer, e.text)) {
+                if (Plugins.putRemoteText(FluxCore, e.deviceId, e.computer, e.text)) {
                     copied = true
                     FluxCore.toast("Copied to this phone")
                 }

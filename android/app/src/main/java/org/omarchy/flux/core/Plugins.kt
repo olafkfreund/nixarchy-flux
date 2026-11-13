@@ -23,6 +23,9 @@ object Plugins {
     /** The last text that a computer put on the clipboard. Flux does not send it back. */
     @Volatile var lastRemoteClip: String? = null
 
+    /** The device ID of the computer that sent the last text, and the text, as 1 value, so that a reader sees both of the same clip. */
+    @Volatile var lastRemoteFrom: Pair<String, String>? = null
+
     /** The clip time of the last clip that Flux sent. A repeat of the same clip does not go out again. */
     @Volatile var lastSentStamp: Long = 0L
 
@@ -171,19 +174,20 @@ object Plugins {
         if (text.isNullOrEmpty() || !core.settings.syncClipboard) return
         if (timestamp != null && timestamp in 1..core.settings.clipboardTimestamp) return
         core.settings.clipboardTimestamp = if (timestamp != null && timestamp > 0) timestamp else System.currentTimeMillis()
-        if (putRemoteText(core, d.identity.deviceName, text)) InboxFeed.clipReceived(d.id, d.identity.deviceName, text)
+        if (putRemoteText(core, d.id, d.identity.deviceName, text)) InboxFeed.clipReceived(d.id, d.identity.deviceName, text)
     }
 
     /**
-     * Puts text from the computer [from] on the clipboard. It returns false
+     * Puts text from the computer [from] (device ID [deviceId]) on the clipboard. It returns false
      * and shows a message when the text is longer than [MAX_CLIPBOARD_TEXT].
      */
-    fun putRemoteText(core: FluxCore, from: String, text: String): Boolean {
+    fun putRemoteText(core: FluxCore, deviceId: String, from: String, text: String): Boolean {
         if (text.length > MAX_CLIPBOARD_TEXT || text.toByteArray(Charsets.UTF_8).size > MAX_CLIPBOARD_TEXT) {
             core.toast("The text from $from is too large for the clipboard")
             return false
         }
         lastRemoteClip = text
+        lastRemoteFrom = deviceId to text
         // The clipboard listener also sees this write, so the echo check skips it.
         selfWriteAt = SystemClock.elapsedRealtime()
         main.post {
@@ -504,3 +508,15 @@ internal fun albumArtUrl(raw: String): String {
     val url = raw.trim()
     return if (url.length <= MAX_ART_URL && url.startsWith("https://", ignoreCase = true) && url.none { it.isWhitespace() }) url else ""
 }
+
+/**
+ * True when the clip on the clipboard is the last one that the computer
+ * [deviceId] sent: Flux's label, and the same whole text or image address.
+ */
+internal fun isRemoteClip(
+    label: String?, text: String?, uri: String?, deviceId: String,
+    remoteText: Pair<String, String>?, remoteImage: Pair<String, String>?,
+): Boolean = label == "Flux" && (
+    (text != null && remoteText == (deviceId to text)) ||
+        (uri != null && remoteImage == (deviceId to uri))
+    )

@@ -37,6 +37,9 @@ object ClipImage {
     /** The last image that a computer put on the clipboard. Flux does not send it back. */
     @Volatile var lastRemote: Uri? = null
 
+    /** The device ID of the computer that sent the last image, and its address, as 1 value. */
+    @Volatile var lastRemoteFrom: Pair<String, String>? = null
+
     private val main by lazy { Handler(Looper.getMainLooper()) }
 
     /** Returns the first type in [types] that Flux syncs, or null. */
@@ -81,6 +84,7 @@ object ClipImage {
         dir.listFiles()?.filter { it != file }?.forEach { it.delete() }
         val uri = FileProvider.getUriForFile(core.app, authority(core.app), file)
         lastRemote = uri
+        lastRemoteFrom = d.id to uri.toString()
         InboxFeed.clipReceived(d.id, d.identity.deviceName, null)
         main.post { Android.setClipboardImage(core.app, uri) }
     }
