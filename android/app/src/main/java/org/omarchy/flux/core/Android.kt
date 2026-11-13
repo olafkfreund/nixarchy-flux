@@ -168,6 +168,25 @@ object Android {
             .onFailure { android.util.Log.w("FluxClipboard", "setting the clipboard image failed", it) }
     }
 
+    /** True when the clipboard holds the last clip that the computer [deviceId] sent. It needs the focus. */
+    fun holdsClipFrom(context: Context, deviceId: String): Boolean {
+        val cm = context.getSystemService(ClipboardManager::class.java) ?: return false
+        val clip = runCatching { cm.primaryClip }.getOrNull()?.takeIf { it.itemCount > 0 } ?: return false
+        val item = clip.getItemAt(0)
+        return isRemoteClip(
+            clip.description.label?.toString(), item.text?.toString(), item.uri?.toString(), deviceId,
+            Plugins.lastRemoteFrom, ClipImage.lastRemoteFrom,
+        )
+    }
+
+    /** Empties the clipboard. It returns false when Android refuses. */
+    fun clearClipboard(context: Context): Boolean {
+        val cm = context.getSystemService(ClipboardManager::class.java) ?: return false
+        return runCatching { cm.clearPrimaryClip() }
+            .onFailure { android.util.Log.w("FluxClipboard", "clearing the clipboard failed", it) }
+            .isSuccess
+    }
+
     /**
      * Android 12 and later: sets the night mode of the app, so that the
      * system splash screen and the -night resources match the theme.

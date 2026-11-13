@@ -106,4 +106,40 @@ class SendLogTest {
         assertEquals(r, yes.approval)
         SendLog.replace(emptyList())
     }
+
+    @Test
+    fun clearDropsTheEndedEntriesOfOneComputer() {
+        val other = file(4).copy(deviceId = "desk")
+        var list = listOf(file(1), file(2, TransferState.Failed), file(3, TransferState.Running), other)
+        list = clearSends(list, "pc")
+        assertEquals("the running file and the other computer stay", listOf(3L, 4L), list.map { it.id })
+        list = progressSend(list, 3, 50)
+        assertEquals("a kept file still takes its progress", 50L, list[0].done)
+        list = endSend(list, 3, ok = true)
+        assertEquals(TransferState.Done, list[0].state)
+    }
+
+    @Test
+    fun removeDropsOnlyAnEndedEntry() {
+        val list = listOf(file(1), file(2, TransferState.Running))
+        assertEquals(listOf(2L), removeSend(list, 1).map { it.id })
+        assertEquals("a running file stays", listOf(1L, 2L), removeSend(list, 2).map { it.id })
+        assertEquals("an unknown id changes nothing", list, removeSend(list, 9))
+    }
+
+    @Test
+    fun clearAndRemoveKeepTheIdsUnique() {
+        SendLog.replace(emptyList())
+        val failed = SendLog.fileStarted("pc", "omarchy-xps", "a.bin", 10, incoming = true)
+        SendLog.fileEnded(failed, ok = false)
+        val running = SendLog.fileStarted("pc", "omarchy-xps", "b.bin", 10, incoming = true)
+        assertEquals("1 file still runs", 1, SendLog.clear("pc"))
+        assertEquals(listOf(running), SendLog.entries.value.map { it.id })
+        val again = SendLog.fileStarted("pc", "omarchy-xps", "a.bin", 10, incoming = true)
+        assertTrue("a retry gets a new id", again != failed && again != running)
+        SendLog.fileEnded(running, ok = true)
+        SendLog.remove(running)
+        assertEquals(listOf(again), SendLog.entries.value.map { it.id })
+        SendLog.replace(emptyList())
+    }
 }

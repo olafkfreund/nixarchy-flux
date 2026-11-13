@@ -33,11 +33,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.absoluteOffset
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -60,6 +64,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -70,14 +75,19 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
@@ -88,6 +98,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
@@ -200,6 +211,8 @@ fun ComputerChatScreen(
     val seen = remember(all) { seenClock.update(all.map { it.key }, System.currentTimeMillis()) }
     val chat = remember(entries, events, seen) { chatItems(entries, events, { _, _ -> null }, seen) }
     val running = entries.filter { it.kind == SendKind.File && it.state == TransferState.Running }
+    val context = LocalContext.current
+    val clearable = entries.any { it.state != TransferState.Running }
     var trayOpen by rememberSaveable(d.id) { mutableStateOf(tray) }
     BackHandler(enabled = trayOpen) { trayOpen = false }
 
@@ -209,7 +222,7 @@ fun ComputerChatScreen(
             context = computerContext(d),
             onBack = onBack,
             avatar = { ChatAvatar(deviceIcon(d.type), Tn.text, size = 36.dp, badge = if (d.online) Tn.green else null) },
-        ) { ComputerMenu(d, actions) }
+        ) { ComputerMenu(d, actions, onClear = if (clearable) ({ clearChat(context, d.id) }) else null) }
         ProgressLine {
             if (running.isNotEmpty()) {
                 val size = running.sumOf { it.size }
@@ -239,10 +252,10 @@ internal fun computerContext(d: DeviceUi): String = when {
 
 /**
  * The menu of the chat of a computer: Control with the computer in scope,
- * its agents and terminals, and a new agent or terminal.
+ * its agents and terminals, a new agent or terminal, and Clear chat when [onClear] is set.
  */
 @Composable
-private fun ComputerMenu(d: DeviceUi, actions: ChatActions) {
+private fun ComputerMenu(d: DeviceUi, actions: ChatActions, onClear: (() -> Unit)?) {
     var open by remember { mutableStateOf(false) }
     val herdr = d.herdr
     Box {
@@ -257,6 +270,7 @@ private fun ComputerMenu(d: DeviceUi, actions: ChatActions) {
                 Triple("Control", Ic.tune) { actions.control(d.id) },
                 if (d.herdrSupported) Triple("Agents and terminals", Ic.agent) { actions.open(Route(d.id, AGENTS_PAGE)) } else null,
                 if (d.online && herdr?.anyRunning == true && herdr.control) Triple("New agent or terminal", Ic.add) { actions.open(Route(d.id, NEW_PANE_PAGE)) } else null,
+                if (onClear != null) Triple("Clear chat", Ic.delete, onClear) else null,
             )
             for ((label, icon, action) in items) {
                 DropdownMenuItem(text = { Text(label) }, leadingIcon = { Sym(icon) }, onClick = {
@@ -266,6 +280,18 @@ private fun ComputerMenu(d: DeviceUi, actions: ChatActions) {
             }
         }
     }
+}
+
+/** Clears the chat of the computer [id], and the clipboard when it still holds the last clip from it. */
+private fun clearChat(context: Context, id: String) {
+    if (isDemo(id)) return FluxCore.toast("This is a sample computer")
+    val clip = Android.holdsClipFrom(context, id)
+    val running = SendLog.clear(id)
+    val cleared = clip && Android.clearClipboard(context)
+    FluxCore.toast(
+        (if (cleared) "Chat and clipboard cleared" else "Chat cleared") +
+            if (running > 0) ". Files in progress stay." else "",
+    )
 }
 
 // ───────────────────────── Top bar ─────────────────────────
@@ -389,7 +415,7 @@ private fun ChatThread(chat: List<ChatItem>, bottom: Dp, notices: InboxNotices, 
                 }
                 key(c.key) {
                     when (c) {
-                        is ChatLogItem -> LogEntry(c.entry, context)
+                        is ChatLogItem -> EntryMenu(c.entry, context) { onText -> LogEntry(c.entry, context, onText) }
                         is ChatEventItem -> when (val item = c.item) {
                             is ApprovalItem -> ApprovalCard(item.request, c.at, actions)
                             is PairItem -> PairCard(item.deviceId, item.computer, c.at, actions)
@@ -578,16 +604,76 @@ internal fun PairCard(deviceId: String, computer: String, at: Long, actions: Cha
 
 // ───────────────────────── Log entries ─────────────────────────
 
+/**
+ * An entry with Delete. A long press on the entry opens a menu where the
+ * finger is. A long press on text that can be selected selects it, as
+ * before. TalkBack reads the entry as 1 item with Delete in its actions.
+ * A running file has no Delete.
+ */
+@Composable
+private fun EntryMenu(e: SendEntry, context: Context, content: @Composable (onText: (LayoutCoordinates) -> Unit) -> Unit) {
+    val running = e.state == TransferState.Running
+    var at by remember { mutableStateOf<IntOffset?>(null) }
+    var self by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var text by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    val delete = { deleteEntry(context, e) }
+    Box(
+        Modifier
+            .onGloballyPositioned { self = it }
+            .pointerInput(e.id, running) {
+                if (running) return@pointerInput
+                // Not detectTapGestures: it consumes the down, which cancels the text selection below.
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    // The selectable text keeps its own long press.
+                    val s = self
+                    val t = text
+                    val box = if (s != null && t != null && s.isAttached && t.isAttached) s.localBoundingBoxOf(t) else null
+                    if (box != null && box.contains(down.position)) return@awaitEachGesture
+                    val long = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                    long.consume()
+                    at = IntOffset(long.position.x.toInt(), long.position.y.toInt())
+                }
+            }
+            .semantics(mergeDescendants = true) {
+                if (!running) customActions = listOf(CustomAccessibilityAction("Delete") { delete(); true })
+            },
+    ) {
+        // A failed file that runs again closes its menu.
+        LaunchedEffect(running) { if (running) at = null }
+        content { text = it }
+        if (!running) at?.let { p ->
+            // The press is measured from the left edge, also in a right-to-left layout.
+            Box(Modifier.align(AbsoluteAlignment.TopLeft).absoluteOffset { p }) {
+                DropdownMenu(expanded = true, onDismissRequest = { at = null }) {
+                    DropdownMenuItem(text = { Text("Delete") }, leadingIcon = { Sym(Ic.delete) }, onClick = {
+                        at = null
+                        delete()
+                    })
+                }
+            }
+        }
+    }
+}
+
+/** Deletes the entry [e], and empties the clipboard when it is the clip from that computer that is still on it. */
+private fun deleteEntry(context: Context, e: SendEntry) {
+    if (isDemo(e.deviceId)) return FluxCore.toast("This is a sample computer")
+    val clip = e.incoming && (e.kind == SendKind.Clip || e.kind == SendKind.ClipImage) && Android.holdsClipFrom(context, e.deviceId)
+    SendLog.remove(e.id)
+    if (clip) Android.clearClipboard(context)
+}
+
 /** An entry of the chat log: a card from the computer, or a bubble, a photo, or a file card of this phone. */
 @Composable
-private fun LogEntry(e: SendEntry, context: Context) {
+private fun LogEntry(e: SendEntry, context: Context, onText: (LayoutCoordinates) -> Unit) {
     when {
         e.kind == SendKind.Approved || e.kind == SendKind.Denied -> ApprovalResult(e, context)
         e.incoming && e.kind == SendKind.File -> ReceivedFile(e, context)
         e.incoming -> ReceivedClip(e, context)
         e.kind == SendKind.File && e.uri.isNotEmpty() && fileIcon(e.text, false) == Ic.image -> SentPhoto(e, sendMeta(context, e))
         e.kind == SendKind.File || e.kind == SendKind.ClipImage -> SentFile(e, sendMeta(context, e))
-        else -> SentBubble(e.text, sendMeta(context, e), mono = e.kind != SendKind.Text)
+        else -> SentBubble(e.text, sendMeta(context, e), mono = e.kind != SendKind.Text, onText = onText)
     }
 }
 
@@ -660,7 +746,7 @@ private fun ReceivedClip(e: SendEntry, context: Context) {
             "Copied" to null
         } else {
             "Copy" to {
-                if (Plugins.putRemoteText(FluxCore, e.computer, e.text)) {
+                if (Plugins.putRemoteText(FluxCore, e.deviceId, e.computer, e.text)) {
                     copied = true
                     FluxCore.toast("Copied to this phone")
                 }
@@ -696,13 +782,13 @@ private val OutShape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bott
 
 /** Text, a link, or a clip that went out: a bubble at the right, with [meta] under it. Text is in the body face, and a link or a clip in mono. */
 @Composable
-private fun SentBubble(text: String, meta: String, mono: Boolean = true) {
+private fun SentBubble(text: String, meta: String, mono: Boolean = true, onText: (LayoutCoordinates) -> Unit = {}) {
     BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
         Column(Modifier.widthIn(max = maxWidth * 0.82f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
             SelectionContainer {
                 LineText(
                     if (mono) breakAll(text) else text,
-                    Modifier.clip(OutShape).background(Tn.accentTile).border(1.dp, Tn.lineHi, OutShape).padding(horizontal = 14.dp, vertical = 8.dp),
+                    Modifier.onGloballyPositioned(onText).clip(OutShape).background(Tn.accentTile).border(1.dp, Tn.lineHi, OutShape).padding(horizontal = 14.dp, vertical = 8.dp),
                     size = if (mono) 12.5f else 14f, lineHeight = if (mono) 1.45f else 1.4f, family = if (mono) Mono else androidx.compose.ui.text.font.FontFamily.Default,
                 )
             }

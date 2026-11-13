@@ -103,7 +103,7 @@ object Share {
     fun receive(core: FluxCore, d: Device, p: Packet) {
         val from = d.identity.deviceName
         p.string("text")?.let { text ->
-            if (Plugins.putRemoteText(core, from, text)) {
+            if (Plugins.putRemoteText(core, d.id, from, text)) {
                 InboxFeed.clipReceived(d.id, from, text)
                 core.toast("Text from $from is on the clipboard")
             }

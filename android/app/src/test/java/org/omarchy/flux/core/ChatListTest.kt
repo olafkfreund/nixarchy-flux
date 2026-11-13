@@ -104,4 +104,12 @@ class ChatListTest {
         val byName = chatList(listOf(pc, desk), null, log, SeenClock(), now = 100, query = "desk")
         assertEquals("a computer that matches by name shows its newest entry", "notes", byName.computers.single().last?.text)
     }
+
+    @Test
+    fun aClearedChatIsNotFoundBySearch() {
+        val pc = device("pc", "omarchy-xps")
+        val log = clearSends(listOf(entry(1, "pc", "the wifi password", at = 10)), "pc")
+        assertTrue(chatList(listOf(pc), null, log, SeenClock(), now = 100, query = "password").computers.isEmpty())
+        assertEquals(null, chatList(listOf(pc), null, log, SeenClock(), now = 100).computers.single().last)
+    }
 }
