@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 26
 spec: spec/2026-11-13-26-trackpad-mode.md
 coders:
