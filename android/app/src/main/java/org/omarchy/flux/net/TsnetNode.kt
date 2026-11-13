@@ -67,6 +67,8 @@ object TsnetNode {
     private var pending: ScheduledFuture<*>? = null
     private var retry = false
     private var legacyKey: String? = null
+    // True from a typed key until its trial starts. A key saved by an earlier run resumes its trial dir.
+    private var freshKey = false
 
     private class Run(val p: Process, val dir: File, val key: String, val from: File?) {
         var ready = false
@@ -107,6 +109,7 @@ object TsnetNode {
     fun setKey(key: String) = worker.execute {
         store.save(key.trim(), store.node, store.dir)
         legacyKey = null // a typed key always goes to a fresh dir, even the #48 one
+        freshKey = true
         reconcile()
     }
 
@@ -116,6 +119,7 @@ object TsnetNode {
         DIRS.forEach { dir(it).deleteRecursively() }
         store.save("", NodeState.None, DIRS[0])
         legacyKey = null
+        freshKey = false
         wanted = false
     }
 
@@ -136,8 +140,12 @@ object TsnetNode {
             key.isNotBlank() && key == legacyKey -> start(cur, key, from = null)
             key.isNotBlank() -> {
                 // A new key always gets a fresh dir: tsnet ignores a key on a node that has state.
+                // A trial that stopped before ready keeps its dir: a single-use key is spent, and
+                // the half-enrolled node there may still finish (for example after admin approval).
                 val to = dir(DIRS.first { it != store.dir })
-                if (to.deleteRecursively()) start(to, key, from = cur)
+                val resume = !freshKey && File(to, "tailscaled.state").exists()
+                freshKey = false
+                if (resume || to.deleteRecursively()) start(to, key, from = cur)
                 else trialFailed(to, key, cur, "Could not clear the folder ${to.name}.")
             }
             store.node == NodeState.Enrolled -> start(cur, "", from = null)

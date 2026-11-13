@@ -217,6 +217,28 @@ class TsnetNodeTest {
     }
 
     @Test
+    fun aResumedKeyKeepsItsTrialDirAndATypedKeyClearsIt() {
+        setUp(FakeStore(key = "tskey-1"))
+        TsnetNode.apply(true)
+        idle()
+        assertEquals("tsnet-2", last().dir)
+        // The helper registered the node, then Remote access went off before ready.
+        val state = File(dir("tsnet-2"), "tailscaled.state").apply { writeText("half-enrolled") }
+        TsnetNode.apply(false)
+        idle()
+        TsnetNode.apply(true)
+        await("resumed") { launches.size == 2 }
+        assertEquals("tsnet-2", last().dir)
+        assertEquals("tskey-1", last().env["TS_AUTHKEY"])
+        assertTrue("a resumed trial keeps its state", state.exists())
+        TsnetNode.setKey("tskey-2")
+        await("new trial") { launches.size == 3 }
+        assertEquals("tsnet-2", last().dir)
+        assertEquals("tskey-2", last().env["TS_AUTHKEY"])
+        assertFalse("a typed key starts from a cleared dir", state.exists())
+    }
+
+    @Test
     fun aNewerKeyStays() {
         setUp(FakeStore(key = "tskey-1"))
         TsnetNode.apply(true)
