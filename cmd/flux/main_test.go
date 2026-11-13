@@ -35,6 +35,12 @@ func TestWebcamSettings(t *testing.T) {
 			t.Errorf("%s: no error", v)
 		}
 	}
+	for _, v := range []bool{true, false} {
+		cfg, err := webcamSettings([]string{fmt.Sprintf("torch=%t", v)})
+		if err != nil || cfg["torch"] != v {
+			t.Errorf("torch=%t: %#v %v", v, cfg, err)
+		}
+	}
 }
 
 // The status shows the ID and the fingerprint of each device, so that the

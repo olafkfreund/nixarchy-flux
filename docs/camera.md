@@ -87,9 +87,13 @@ Other settings apply while the stream runs.
 | `contrast` | `0` to `2` | `1` |
 | `saturation` | `0` to `2` | `1` |
 | `warmth` | `-1` to `1`. Higher values make the image warmer. | `0` |
+| `torch` | `true`, `false`. Only on Flux for Android, with a camera that has a flash. | `false` |
 
 `flux-cli webcam reset` restores neutral image settings and keeps the aspect, resolution, and camera.
 The phone limits values to its camera's capabilities and saves them for the next stream.
+`torch` is not saved. It is off when a camera opens, and it goes off when the stream stops and with `reset`.
+Turn it on after a camera change, not in the same `set`.
+If the flash doesn't light, the phone turns `torch` off, and hides the switch when that lens never lit.
 
 `fluxd` takes the settings and the camera capabilities only from the phone that streams.
 It refuses settings with more than 4096 bytes, a list with more than 16 values, or a text with more than 128 characters.

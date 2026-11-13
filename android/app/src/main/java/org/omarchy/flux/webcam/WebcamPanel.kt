@@ -345,6 +345,18 @@ private fun WebcamSettingsPanel(
             }
             Switch(checked = config.mirror, onCheckedChange = null)
         }
+        if (caps.torch) {
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(value = config.torch, role = Role.Switch) { on -> set { it.copy(torch = on) } },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Flashlight", style = MaterialTheme.typography.bodyLarge)
+                    Text("Light the room with the phone's flash", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = config.torch, onCheckedChange = null)
+            }
+        }
         Row(
             Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(value = withMic, role = Role.Switch) { on -> onWithMic(on) },
             verticalAlignment = Alignment.CenterVertically,

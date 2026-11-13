@@ -38,6 +38,7 @@ data class WebcamConfig(
     val contrast: Float = 1f,
     val saturation: Float = 1f,
     val warmth: Float = 0f,
+    val torch: Boolean = false,
 ) {
     val width: Int get() = frameSize(aspect, resolution).first
     val height: Int get() = frameSize(aspect, resolution).second
@@ -61,6 +62,7 @@ data class WebcamConfig(
             contrast = partial.number("contrast")?.toFloat() ?: contrast,
             saturation = partial.number("saturation")?.toFloat() ?: saturation,
             warmth = partial.number("warmth")?.toFloat() ?: warmth,
+            torch = partial.flag("torch") ?: torch,
         )
     }
 
@@ -88,6 +90,7 @@ data class WebcamConfig(
             contrast = round(contrast.coerceIn(0f, 2f), 100f),
             saturation = round(saturation.coerceIn(0f, 2f), 100f),
             warmth = round(warmth.coerceIn(-1f, 1f), 100f),
+            torch = torch && caps.torch,
         )
     }
 
@@ -112,7 +115,11 @@ data class WebcamConfig(
         put("contrast", contrast)
         put("saturation", saturation)
         put("warmth", warmth)
+        put("torch", torch)
     }
+
+    /** The settings that the phone saves for the next session. The light is not saved. */
+    fun toSaved(): JsonObject = JsonObject(toJson() - "torch")
 }
 
 /** What the current camera and the encoder support. */
@@ -125,6 +132,7 @@ data class WebcamCaps(
     val cameras: List<String> = listOf("back"),
     val aspects: List<String> = ASPECTS,
     val resolutions: List<Int> = RESOLUTIONS,
+    val torch: Boolean = false,
 ) {
     companion object {
         /** Wide limits for the time before the camera reports its real limits. */
@@ -143,6 +151,7 @@ data class WebcamCaps(
         put("cameras", JsonArray(cameras.map { JsonPrimitive(it) }))
         put("aspects", JsonArray(aspects.map { JsonPrimitive(it) }))
         put("resolutions", JsonArray(resolutions.map { JsonPrimitive(it) }))
+        put("torch", torch)
     }
 }
 

@@ -835,6 +835,36 @@ Item {
       compare(card.aspects, ["16:9", "4:3", "1:1", "9:16"])
     }
 
+    function test_cameraTorchToggle() {
+      var view = createTemporaryObject(viewComponent, top)
+      view.selectedId = top.pixel
+      view.tab = "device"
+      var card = null
+      tryVerify(function () { card = findBy(page(view), "objectName", "cameraCard"); return !!card })
+      card.settingsOpen = true
+      var t = findBy(card, "objectName", "torchToggle")
+      verify(!!t)
+      tryVerify(function () { return t.visible })
+      verify(!t.checked)
+      t.toggled(true)
+      compare(requestsOf("webcam.config").length, 1)
+      compare(JSON.stringify(requestsOf("webcam.config")[0].params.config), '{"torch":true}')
+      verify(!card.restarting)
+      tryVerify(function () { return t.checked })
+      t.toggled(false)
+      compare(JSON.stringify(requestsOf("webcam.config")[1].params.config), '{"torch":false}')
+      tryVerify(function () { return !t.checked })
+      // A change from the phone checks it.
+      mock.setState(function (s) { s.webcam.config.torch = true })
+      tryVerify(function () { return t.checked })
+      mock.setState(function (s) { s.webcam.caps.torch = false })
+      tryVerify(function () { return !t.visible })
+      mock.setState(function (s) { s.webcam.caps.torch = true })
+      tryVerify(function () { return t.visible })
+      mock.setState(function (s) { delete s.webcam.caps.torch })
+      tryVerify(function () { return !t.visible })
+    }
+
     function test_devicePageShowsBrowseSessions() {
       var view = createTemporaryObject(viewComponent, top)
       view.selectedId = top.pixel

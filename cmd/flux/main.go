@@ -1034,7 +1034,7 @@ func webcam(args []string, device string) error {
 
 // webcamKeys are the settings that Flux for Android reads. The phone
 // ignores other keys, so the CLI refuses them.
-var webcamKeys = []string{"aspect", "resolution", "camera", "mirror", "zoom", "exposure", "whiteBalance", "brightness", "contrast", "saturation", "warmth"}
+var webcamKeys = []string{"aspect", "resolution", "camera", "mirror", "zoom", "exposure", "whiteBalance", "brightness", "contrast", "saturation", "warmth", "torch"}
 
 // maxWebcamNumber is the largest size of a webcam setting number that
 // fluxd sends to the phone.
