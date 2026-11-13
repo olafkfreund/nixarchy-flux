@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -63,6 +64,8 @@ class SshSignActivity : FragmentActivity() {
     }
 
     private val phase = mutableStateOf<Phase>(Phase.Ask)
+    // The request whose last tap a window covered. AskView shows the notice for it.
+    private val blockedFor = mutableStateOf<String?>(null)
     private lateinit var prompt: BiometricPrompt
 
     // The request of the open check. A failure of the check or of the signature goes to its computer.
@@ -144,10 +147,12 @@ class SshSignActivity : FragmentActivity() {
     @Composable
     private fun AskView(r: SshRequest, working: Boolean) {
         val scheme = MaterialTheme.colorScheme
+        val requestKey = "${r.computerId}/${r.id}"
+        val scroll = rememberScrollState()
         // At a large font size, the request scrolls. The warning, Approve, and Deny stay on screen below it.
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Column(
-                Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                Modifier.weight(1f, fill = false).verticalScroll(scroll),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
@@ -163,6 +168,14 @@ class SshSignActivity : FragmentActivity() {
                         style = MaterialTheme.typography.bodyMedium.copy(fontFamily = Mono),
                         maxLines = 6,
                     )
+                }
+                val blocked = blockedFor.value == requestKey
+                BlockedNotice(blocked)
+                LaunchedEffect(blocked) {
+                    if (!blocked) return@LaunchedEffect
+                    // Wait one frame, so that maxValue includes the notice.
+                    withFrameNanos { }
+                    scroll.animateScrollTo(scroll.maxValue)
                 }
             }
             Text(
@@ -203,10 +216,12 @@ class SshSignActivity : FragmentActivity() {
     }
 
     private fun start(r: SshRequest) {
+        val requestKey = "${r.computerId}/${r.id}"
         if (touchObscured) {
-            FluxCore.toast("Another app draws over Flux. Close that app, then approve.")
+            blockedFor.value = requestKey
             return
         }
+        blockedFor.value = null
         // Android 10 has no screen lock check with a key, so only a biometric can sign there.
         val allowed = if (Build.VERSION.SDK_INT >= 30) BIOMETRIC_STRONG or DEVICE_CREDENTIAL else BIOMETRIC_STRONG
         if (BiometricManager.from(this).canAuthenticate(allowed) != BiometricManager.BIOMETRIC_SUCCESS) {

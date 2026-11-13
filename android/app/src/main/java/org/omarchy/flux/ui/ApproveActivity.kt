@@ -33,6 +33,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -68,6 +69,8 @@ class ApproveActivity : FragmentActivity() {
     }
 
     private val phase = mutableStateOf<Phase>(Phase.Ask)
+    // The request whose last tap a window covered. AskView shows the notice for it.
+    private val blockedFor = mutableStateOf<String?>(null)
     private lateinit var prompt: BiometricPrompt
     private var onSigned: ((Signature) -> Unit)? = null
 
@@ -172,10 +175,12 @@ class ApproveActivity : FragmentActivity() {
     @Composable
     private fun AskView(r: ApproveRequest, working: Boolean) {
         val scheme = MaterialTheme.colorScheme
+        val requestKey = "${r.computerId}/${r.id}"
+        val scroll = rememberScrollState()
         // At a large font size, the request scrolls. The warning, Approve, and Deny stay on screen below it.
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Column(
-                Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                Modifier.weight(1f, fill = false).verticalScroll(scroll),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
@@ -193,6 +198,14 @@ class ApproveActivity : FragmentActivity() {
                 }
                 for (d in details) {
                     Text(d, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                }
+                val blocked = blockedFor.value == requestKey
+                BlockedNotice(blocked)
+                LaunchedEffect(blocked) {
+                    if (!blocked) return@LaunchedEffect
+                    // Wait one frame, so that maxValue includes the notice.
+                    withFrameNanos { }
+                    scroll.animateScrollTo(scroll.maxValue)
                 }
             }
             val replaces = remember(r.computerId, r.kind) { r.kind == ApproveRequest.Kind.Enroll && ApproveKeys.has(r.computerId) }
@@ -276,10 +289,12 @@ class ApproveActivity : FragmentActivity() {
     }
 
     private fun start(r: ApproveRequest) {
+        val requestKey = "${r.computerId}/${r.id}"
         if (touchObscured) {
-            FluxCore.toast("Another app draws over Flux. Close that app, then approve.")
+            blockedFor.value = requestKey
             return
         }
+        blockedFor.value = null
         if (BiometricManager.from(this).canAuthenticate(BIOMETRIC_STRONG) != BiometricManager.BIOMETRIC_SUCCESS) {
             fail(r, "Set up a fingerprint in the phone settings first.")
             return

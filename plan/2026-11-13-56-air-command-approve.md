@@ -368,3 +368,4 @@ is no local Android SDK, so CI in step 5 is the first compile.
 
 | # | Step | What changed and why |
 | --- | --- | --- |
+| P1 | 2 | The scroll effect waits one frame (`withFrameNanos { }`) before `animateScrollTo(scroll.maxValue)`. The spec's one-line effect read `maxValue` before the notice was laid out (agy's plan review, finding 3). |
