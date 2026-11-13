@@ -41,6 +41,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -63,10 +64,12 @@ fun TiledPairSheet(name: String, key: String, waiting: Boolean, onCancel: () -> 
     BackHandler(onBack = onCancel)
     HideOverlays()
     val activity = LocalActivity.current as? MainActivity
+    var blocked by remember(name) { mutableStateOf(false) }
     val pair = {
         if (activity?.touchObscured == true) {
-            FluxCore.toast("Another app draws over Flux. Close that app, then pair.")
+            blocked = true
         } else {
+            blocked = false
             onPair()
         }
     }
@@ -83,7 +86,7 @@ fun TiledPairSheet(name: String, key: String, waiting: Boolean, onCancel: () -> 
         ) {
             Box(Modifier.fillMaxWidth().height(2.dp).background(Tn.yellow))
             Column(
-                Modifier.navigationBarsPadding().padding(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 24.dp),
+                Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding().padding(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -118,6 +121,7 @@ fun TiledPairSheet(name: String, key: String, waiting: Boolean, onCancel: () -> 
                         }
                     }
                 }
+                BlockedNotice(blocked, align = TextAlign.Start)
                 Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(TileGap)) {
                     Box(
                         Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(10.dp)).background(Tn.line).clickable(onClick = onCancel),

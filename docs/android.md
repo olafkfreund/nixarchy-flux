@@ -208,7 +208,7 @@ The phone turns on the camera or the microphone only after you tap Start on the 
 - When the page cannot start the stream in 60 seconds, for example while the computer is not reachable, it does not start it. Then press Start on the page.
 - While a stream of that kind runs to that computer, a request does nothing.
 - The phone ignores a request of the same kind from the same computer that comes less than 3 seconds after the last request. An ignored request also counts as the last request.
-- The prompt refuses a tap while another app draws over Flux.
+- The prompt refuses a tap while another window covers Flux, and says so on the screen.
 
 The stream starts from the visible page with the start code of its Start button.
 Android lets an app use the camera and the microphone only while the app is visible or after an action of the user.

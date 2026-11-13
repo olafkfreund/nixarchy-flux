@@ -125,9 +125,11 @@ Windows Hello also accepts its PIN, see the section Windows.
   the next enrollment.
 - An unpair on the phone deletes the keys of that computer. The key file
   on the computer stays until `sudo flux-cli approve remove`.
-- On Android 12 and later, the approval screen hides the windows of other
-  apps. The phone refuses **Approve** when the window of another app
-  covered the screen during the tap.
+- On Android 12 and later, the approval screen hides the overlay
+  windows of other apps. Windows that the system or the phone maker
+  keeps, such as the S Pen Air Command button, can stay. The phone
+  refuses **Approve** when another window covered the touch point,
+  and says so on the screen.
 
 ### iPhone and Mac
 
