@@ -369,3 +369,5 @@ is no local Android SDK, so CI in step 5 is the first compile.
 | # | Step | What changed and why |
 | --- | --- | --- |
 | P1 | 2 | The scroll effect waits one frame (`withFrameNanos { }`) before `animateScrollTo(scroll.maxValue)`. The spec's one-line effect read `maxValue` before the notice was laid out (agy's plan review, finding 3). |
+| P2 | 6 | Order: the tablet's reinstall needed a new pairing, so the pair sheet was tested first as part of it, then again at the end. The large-font check ran with the approval screen full screen at font scale 2.0: it opens in its own window, not in the split-screen half, so the small-window case is not shown on a device. The notice sits inside the scrolling column, so the buttons can't be pushed off screen. |
+| P3 | 8 | The cleanup is deferred until the remaining issues are tested, because they need the same setup (`fluxd`, both devices paired, an enrollment). The owner agreed to keep the setup. |
