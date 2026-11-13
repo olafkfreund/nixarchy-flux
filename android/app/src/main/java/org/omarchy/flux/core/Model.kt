@@ -222,6 +222,8 @@ data class UiState(
     val remoteAccess: Boolean = false,
     /** True when the user saved a tailnet auth key. */
     val tailnetKeySet: Boolean = false,
+    /** Whether the tailnet node enrolled. */
+    val tailnetNode: NodeState = NodeState.None,
     /** False while the user has turned Flux off. */
     val enabled: Boolean = true,
     val theme: ThemeMode = ThemeMode.Computer,

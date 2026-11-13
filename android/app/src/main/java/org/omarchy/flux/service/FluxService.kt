@@ -38,6 +38,7 @@ import org.omarchy.flux.core.MotionCues
 import org.omarchy.flux.core.Plugins
 import org.omarchy.flux.core.Ringer
 import org.omarchy.flux.core.SmsSync
+import org.omarchy.flux.net.TsnetNode
 import org.omarchy.flux.protocol.PROTOCOL_VERSION
 import org.omarchy.flux.protocol.cleanName
 import org.omarchy.flux.ui.ClipboardSendActivity
@@ -58,11 +59,13 @@ class FluxService : Service() {
         override fun onAvailable(network: Network) {
             FluxCore.refreshWifi()
             FluxCore.rediscover()
+            TsnetNode.networkChanged()
         }
 
         override fun onLost(network: Network) {
             FluxCore.refreshWifi()
             FluxCore.publish()
+            TsnetNode.networkChanged()
         }
     }
 
@@ -87,7 +90,11 @@ class FluxService : Service() {
     }
 
     private val screenReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) = search()
+        override fun onReceive(context: Context, intent: Intent) {
+            search()
+            // After Doze the node's paths can be old.
+            TsnetNode.networkChanged()
+        }
     }
 
     /**
