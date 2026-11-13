@@ -152,7 +152,9 @@ object FluxCore {
             val identity = Identity(t.id, t.name, t.type, 8, emptyList(), emptyList())
             val d = Device(this, identity)
             d.pairState = PairState.Paired
-            d.lastIp = t.lastIp
+            // Builds before #50 stored the tailnet node's 127.0.0.1.
+            if (isLoopbackText(t.lastIp)) trust.update(t.id) { it.copy(lastIp = "") }
+            d.lastIp = t.lastIp.takeUnless { isLoopbackText(it) }.orEmpty()
             d.wake = t.wake
             d.certificate = trust.certificate(t.id)
             devices[t.id] = d
@@ -355,7 +357,7 @@ object FluxCore {
             if (old != null && old !== link) MotionCues.onLinkLost(d)
             if (old != null && old !== link) old.close()
             d.certificate = link.peerCertificate
-            d.lastIp = link.address.hostAddress ?: ""
+            d.lastIp = nextLastIp(d.lastIp, link.address)
             if (pinned != null) {
                 d.pairState = PairState.Paired
                 trust.update(id) { it.copy(name = link.identity.deviceName, lastIp = d.lastIp) }

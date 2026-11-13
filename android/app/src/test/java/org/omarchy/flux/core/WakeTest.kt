@@ -42,5 +42,10 @@ class WakeTest {
             Wake.destinations(targets, listOf("10.0.0.255", "192.168.1.255"), "192.168.1.20"),
         )
         assertEquals(listOf("255.255.255.255"), Wake.destinations(emptyList(), emptyList(), "fe80::1"))
+        assertEquals(
+            "a send to loopback always succeeds",
+            listOf("192.168.1.255", "255.255.255.255"),
+            Wake.destinations(targets.take(1), emptyList(), "127.0.0.1"),
+        )
     }
 }

@@ -159,6 +159,8 @@ data class DeviceUi(
     val motionSupported: Boolean = false,
     /** The motion cues state with this computer. */
     val motion: MotionUi = MotionUi(),
+    /** True while the link comes through this phone's tailnet node. */
+    val viaTailnet: Boolean = false,
 )
 
 /**

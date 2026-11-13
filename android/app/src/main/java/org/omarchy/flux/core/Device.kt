@@ -1,11 +1,13 @@
 package org.omarchy.flux.core
 
 import org.omarchy.flux.net.Link
+import org.omarchy.flux.net.TsnetNode
 import org.omarchy.flux.protocol.Identity
 import org.omarchy.flux.protocol.Packet
 import org.omarchy.flux.protocol.Types
 import org.omarchy.flux.protocol.bodyOf
 import org.omarchy.flux.protocol.verificationKey
+import java.net.InetAddress
 import java.security.cert.X509Certificate
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -154,7 +156,7 @@ class Device(private val core: FluxCore, var identity: Identity) {
         id = id,
         name = identity.deviceName,
         type = identity.deviceType,
-        ip = link?.address?.hostAddress ?: lastIp,
+        ip = link?.address?.let { if (it.isLoopbackAddress) "" else it.hostAddress.orEmpty() } ?: lastIp,
         paired = paired,
         online = online,
         pairState = pairState,
@@ -195,6 +197,7 @@ class Device(private val core: FluxCore, var identity: Identity) {
             error = motionError,
             mount = MotionCues.mount(id),
         ),
+        viaTailnet = link?.address?.isLoopbackAddress == true && TsnetNode.state.value is TsnetNode.State.Ready,
     )
 
     // ---------------------------------------------------------------- pairing
@@ -325,7 +328,7 @@ class Device(private val core: FluxCore, var identity: Identity) {
                 name = identity.deviceName,
                 type = identity.deviceType,
                 certificate = TrustStore.encode(cert),
-                lastIp = link?.address?.hostAddress ?: "",
+                lastIp = nextLastIp(lastIp, link?.address),
             ),
         )
         // The Inbox of the new computer shows the success state, see FluxCore.newPairing.
@@ -386,3 +389,10 @@ class Device(private val core: FluxCore, var identity: Identity) {
  */
 internal fun refusesUnpaired(paired: Boolean, pairing: Boolean, refused: Boolean): Boolean =
     !paired && !pairing && !refused
+
+/** The address to keep for a computer after a link from [link]: a loopback link is the tailnet node's forward, so the stored one stays. */
+internal fun nextLastIp(stored: String, link: InetAddress?): String =
+    link?.takeUnless { it.isLoopbackAddress }?.hostAddress ?: stored
+
+/** True for a stored loopback address, without a name lookup. */
+internal fun isLoopbackText(ip: String) = ip.startsWith("127.") || ip == "::1" || ip == "0:0:0:0:0:0:0:1"
