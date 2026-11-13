@@ -1100,9 +1100,10 @@ func (d *Daemon) receive(dev *Device, l *lan.Link) {
 		note = dev.pairLinkEndedLocked()
 	}
 	name, paired := dev.Name, dev.Paired
+	dropAt := time.Now() // (taken under d.mu: a request after it, on a new link, stays)
 	d.mu.Unlock()
 	if current {
-		d.dropApprovals(dev.ID)
+		d.dropApprovals(dev.ID, dropAt)
 	}
 	if current && paired && d.ctx.Err() == nil {
 		d.watchDisconnect(dev)

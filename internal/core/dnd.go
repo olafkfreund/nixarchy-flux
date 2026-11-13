@@ -170,7 +170,7 @@ type DndView struct {
 
 // handleDndState stores the state that a phone reports about itself. It
 // never applies the state to this computer.
-func (d *Daemon) handleDndState(dev *Device, p *proto.Packet) {
+func (d *Daemon) handleDndState(dev *Device, l *lan.Link, p *proto.Packet) {
 	var body struct {
 		On *bool  `json:"on"`
 		By string `json:"by"`
@@ -182,6 +182,12 @@ func (d *Daemon) handleDndState(dev *Device, p *proto.Packet) {
 		body.By = ""
 	}
 	d.mu.Lock()
+	// A report from a replaced link or after an unpair is old: it must not
+	// overwrite the report of the current link.
+	if !dev.Paired || dev.link != l {
+		d.mu.Unlock()
+		return
+	}
 	dev.dnd, dev.dndOK = DndView{On: body.On, By: body.By, At: now().Unix()}, true
 	d.mu.Unlock()
 	d.markDirty()

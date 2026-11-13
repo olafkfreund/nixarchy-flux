@@ -4,6 +4,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import java.util.concurrent.Executors
 import org.omarchy.flux.protocol.Packet
 import org.omarchy.flux.protocol.Types
 import org.omarchy.flux.protocol.bodyOf
@@ -18,6 +19,9 @@ private const val TAG = "FluxDnd"
 object DndSync {
     private val guard = DndGuard()
     private val logic = DndLogic(guard)
+
+    /** One worker: the decisions and the filter writes run in arrival order. */
+    private val queue = Executors.newSingleThreadExecutor { Thread(it, "flux-dnd").apply { isDaemon = true } }
 
     private fun manager(context: Context) = context.getSystemService(NotificationManager::class.java)
 
@@ -40,11 +44,12 @@ object DndSync {
         override fun access() = hasAccess(core.app)
         override fun isOn() = isOn(core.app)
         override fun now() = SystemClock.elapsedRealtime()
-        override fun async(block: () -> Unit) = core.io.execute(block)
-        override fun setFilter(on: Boolean) {
+        override fun async(block: () -> Unit) = queue.execute(block)
+        override fun setFilter(on: Boolean): Boolean {
             val filter = if (on) NotificationManager.INTERRUPTION_FILTER_PRIORITY else NotificationManager.INTERRUPTION_FILTER_ALL
-            runCatching { manager(core.app)?.setInterruptionFilter(filter) }
+            return runCatching { manager(core.app)?.setInterruptionFilter(filter) != null }
                 .onFailure { Log.w(TAG, "set Do Not Disturb failed", it) }
+                .getOrDefault(false)
         }
         override fun forward(on: Boolean, except: String?) {
             for (d in core.connectedPaired()) {
@@ -92,7 +97,8 @@ class DndLogic(private val guard: DndGuard) {
         fun isOn(): Boolean
         fun now(): Long
         fun async(block: () -> Unit)
-        fun setFilter(on: Boolean)
+        /** Sets the filter; false when the phone refused it. */
+        fun setFilter(on: Boolean): Boolean
         fun forward(on: Boolean, except: String?)
         fun report(by: String, on: Boolean?, to: String?)
     }
@@ -101,37 +107,32 @@ class DndLogic(private val guard: DndGuard) {
 
     private fun Env.current(): Boolean? = if (usable()) isOn() else null
 
-    fun onLocalChange(env: Env) {
+    // Every decision runs on env.async, one at a time, so the guard and the
+    // filter never disagree and a later request never runs before an earlier one.
+    fun onLocalChange(env: Env) = env.async {
         val on = env.isOn()
         val change = guard.local(on, env.now())
-        if (!change || !env.usable()) return
-        env.forward(on, except = null)
-        env.report("phone", on, null)
-    }
-
-    fun onPacket(env: Env, from: String, on: Boolean) {
-        if (!env.usable() || !guard.remote(on, env.now())) return
-        env.async {
-            env.setFilter(on)
-            env.forward(on, except = from)
-            env.report("sync", on, null)
+        if (change && env.usable()) {
+            env.forward(on, except = null)
+            env.report("phone", on, null)
         }
     }
 
-    fun onSet(env: Env, on: Boolean) {
-        if (!env.usable()) {
-            env.report("set", null, null)
-            return
+    fun onPacket(env: Env, from: String, on: Boolean) = env.async {
+        if (env.usable() && guard.remote(on, env.now())) {
+            if (env.setFilter(on)) env.forward(on, except = from)
+            env.report("sync", env.current(), null)
         }
+    }
+
+    fun onSet(env: Env, on: Boolean) = env.async {
         // Marked remote: the change is not a local one, so it is not sent as flux.dnd.
-        val apply = guard.remote(on, env.now())
-        env.async {
-            if (apply) env.setFilter(on)
-            env.report("set", on, null)
-        }
+        if (env.usable() && guard.remote(on, env.now())) env.setFilter(on)
+        // The state the phone has now, not the one asked for: a refused write shows.
+        env.report("set", env.current(), null)
     }
 
-    fun onConnected(env: Env, id: String) = env.report("connect", env.current(), id)
+    fun onConnected(env: Env, id: String) = env.async { env.report("connect", env.current(), id) }
 
     fun reportState(env: Env) = env.async { env.report("phone", env.current(), null) }
 }

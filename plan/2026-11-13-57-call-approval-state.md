@@ -290,3 +290,16 @@ Revert the PR. All fields are additive, and old clients ignore them. The Android
 - **Step 6** (lead): 10 existing tests in `internal/core`, `internal/desktop`, `internal/approve` and `cmd/flux` fail on this NixOS host before and
   after the change. Their fakes call `/usr/bin/cat`, `stat` and similar, or expect a umask that this host does not use. Step 6 checks that the set of
   failures is unchanged.
+- **Step 6 review fixes** (lead, from the Opus and Codex reviews of the full diff):
+  - **Android DND.** Decisions and filter writes run on one queue in arrival order. `setFilter` returns success, and
+    every report sends the phone's real state (`current()`), so a refused write shows. Tests cover the arrival order
+    and a refused write.
+  - **`handleDndState`** takes the link. It drops a report from a replaced link or one that arrives after an unpair.
+    A test covers both.
+  - **`dropApprovals(devID, before)`** cancels only requests that started before the drop. The drop time is taken
+    under `d.mu` at each call site. Each cancelled prompt is closed on the phone (`cancelApproval`).
+  - **The cancel result** also carries a `message`, so sudo prints a reason.
+  - **`docs/ipc.md`** documents the cancel result, an empty `by` and the `dnd.set` errors.
+  - **The approval tests** are less timing-fragile.
+  - **CI.** `build.yml` has no pull-request trigger, so the Android check runs through `workflow_dispatch` on the
+    branch.

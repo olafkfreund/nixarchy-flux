@@ -159,7 +159,7 @@ func (b *approvalBook) cancel(id string) (device string) {
 	if a := b.byID[id]; a != nil {
 		device = a.device
 		if a.result == nil {
-			a.result = &approvalResult{State: "failed", Error: "cancelled"}
+			a.result = &approvalResult{State: "failed", Error: "cancelled", Message: "the request was cancelled because Flux lost the phone"}
 			close(a.done)
 		}
 		delete(b.byID, id)
@@ -376,17 +376,23 @@ func (d *Daemon) ApproveCancel(id string) error {
 	return nil
 }
 
-func (d *Daemon) dropApprovals(devID string) {
+// dropApprovals cancels the sudo requests of devID that started before
+// the trust or the link went away. A request that started after it, on a
+// link that came back at once, stays. The phone is told to close each
+// cancelled prompt while it still has a link.
+func (d *Daemon) dropApprovals(devID string, before time.Time) {
 	d.approvals.mu.Lock()
 	var ids []string
 	for id, a := range d.approvals.byID {
-		if a.device == devID && a.kind == "request" {
+		if a.device == devID && a.kind == "request" && !a.since.After(before) {
 			ids = append(ids, id)
 		}
 	}
 	d.approvals.mu.Unlock()
 	for _, id := range ids {
-		d.approvals.cancel(id)
+		if d.approvals.cancel(id) != "" {
+			d.cancelApproval(devID, id)
+		}
 	}
 }
 

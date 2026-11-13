@@ -163,7 +163,7 @@ Each device in `devices` has these fields:
 | `battery`, `notifications`, `conversations` | The phone data. A device that is not paired has none. |
 | `call` | The active phone call: `state` (`ringing` or `talking`), `caller`, `number`, and `since` (Unix seconds). Omitted when no call is active, after the link closes, or when the device is not paired. |
 | `missedCall` | The last missed call: `caller`, `number`, and `at` (Unix seconds). Omitted when none is recent, after 10 minutes, after a new call starts, or when the device is not paired. |
-| `dnd` | The Do Not Disturb state that the phone reported for itself: `on` (`true`, `false`, or `null` when the phone cannot read or set it), `by` (`phone`, `sync`, `set`, or `connect`), and `at` (Unix seconds when fluxd received the report). Omitted when the device has no link or is not paired. |
+| `dnd` | The Do Not Disturb state that the phone reported for itself: `on` (`true`, `false`, or `null` when the phone cannot read or set it), `by` (`phone`, `sync`, `set`, or `connect`, or an empty string for a value this fluxd does not know), and `at` (Unix seconds when fluxd received the report). Omitted when the device has no link or is not paired. |
 | `outbox` | The text messages that `sms.send` sent through the device and that the device did not report yet. See [the outbox](#outbox). A device that is not paired has an empty list. |
 | `plugins` | The features that the device offers. `streamrequest` means that the device can start its camera and its microphone when this computer asks. `speaker` means that the device can also play the audio of this computer when this computer asks. `dnd` means that the device reports its Do Not Disturb state and accepts `dnd.set`. |
 | `app` | The Flux program of the device: `android`, `android-debug`, `ios`, `macos`, or `fluxd`. An earlier app sends none. |
@@ -213,7 +213,7 @@ Without `device`, a method uses the only connected paired device.
 | `addresses.add`, `addresses.remove` | `device`, `address` |
 | `ring` | `device` |
 | `ping` | `device`, and an optional `message` |
-| `dnd.set` | `device`, and `on` (`true` or `false`). It sets Do Not Disturb on that phone only and returns `{"sent":true}`. |
+| `dnd.set` | `device`, and `on` (`true` or `false`). It sets Do Not Disturb on that phone only and returns `{"sent":true}`. The phone's next `dnd` report shows the result. Errors: `bad_params` without `on`, `not_supported` when the device lacks `dnd` in `plugins`, `offline` without a link. |
 | `clipboard.send` | `device`, and `text`. Without `text`, the clipboard of the computer. |
 | `clipboard.copy` | `id` of an entry, or `text`, or `path` of an image in the history |
 | `share.files` | `device`, and `paths`, a list of absolute paths. The result has the IDs of the new `transfers`. |
@@ -382,6 +382,7 @@ The helper connects only to `/run/user/<uid>/flux/fluxd.sock`. It does not read 
 While a `sudo` approval or an SSH sign request waits on a phone, `approvals` in `state` lists its `kind` (`sudo` or `ssh`), `device`, and `since`.
 It omits enrollments and never includes the PAM service, user, command, key, fingerprint, or signature.
 A disconnect or an unpair cancels the waiting `sudo` request of that device at once.
+`approve.wait` then returns `{"state":"failed","error":"cancelled","message":"…"}`, and the phone is told to close its prompt.
 
 ## Clipboard
 

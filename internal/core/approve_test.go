@@ -206,8 +206,10 @@ func TestApproveCancelWakesWait(t *testing.T) {
 			result <- r
 		}
 	}()
-	time.Sleep(10 * time.Millisecond)
-	d.dropApprovals(dev.ID)
+	// approve.wait must hold the request before the drop, or it answers
+	// not_found: give it time, and the result channel tells the rest.
+	time.Sleep(50 * time.Millisecond)
+	d.dropApprovals(dev.ID, time.Now())
 	select {
 	case r := <-result:
 		if r.State != "failed" || r.Error != "cancelled" {
@@ -231,13 +233,17 @@ func TestApprovalExpiryPublishes(t *testing.T) {
 	if _, err := d.ApproveRequest(approveRaw(t, map[string]any{"device": dev.ID})); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-d.dirty:
-		if got := d.approvals.views(); len(got) != 0 {
-			t.Fatalf("expired approval visible: %+v", got)
+	// add may publish first; the expiry must publish again with no other event.
+	deadline := time.After(7 * time.Second)
+	for {
+		select {
+		case <-d.dirty:
+			if len(d.approvals.views()) == 0 {
+				return
+			}
+		case <-deadline:
+			t.Fatal("expiry did not publish to idle subscribers")
 		}
-	case <-time.After(6 * time.Second):
-		t.Fatal("expiry did not publish to idle subscribers")
 	}
 }
 
@@ -298,5 +304,20 @@ func TestHandleApprove(t *testing.T) {
 		if res.State != want {
 			t.Errorf("case %d: state %q, want %q", i, res.State, want)
 		}
+	}
+}
+
+// A drop cancels only the requests that started before it: a request on a
+// link that came back at once stays.
+func TestDropApprovalsKeepsLaterRequest(t *testing.T) {
+	d, dev := approveDaemon()
+	cut := time.Now()
+	later := &approval{id: "later", kind: "request", device: dev.ID, since: cut.Add(time.Millisecond), deadline: cut.Add(time.Minute)}
+	if err := d.approvals.add(later); err != nil {
+		t.Fatal(err)
+	}
+	d.dropApprovals(dev.ID, cut)
+	if d.approvals.pending() != 1 {
+		t.Fatal("a drop cancelled a request that started after it")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"flux/internal/config"
+	"flux/internal/lan"
 	"flux/internal/proto"
 )
 
@@ -183,8 +184,8 @@ func TestHandleDndState(t *testing.T) {
 	dnd := &slowDnd{release: make(chan struct{}), started: make(chan struct{})}
 	d := &Daemon{cfg: &config.Config{SyncDnd: true}, devices: map[string]*Device{}, dnd: dnd, logger: log.New(io.Discard, "", 0)}
 	dev := &Device{ID: "p1", Name: "Pixel 8", Paired: true}
-	d.handleDndState(dev, proto.New(proto.TypeFluxDndState, map[string]any{"on": true, "by": "set"}))
-	d.handleDndState(dev, proto.New(proto.TypeFluxDndState, map[string]any{"on": nil, "by": "bogus"}))
+	d.handleDndState(dev, nil, proto.New(proto.TypeFluxDndState, map[string]any{"on": true, "by": "set"}))
+	d.handleDndState(dev, nil, proto.New(proto.TypeFluxDndState, map[string]any{"on": nil, "by": "bogus"}))
 	waitIdle(t, d, &d.content.dndQ)
 	if len(dnd.sets) != 0 {
 		t.Fatalf("the desktop got %v", dnd.sets)
@@ -195,7 +196,7 @@ func TestHandleDndState(t *testing.T) {
 	if v.Dnd == nil || v.Dnd.On != nil || v.Dnd.By != "" || v.Dnd.At == 0 {
 		t.Fatalf("dnd %+v", v.Dnd)
 	}
-	d.handleDndState(dev, proto.New(proto.TypeFluxDndState, map[string]any{"on": true, "by": "phone"}))
+	d.handleDndState(dev, nil, proto.New(proto.TypeFluxDndState, map[string]any{"on": true, "by": "phone"}))
 	d.mu.Lock()
 	on, by := dev.dnd.On, dev.dnd.By
 	dev.dndOK = false
@@ -252,5 +253,31 @@ func TestDndSetMethod(t *testing.T) {
 	d.mu.Unlock()
 	if c := errCode(call(`{"device":"Pixel 8","on":false}`)); c != "offline" {
 		t.Fatalf("offline: %q", c)
+	}
+}
+
+// A report from a link that was replaced, or after an unpair, does not
+// overwrite the report of the current link.
+func TestHandleDndStateOldLink(t *testing.T) {
+	d := &Daemon{cfg: &config.Config{}, devices: map[string]*Device{}, logger: log.New(io.Discard, "", 0)}
+	current, old := &lan.Link{}, &lan.Link{}
+	dev := &Device{ID: "p1", Name: "Pixel 8", Paired: true, link: current}
+	d.handleDndState(dev, current, proto.New(proto.TypeFluxDndState, map[string]any{"on": true, "by": "connect"}))
+	d.handleDndState(dev, old, proto.New(proto.TypeFluxDndState, map[string]any{"on": false, "by": "phone"}))
+	d.mu.Lock()
+	on := dev.dnd.On
+	d.mu.Unlock()
+	if on == nil || !*on {
+		t.Fatalf("an old link overwrote the report: %v", on)
+	}
+	d.mu.Lock()
+	dev.Paired = false
+	d.mu.Unlock()
+	d.handleDndState(dev, current, proto.New(proto.TypeFluxDndState, map[string]any{"on": false, "by": "phone"}))
+	d.mu.Lock()
+	on = dev.dnd.On
+	d.mu.Unlock()
+	if on == nil || !*on {
+		t.Fatal("a report after an unpair was stored")
 	}
 }
