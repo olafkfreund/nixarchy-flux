@@ -126,6 +126,8 @@ object SmsPackets {
         val fields = buildList {
             add("version" to 2)
             add("messages" to messages)
+            // fluxd measures the gap between the clocks from it, for a phone whose clock is behind.
+            add("now" to System.currentTimeMillis())
             if (threadId != null) add("threadID" to threadId)
             if (conversations) add("conversations" to true)
         }
