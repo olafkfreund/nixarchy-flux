@@ -84,9 +84,6 @@ import org.omarchy.flux.voice.rememberVoiceTyping
 /** A finger that stays this long without a motion starts a drag. */
 private const val HOLD_MS = 450L
 
-/** The scroll speed, in scroll units per dp of finger motion. */
-private const val SCROLL_SPEED = 1.2f
-
 /**
  * The first character of the text field. The phone keyboard deletes it
  * when the user presses backspace in an empty field, so that the computer
@@ -529,7 +526,7 @@ private fun Modifier.touchpad(
                 for (c in down) sum += c.positionChange()
                 val delta = sum / down.size.toFloat()
                 travel += delta.getDistance()
-                if (travel >= slop) onScroll(delta.x * dpPerPx * SCROLL_SPEED, delta.y * dpPerPx * SCROLL_SPEED)
+                if (travel >= slop) onScroll(delta.x * dpPerPx * RemoteInput.TOUCHPAD_SCROLL_SPEED, delta.y * dpPerPx * RemoteInput.TOUCHPAD_SCROLL_SPEED)
             }
             event.changes.forEach { it.consume() }
         }

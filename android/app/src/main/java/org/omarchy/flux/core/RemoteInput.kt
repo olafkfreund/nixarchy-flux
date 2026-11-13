@@ -4,6 +4,7 @@ import org.omarchy.flux.protocol.Packet
 import org.omarchy.flux.protocol.Types
 import org.omarchy.flux.protocol.bodyOf
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -165,6 +166,15 @@ object RemoteInput {
     private const val BASE_SPEED = 1.3f
     private const val BOOST_DP = 10f
     private const val MAX_BOOST = 2f
+
+    /** The scroll speed of the touchpad screen and the trackpad mode, in scroll units per dp of finger motion. */
+    const val TOUCHPAD_SCROLL_SPEED = 1.2f
+
+    /** The pointer motion for a finger motion of [dx], [dy] dp on a view zoomed by [zoom]. */
+    fun trackpadMove(dx: Float, dy: Float, zoom: Float): Pair<Float, Float> {
+        val s = pointerScale(hypot(dx, dy)) / zoom.coerceAtLeast(1f)
+        return dx * s to dy * s
+    }
 
     /**
      * The device that the volume keys control while the touchpad screen
