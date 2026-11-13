@@ -293,6 +293,9 @@ If a message is on the phone but not on the desktop, check these causes:
 
 - The app on the phone keeps the message in its own database, for example an RCS chat. Flux reads only the SMS and MMS database of the phone.
 - The message is older than the last 100 messages of the conversation. The desktop shows only these 100 messages.
+- The phone has more than 500 conversations. The desktop shows the 500 newest.
+- A long conversation with large MMS texts shows fewer than 100 messages, because 1 answer of the phone holds at most 4 MiB.
+- The phone has not downloaded the MMS yet, for example with MMS auto-download off. Download it on the phone.
 
 ## Conversations show numbers
 
