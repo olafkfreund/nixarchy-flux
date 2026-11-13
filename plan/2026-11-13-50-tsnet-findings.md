@@ -1872,3 +1872,7 @@ source, and by running the changed code in the scratch copies.
 
 | # | Step | What changed and why |
 | --- | --- | --- |
+| P1-P4, P8, P9, P11 | 2 | Applied as described under "Refinements" (P1 `configure` takes hostname and toast; P2 a stopped helper is its `Run` object; P3 the #48 key saved at startup; P4 `login` after `ready` saves NeedsLogin; P8 `Store.save` returns the `commit()` result; P9 a trial that can't start rolls back; P11 the exit waiter waits for the reader). Commit acc30d3. |
+| P5, P6, P10 | 1 | Applied as described (P5 `readStdin` takes an `io.Reader`; P6 the no-logs check seeds a buffer and the control must upload; P10 the login watch uses its own `Running`). Commit f769643. |
+| P7 | 4 | `isLoopbackText` also matches `0:0:0:0:0:0:0:1`. Commit 0d5d6eb. |
+| R1 | 1 | Accepted, not fixed (Opus code review): `main` checks `ctx.Err()` and then calls `markReady` in two steps, so a `login` written in between is followed by `ready`. The end state matches the accepted P4 case, and the next start corrects to NeedsLogin. It needs a logout within microseconds of `Up` returning. |
