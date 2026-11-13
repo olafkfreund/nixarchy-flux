@@ -200,6 +200,8 @@ fun ComputerChatScreen(
     val seen = remember(all) { seenClock.update(all.map { it.key }, System.currentTimeMillis()) }
     val chat = remember(entries, events, seen) { chatItems(entries, events, { _, _ -> null }, seen) }
     val running = entries.filter { it.kind == SendKind.File && it.state == TransferState.Running }
+    val context = LocalContext.current
+    val clearable = entries.any { it.state != TransferState.Running }
     var trayOpen by rememberSaveable(d.id) { mutableStateOf(tray) }
     BackHandler(enabled = trayOpen) { trayOpen = false }
 
@@ -209,7 +211,7 @@ fun ComputerChatScreen(
             context = computerContext(d),
             onBack = onBack,
             avatar = { ChatAvatar(deviceIcon(d.type), Tn.text, size = 36.dp, badge = if (d.online) Tn.green else null) },
-        ) { ComputerMenu(d, actions) }
+        ) { ComputerMenu(d, actions, onClear = if (clearable) ({ clearChat(context, d.id) }) else null) }
         ProgressLine {
             if (running.isNotEmpty()) {
                 val size = running.sumOf { it.size }
@@ -239,10 +241,10 @@ internal fun computerContext(d: DeviceUi): String = when {
 
 /**
  * The menu of the chat of a computer: Control with the computer in scope,
- * its agents and terminals, and a new agent or terminal.
+ * its agents and terminals, a new agent or terminal, and Clear chat when [onClear] is set.
  */
 @Composable
-private fun ComputerMenu(d: DeviceUi, actions: ChatActions) {
+private fun ComputerMenu(d: DeviceUi, actions: ChatActions, onClear: (() -> Unit)?) {
     var open by remember { mutableStateOf(false) }
     val herdr = d.herdr
     Box {
@@ -257,6 +259,7 @@ private fun ComputerMenu(d: DeviceUi, actions: ChatActions) {
                 Triple("Control", Ic.tune) { actions.control(d.id) },
                 if (d.herdrSupported) Triple("Agents and terminals", Ic.agent) { actions.open(Route(d.id, AGENTS_PAGE)) } else null,
                 if (d.online && herdr?.anyRunning == true && herdr.control) Triple("New agent or terminal", Ic.add) { actions.open(Route(d.id, NEW_PANE_PAGE)) } else null,
+                if (onClear != null) Triple("Clear chat", Ic.delete, onClear) else null,
             )
             for ((label, icon, action) in items) {
                 DropdownMenuItem(text = { Text(label) }, leadingIcon = { Sym(icon) }, onClick = {
@@ -266,6 +269,18 @@ private fun ComputerMenu(d: DeviceUi, actions: ChatActions) {
             }
         }
     }
+}
+
+/** Clears the chat of the computer [id], and the clipboard when it still holds the last clip from it. */
+private fun clearChat(context: Context, id: String) {
+    if (isDemo(id)) return FluxCore.toast("This is a sample computer")
+    val clip = Android.holdsClipFrom(context, id)
+    val running = SendLog.clear(id)
+    val cleared = clip && Android.clearClipboard(context)
+    FluxCore.toast(
+        (if (cleared) "Chat and clipboard cleared" else "Chat cleared") +
+            if (running > 0) ". Files in progress stay." else "",
+    )
 }
 
 // ───────────────────────── Top bar ─────────────────────────
