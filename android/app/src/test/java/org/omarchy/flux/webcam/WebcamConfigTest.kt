@@ -158,6 +158,30 @@ class WebcamConfigTest {
         assertEquals(null, WebcamReply.parse(Packet(Types.FLUX_WEBCAM, bodyOf("state" to "config"))))
     }
 
+    @Test
+    fun torchIsABooleanThatNeedsAFlash() {
+        assertTrue(WebcamConfig().merged(obj("""{"torch":true}""")).torch)
+        assertTrue(WebcamConfig().merged(obj("""{"torch":"true"}""")).torch)
+        assertFalse(WebcamConfig().merged(obj("""{"torch":"yes"}""")).torch)
+        val on = WebcamConfig(torch = true)
+        assertTrue(on.clamped(caps.copy(torch = true)).torch)
+        assertFalse(on.clamped(caps).torch)
+        assertFalse(on.clamped(WebcamCaps.LOOSE).torch)
+        assertFalse(on.reset().torch)
+    }
+
+    @Test
+    fun torchIsSentButNotSaved() {
+        val c = WebcamConfig(zoom = 2f, torch = true)
+        assertEquals("true", c.toJson()["torch"].toString())
+        assertFalse("torch" in c.toSaved())
+        val back = WebcamConfig().merged(c.toSaved())
+        assertFalse(back.torch)
+        assertEquals(2f, back.zoom, 0f)
+        assertEquals("true", caps.copy(torch = true).toJson()["torch"].toString())
+        assertEquals("false", caps.toJson()["torch"].toString())
+    }
+
     private fun assertNotNullObj(o: JsonObject?): JsonObject {
         assertNotNull(o)
         return o!!

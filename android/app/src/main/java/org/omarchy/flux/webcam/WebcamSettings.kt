@@ -10,8 +10,8 @@ import org.omarchy.flux.protocol.json
 
 /**
  * The webcam settings of this phone. The settings screen and the computer
- * both change them through [update]. Each change is saved, so the next
- * session starts with the same settings.
+ * both change them through [update]. Each change is saved, except the
+ * light, so the next session starts with the same settings.
  */
 object WebcamSettings {
     private const val PREFS = "flux.webcam"
@@ -43,7 +43,7 @@ object WebcamSettings {
             val next = change(current).clamped(_caps.value)
             if (next == current) return
             _config.value = next
-            prefs?.edit()?.putString(KEY, next.toJson().toString())?.apply()
+            prefs?.edit()?.putString(KEY, next.toSaved().toString())?.apply()
         }
     }
 
@@ -53,12 +53,13 @@ object WebcamSettings {
     /**
      * Sets what the current camera supports, and clamps the settings to it.
      * With [camera], the settings name the camera that opened, in the same
-     * change, so the camera does not open twice.
+     * change, so the camera does not open twice. A camera that opens
+     * starts with the light off.
      */
     fun setCaps(caps: WebcamCaps, camera: String? = null) {
         synchronized(lock) {
             _caps.value = caps
-            update { if (camera != null) it.copy(camera = camera) else it }
+            update { if (camera != null) it.copy(camera = camera, torch = false) else it }
         }
     }
 }
