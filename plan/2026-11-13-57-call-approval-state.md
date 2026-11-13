@@ -117,13 +117,19 @@ on its own. Work happens in the worktree `/mnt/code/Source-home/GitHub/nixarchy-
        `d.markDirty()`. Give the book a `dirty func()` set by the daemon, so the book never takes `d.mu`.
      - At creation, call `time.AfterFunc(deadline-now, d.markDirty)`.
    - `internal/core/ssh.go`:
-     - `sshSign` (`:56-61`) gains `since`, set right after the send (`:271`).
-     - `add` and `remove` (`:88-103`) call `dirty`.
-     - Add `views()` for answered-false entries with `since` set.
+     - `sshSign` (`:56-61`) gains `since`. `add` (`:88-97`, called before the send at `:261`) leaves it zero, so the
+       entry isn't listed yet.
+     - A new `book.started(id)` sets `since = now` under the book mutex, then calls `dirty()`. It is called right
+       after the send at `:271` succeeds.
+     - `remove` (`:99-103`) calls `dirty()`.
+     - `views()` lists unanswered entries with a non-zero `since`, under the book mutex.
    - `internal/core/daemon.go`:
      - New `d.dropApprovals(devID)` calls `cancel` for that device's request entries.
-     - Call it after `d.mu` is released, from `receive`'s link-drop path (`:1084-1112`, after `dev.link = nil`, `:1088-1091`)
-       and from the unpair path (the caller of `dropTrustLocked`, `pairing.go:196-224`).
+     - Call it after `d.mu` is released:
+       - from `receive`'s link-drop path (`:1084-1112`, after `dev.link = nil`, `:1088-1091`)
+       - from every caller of `dropTrustLocked`: `pairing.go:154`, `:205` (Unpair), `:290` and `:339`. Each caller
+         collects the device id and calls `dropApprovals` after its unlock.
+     - Each of those paths gets a test that a pending sudo request is cancelled.
    - `internal/core/api.go` `Snapshot` (`:113-200`): collect `approvals` from both books' `views()` before `d.mu.Lock()`
      (`:114`), and add `"approvals"` to the `state` map (`:156-198`).
 
@@ -164,8 +170,11 @@ on its own. Work happens in the worktree `/mnt/code/Source-home/GitHub/nixarchy-
    `flux.dnd.state` leaves `slowDnd.sets` empty, and `dnd.set` sends exactly one `flux.dnd.set` and leaves
    `slowDnd.sets` empty.
 
+   Also add an `api_cli_test.go` case (next to `:187`): the snapshot decodes with `call`, `missedCall`, `dnd` and
+   `approvals`, and `approvals` is `[]` (not null) when nothing is pending.
+
    ```sh
-   go test -race ./internal/core/ -run 'Dnd'
+   go test -race ./internal/core/ -run 'Dnd|Snapshot|API'
    ```
 
    Traps: the ordinary `handleDnd` (`dnd.go:138-159`) must not change behaviour and must not write `dev.dnd`.
