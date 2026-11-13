@@ -132,8 +132,39 @@ func (d *Daemon) callEvent(dev *Device, l *lan.Link, b callBody) {
 	if watch {
 		c.link = l
 	}
+	stamp := now().Unix()
+	caller := strings.TrimSpace(b.ContactName)
+	switch {
+	case b.IsCancel.bool():
+		dev.callOK = false
+	case b.Event == "ringing":
+		if !dev.callOK || dev.call.State != "ringing" {
+			dev.call.Since = stamp
+		}
+		dev.call.State, dev.call.Caller, dev.call.Number = "ringing", caller, b.PhoneNumber
+		dev.callOK, dev.missedOK = true, false
+	case b.Event == "talking":
+		if !dev.callOK {
+			dev.call.Since = stamp
+		}
+		if !dev.callOK || caller != "" {
+			dev.call.Caller = caller
+		}
+		if !dev.callOK || b.PhoneNumber != "" {
+			dev.call.Number = b.PhoneNumber
+		}
+		// An answered call keeps the name and number it rang with.
+		dev.call.State = "talking"
+		dev.callOK, dev.missedOK = true, false
+	case b.Event == "missedCall":
+		dev.callOK = false
+		dev.missed = MissedView{Caller: caller, Number: b.PhoneNumber, At: stamp}
+		dev.missedOK = true
+		time.AfterFunc(10*time.Minute, d.markDirty)
+	}
 	pauseMedia, name := d.cfg.PauseMediaOnCall, dev.Name
 	d.mu.Unlock()
+	d.markDirty()
 	if watch {
 		go func() {
 			<-l.Done()
@@ -196,7 +227,9 @@ func (d *Daemon) dropCall(dev *Device, l *lan.Link) {
 		return
 	}
 	delete(d.calls, dev.ID)
+	dev.callOK = false
 	d.mu.Unlock()
+	d.markDirty()
 	if c.notice != 0 && d.notifier != nil {
 		_ = d.notifier.Close(c.notice)
 	}

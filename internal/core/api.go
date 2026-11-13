@@ -136,6 +136,7 @@ func (d *Daemon) Snapshot() json.RawMessage {
 			// The phone data of a device that is not paired stays out of
 			// the state, also after an unpair.
 			v.Battery, v.Notifications, v.Conversations = nil, []*PhoneNotification{}, []*Conversation{}
+			v.Call, v.MissedCall = nil, nil
 			v.Outbox = []OutboxMessage{}
 		}
 		v.AppUpdate = d.appUpdateLocked(dev)

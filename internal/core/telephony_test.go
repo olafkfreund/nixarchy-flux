@@ -1,9 +1,11 @@
 package core
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -105,6 +107,107 @@ func TestHandleTelephony(t *testing.T) {
 	waitIdle(t, d, &d.content.mediaQ)
 	if len(m.actions) != 0 {
 		t.Fatalf("pause_media_on_call off: %v", m.actions)
+	}
+}
+
+func TestCallViews(t *testing.T) {
+	d, dev := approveDaemon()
+	current := time.Unix(1_700_000_000, 0)
+	now = func() time.Time { return current }
+	t.Cleanup(func() { now = time.Now })
+	d.callEvent(dev, nil, callBody{Event: "ringing", ContactName: "  Mum  ", PhoneNumber: "123"})
+	first := dev.view().Call
+	if first == nil || first.State != "ringing" || first.Caller != "Mum" || first.Number != "123" {
+		t.Fatalf("ringing: %+v", first)
+	}
+	current = current.Add(time.Minute)
+	d.callEvent(dev, nil, callBody{Event: "ringing", ContactName: "Mum Smith", PhoneNumber: "123"})
+	d.callEvent(dev, nil, callBody{Event: "talking", ContactName: "Mum Smith", PhoneNumber: "123"})
+	current = current.Add(time.Minute)
+	d.callEvent(dev, nil, callBody{Event: "talking", ContactName: "Mum Smith", PhoneNumber: "123"})
+	if got := dev.view().Call; got == nil || got.State != "talking" || got.Since != first.Since || got.Caller != "Mum Smith" || first.State != "ringing" {
+		t.Fatalf("talking: %+v", got)
+	}
+	d.callEvent(dev, nil, callBody{Event: "talking", IsCancel: "true"})
+	if got := dev.view().Call; got != nil {
+		t.Fatalf("cancel: %+v", got)
+	}
+	d.callEvent(dev, nil, callBody{Event: "talking", PhoneNumber: "456"})
+	if got := dev.view().Call; got == nil || got.Since == 0 || got.Number != "456" {
+		t.Fatalf("outgoing: %+v", got)
+	}
+	d.callEvent(dev, nil, callBody{Event: "missedCall", ContactName: "Mum", PhoneNumber: "123"})
+	d.callEvent(dev, nil, callBody{Event: "ringing", IsCancel: "true"})
+	if v := dev.view(); v.Call != nil || v.MissedCall == nil || v.MissedCall.Caller != "Mum" {
+		t.Fatalf("missed and trailing cancel: %+v", v)
+	}
+	d.calls[dev.ID].link = &lan.Link{}
+	d.dropCall(dev, d.calls[dev.ID].link)
+	if dev.view().MissedCall == nil {
+		t.Fatal("link drop cleared missed call")
+	}
+	d.callEvent(dev, nil, callBody{Event: "ringing"})
+	if dev.view().MissedCall != nil {
+		t.Fatal("new call kept missed call")
+	}
+}
+
+func TestMissedCallAgeing(t *testing.T) {
+	d, dev := approveDaemon()
+	base := time.Unix(1_700_000_000, 0)
+	now = func() time.Time { return base }
+	t.Cleanup(func() { now = time.Now })
+	d.callEvent(dev, nil, callBody{Event: "missedCall"})
+	if dev.view().MissedCall == nil {
+		t.Fatal("fresh missed call omitted")
+	}
+	now = func() time.Time { return base.Add(10 * time.Minute) }
+	if dev.view().MissedCall != nil {
+		t.Fatal("old missed call visible")
+	}
+}
+
+func TestCallSnapshotConcurrentUnpair(t *testing.T) {
+	d, dev := approveDaemon()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	var err error
+	d.trust, err = config.LoadTrust()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			var snapshot struct {
+				Devices []DeviceView `json:"devices"`
+			}
+			if err := json.Unmarshal(d.Snapshot(), &snapshot); err != nil {
+				t.Errorf("snapshot: %v", err)
+				return
+			}
+			for _, v := range snapshot.Devices {
+				if !v.Paired && (v.Call != nil || v.MissedCall != nil) {
+					t.Errorf("unpaired call data: %+v", v)
+				}
+			}
+		}
+	}()
+	for i := 0; i < 100; i++ {
+		d.callEvent(dev, nil, callBody{Event: "ringing"})
+		d.callEvent(dev, nil, callBody{Event: "talking"})
+	}
+	d.callEvent(dev, nil, callBody{Event: "missedCall"})
+	d.mu.Lock()
+	_, err = d.dropTrustLocked(dev)
+	d.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	if v := dev.view(); v.Call != nil || v.MissedCall != nil {
+		t.Fatalf("unpair kept call data: %+v", v)
 	}
 }
 

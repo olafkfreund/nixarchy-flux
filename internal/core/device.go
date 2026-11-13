@@ -60,6 +60,10 @@ type Device struct {
 	notifDesktop  map[string]uint32
 	conversations map[int64]*Conversation
 	threadWait    map[int64][]chan []SmsMessage
+	call          CallView
+	callOK        bool
+	missed        MissedView
+	missedOK      bool
 
 	// pairLink and pairCert are the link and the certificate on which the
 	// open pairing started. pairKey comes from pairCert, and only pairCert
@@ -123,6 +127,21 @@ type Battery struct {
 	Charge   int  `json:"charge"`
 	Charging bool `json:"charging"`
 }
+
+type CallView struct {
+	State  string `json:"state"`
+	Caller string `json:"caller"`
+	Number string `json:"number"`
+	Since  int64  `json:"since"`
+}
+
+type MissedView struct {
+	Caller string `json:"caller"`
+	Number string `json:"number"`
+	At     int64  `json:"at"`
+}
+
+var now = time.Now
 
 func newDevice(id string) *Device {
 	return &Device{
@@ -274,6 +293,8 @@ type DeviceView struct {
 	PairedAt      string               `json:"pairedAt"`
 	LastSeen      int64                `json:"lastSeen"`
 	Battery       *Battery             `json:"battery"`
+	Call          *CallView            `json:"call,omitempty"`
+	MissedCall    *MissedView          `json:"missedCall,omitempty"`
 	Plugins       []string             `json:"plugins"`
 	Notifications []*PhoneNotification `json:"notifications"`
 	Conversations []*Conversation      `json:"conversations"`
@@ -319,6 +340,14 @@ func (dev *Device) view() DeviceView {
 	}
 	if !dev.LastSeen.IsZero() {
 		v.LastSeen = dev.LastSeen.Unix()
+	}
+	if dev.callOK {
+		call := dev.call
+		v.Call = &call
+	}
+	if dev.missedOK && now().Unix()-dev.missed.At < int64((10*time.Minute)/time.Second) {
+		missed := dev.missed
+		v.MissedCall = &missed
 	}
 	if v.Notifications == nil {
 		v.Notifications = []*PhoneNotification{}
