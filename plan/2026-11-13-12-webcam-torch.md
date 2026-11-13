@@ -917,3 +917,7 @@ finding was checked against the code.
 
 | # | Step | What changed and why |
 | --- | --- | --- |
+| P1 | 2, 3 | A failed "on" request only turns the setting off, and the switch stays (owner-approved with the plan). Commits 9d9c63a, f0c3cdc. |
+| P2-P4 | 2, 3 | Applied as described in the plan's refinements (the main-thread post checks `choice?.name`; the open's `fail` checks `current()` first; turning off sets `torchWatch = null`). Commits 9d9c63a, f0c3cdc. |
+| P5 | 3 | `end` returns a Boolean, and `restart` starts only if its own `end` ran (owner-approved). Commit f0c3cdc. |
+| P6 | 2 | A failed "off" request now runs `fail`, then `generation.incrementAndGet()`, then `closeNow()`, as `close()` does. Before, `closeNow()` alone left `current()` true, so a disconnect from another app taking the camera reopened it up to 6 times and showed the wrong error (Opus code review, finding 1). |

@@ -261,9 +261,12 @@ class CameraSource(context: Context) {
                 // The request failed, not the flash: the setting goes off and the switch stays (P1).
                 c.torch -> onTorchLost(choice.name, false)
                 else -> {
-                    // The old request may still light the torch.
-                    closeNow()
+                    // The old request may still light the torch. The wrapped fail runs
+                    // before the generation moves on, and a later disconnect of this
+                    // camera then reopens nothing, as in close().
                     fail("The camera stopped: ${e.message}")
+                    generation.incrementAndGet()
+                    closeNow()
                 }
             }
         }
