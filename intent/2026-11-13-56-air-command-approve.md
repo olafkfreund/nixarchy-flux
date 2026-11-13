@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 56
 author: olafkfreund
 ---
@@ -30,8 +30,8 @@ Command button sat over it.
   tapjacking: an overlay that shows a false request so the user taps
   Approve or Pair.
 - **Hiding overlays.** `Overlays.hide` calls `setHideOverlayWindows(true)`
-  (`Overlays.kt:37-39`). That hides `TYPE_APPLICATION_OVERLAY` windows
-  only.
+  (`Overlays.kt:37-39`). That hides non-system overlay windows; privileged
+  and OEM windows can stay.
 - **Air Command** is a window of the ordinary app
   `com.samsung.android.service.aircommand` (uid 10032), with Samsung's own
   window type 2401, from `dumpsys window`.
@@ -51,13 +51,21 @@ Command button sat over it.
 
 ## Proposed outcome
 
-- When a tap on Approve, Pair or a stream request is refused for an
-  overlay, the screen itself says so, in a message that stays until the
-  next tap. It names the likely causes: an app's bubble or floating
-  button, or the S Pen Air Command button. It says to move it away or
-  close it, then tap again.
+- When a tap on Approve, Enroll, Pair, SSH signing or a stream request is
+  refused for an overlay, the screen itself says so.
+  - The message names the likely causes: an app's bubble or floating
+    button, or the S Pen Air Command button. It says to move it away or
+    close it, then tap again.
+  - It stays while the request is open: another blocked tap keeps it, and
+    a successful tap or the end of the request clears it.
+  - It is readable and announced by accessibility services, and the action
+    and Cancel stay reachable.
 - The request stays open, as today, so a second tap after moving the
   button works within the timeout.
+  - A blocked tap doesn't extend the timeout.
+  - Nothing retries by itself when the button moves.
+- Only taps that reach Flux get the message. Android can drop an overlaid
+  touch before any app sees it.
 - `docs/troubleshooting.md` (or `docs/approve.md`) has a short entry for
   this on Samsung devices.
 - The tapjacking guard itself stays as it is.
@@ -76,8 +84,12 @@ Command button sat over it.
 
 - No weaker tapjacking guard: no allow-list of packages, and no way to
   approve while the flag is set.
-- No new permission. Reading other apps' windows needs permissions an app
-  can't have, so the message can only name likely causes.
+- No new permission. Flux has no supported ordinary-app API that
+  identifies the covering window from a touch, so the message can only
+  name likely causes. No window-inspection privileges, such as an
+  accessibility service, are added.
+- The existing checks stay: the down and up obscured flags in each
+  activity, and the stream request's arming (`StreamRequestUi.kt:114-120`).
 - Text follows the house style of the app's other strings.
 
 ## Open questions
@@ -90,6 +102,10 @@ Command button sat over it.
 2. **All four screens, or Approve only?** Proposed: all four, through one
    shared message, because the same button blocks Pair, SSH signing and
    stream requests too.
-3. **Test:** reproduce on the tablet with the button over Approve, check
-   that the message shows and stays, then move the button and approve in
-   the same request. Uses the #13 test setup that is still running.
+3. **Test:** on the tablet, with the button over Approve:
+   1. Tap several times without moving the button. Each tap stays blocked:
+      no fingerprint prompt, no pairing and no stream start. The message
+      shows and stays.
+   2. Move the button, tap again, and approve in the same request.
+
+   Uses the #13 test setup that is still running.
