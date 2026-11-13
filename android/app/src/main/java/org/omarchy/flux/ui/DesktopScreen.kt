@@ -15,10 +15,10 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -247,8 +247,14 @@ fun DesktopScreen(d: DeviceUi, scroll: ScrollMode, onBack: () -> Unit, extend: B
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             SquareButton(Ic.back, "Back", onBack)
-                            Spacer(Modifier.weight(1f))
-                            buttons()
+                            // The buttons keep the bottom of the rail, and scroll when they don't fit, for example with the phone keyboard open.
+                            BoxWithConstraints(Modifier.weight(1f)) {
+                                Column(
+                                    Modifier.verticalScroll(rememberScrollState()).heightIn(min = maxHeight),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.Bottom),
+                                ) { buttons() }
+                            }
                         }
                     }
                     Column(Modifier.weight(1f).fillMaxHeight()) {
