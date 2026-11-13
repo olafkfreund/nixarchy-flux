@@ -155,6 +155,16 @@ class SmsTest {
     }
 
     @Test
+    fun changesSendAnMmsWhoseTextCameLater() {
+        val c = SmsChanges()
+        val mms = msg(1, read = false, mms = true).copy(body = "")
+        c.watch(mms)
+        assertEquals(emptyList<TextMessage>(), c.changed(listOf(mms)))
+        val withText = mms.copy(body = "Hi")
+        assertEquals(listOf(withText), c.changed(listOf(withText)))
+    }
+
+    @Test
     fun changesForgetDeletedMessages() {
         val c = SmsChanges()
         c.watch(msg(1, read = false))
@@ -256,5 +266,20 @@ class SmsTest {
 
         // The new messages that the change watch sends have no mark.
         assertTrue(SmsPackets.messagePackets(list.take(1)).none { it.has("conversations") })
+    }
+
+    @Test
+    fun everyPacketHasThePhoneTime() {
+        val before = System.currentTimeMillis()
+        val list = (1L..10L).map { msg(it).copy(body = "x".repeat(1000)) }
+        val packets = SmsPackets.messagePackets(list, budget = 3500) +
+            SmsPackets.messagePackets(list, threadId = 1) +
+            SmsPackets.messages(emptyList(), threadId = 9)
+        assertTrue(packets.size > 3)
+        val after = System.currentTimeMillis()
+        for (p in packets) {
+            val now = Packet.parse(p.serialize())!!.long("now")
+            assertTrue("now $now", now != null && now in before..after)
+        }
     }
 }

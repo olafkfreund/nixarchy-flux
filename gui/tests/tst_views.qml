@@ -428,6 +428,52 @@ Item {
       verify(!!retry && retry.visible)
       mock.failures = {}
     }
+
+    // A failed reload of a thread that shows keeps its messages, and the
+    // error and Retry show above the message field, also at 600 px.
+    function test_reloadErrorShowsAtField() {
+      var view = createTemporaryObject(viewComponent, top)
+      view.selectedId = top.pixel
+      view.tab = "messages"
+      tryVerify(function () { return !!page(view) && page(view).loaded })
+      var p = page(view)
+      var count = p.messages.length
+      verify(count > 0)
+      // Long enough to wrap in the narrow pane.
+      var err = "Pixel 8 did not send the conversation in time. Check that the phone is awake and that Text messages is on in Computers > Sync on the phone"
+      mock.failures = { "sms.thread": { code: "timeout", message: err } }
+      p.load(p.selected)
+      tryCompare(p, "loadError", err)
+      verify(p.loaded)
+      compare(p.messages.length, count)
+      var msg = "The thread may be out of date: " + err
+      verify(!!findVisibleBy(p, "text", msg))
+      verify(!!findVisibleBy(p, "text", "Retry"))
+
+      // At 600 px the page shows only the thread. The row stays inside the
+      // page, and its text wraps.
+      view.width = 600
+      p.threadOpen = true
+      tryVerify(function () { return p.single })
+      var line = findVisibleBy(p, "text", msg)
+      var retry = findVisibleBy(p, "text", "Retry")
+      verify(!!line && !!retry)
+      tryVerify(function () { return line.lineCount > 1 })
+      verify(line.mapToItem(p, 0, 0).x >= 0)
+      verify(retry.mapToItem(p, retry.width, 0).x <= p.width)
+
+      // Retry asks for the thread again. The answer leaves no error, and
+      // the messages stay.
+      mock.failures = {}
+      var asked = requestsOf("sms.thread").length
+      retry.clicked()
+      compare(requestsOf("sms.thread").length, asked + 1)
+      wait(50)
+      compare(p.loadError, "")
+      verify(p.loaded)
+      compare(p.messages.length, count)
+      verify(!findVisibleBy(p, "text", msg))
+    }
   }
 
   TestCase {

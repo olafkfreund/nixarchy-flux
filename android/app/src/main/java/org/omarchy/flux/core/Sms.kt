@@ -126,6 +126,8 @@ object SmsPackets {
         val fields = buildList {
             add("version" to 2)
             add("messages" to messages)
+            // fluxd measures the gap between the clocks from it, for a phone whose clock is behind.
+            add("now" to System.currentTimeMillis())
             if (threadId != null) add("threadID" to threadId)
             if (conversations) add("conversations" to true)
         }
@@ -236,14 +238,14 @@ class NewestPerThread {
 /**
  * Decides which known messages go to the computers again after the SMS
  * tables change. It watches each sent message that is still on its way and
- * each received message that is unread. A new type or read state then goes
- * out, so that the computer shows a sent message and clears an unread
- * conversation. It watches at most [capacity] messages, and it forgets the
- * oldest first.
+ * each received message that is unread. A new type, read state or text then
+ * goes out, so that the computer shows a sent message, clears an unread
+ * conversation, and shows the text of an MMS that came after its row. It
+ * watches at most [capacity] messages, and it forgets the oldest first.
  */
 class SmsChanges(private val capacity: Int = 200) {
     private data class Key(val mms: Boolean, val id: Long)
-    private data class Status(val type: Int, val read: Boolean)
+    private data class Status(val type: Int, val read: Boolean, val body: String)
 
     private val watched = LinkedHashMap<Key, Status>()
 
@@ -252,7 +254,7 @@ class SmsChanges(private val capacity: Int = 200) {
         val key = Key(m.mms, m.id)
         watched.remove(key)
         if (SmsPackets.pending(m.type) || (m.type == SmsPackets.INBOX && !m.read)) {
-            watched[key] = Status(m.type, m.read)
+            watched[key] = Status(m.type, m.read, m.body)
             while (watched.size > capacity) watched.remove(watched.keys.first())
         }
     }
@@ -268,6 +270,6 @@ class SmsChanges(private val capacity: Int = 200) {
     fun changed(current: List<TextMessage>): List<TextMessage> {
         val now = current.associateBy { Key(it.mms, it.id) }
         watched.keys.retainAll(now.keys)
-        return current.filter { m -> watched[Key(m.mms, m.id)]?.let { it != Status(m.type, m.read) } == true }
+        return current.filter { m -> watched[Key(m.mms, m.id)]?.let { it != Status(m.type, m.read, m.body) } == true }
     }
 }

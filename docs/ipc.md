@@ -460,6 +460,7 @@ A phone that does not answer in 8 seconds returns the `timeout` error.
 The result means that the request went to the phone.
 The phone reports the sent message, and the conversation changes in a later state event.
 Flux for Android sends a text message to 1 address. More addresses return the `unsupported` error.
+A connected phone that does not share text messages returns `not_supported`.
 
 ### Outbox
 
@@ -478,9 +479,9 @@ The window shows the entries in the thread, with **Sending…** or **Not sent** 
 | `outgoing` | Always `true`, so that a client can show the entry as a message of `sms.thread`. |
 | `pending`, `failed` | `pending` is `true` while fluxd waits for the phone. After 60 seconds without a report, `pending` changes to `false` and `failed` changes to `true`. |
 
-fluxd removes an entry when the phone reports a sent message with the same text in the same thread.
-For an entry with thread `-1`, the address of the message must match: a phone number matches on its last 8 digits.
-A message from the phone that is more than 120 seconds older than the entry does not count, because the clocks of the 2 devices can differ.
+fluxd removes an entry when the phone reports a sent message with the same text in the same thread, or to the same number: a phone number matches on its last 8 digits.
+A message from the phone that is more than 120 seconds older than the entry does not count.
+When the clock of the phone is further behind, fluxd measures the gap from the time of the phone in the packet.
 A late report also removes a failed entry.
 
 fluxd keeps at most 50 entries for each device. A new entry removes the oldest one.
