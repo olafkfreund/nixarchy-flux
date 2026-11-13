@@ -29,4 +29,10 @@ class OverlaysTest {
         assertFalse(Overlays.obscured(0, sdk = 29))
         assertFalse(Overlays.obscured(0, sdk = 36))
     }
+
+    @Test
+    fun theNoticeNamesAirCommandAndSaysToTapAgain() {
+        assertTrue(Overlays.BLOCKED.contains("S Pen Air Command"))
+        assertTrue(Overlays.BLOCKED.endsWith("then tap again."))
+    }
 }

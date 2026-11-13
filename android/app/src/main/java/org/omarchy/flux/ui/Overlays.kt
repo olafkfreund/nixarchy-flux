@@ -4,8 +4,16 @@ import android.os.Build
 import android.view.MotionEvent
 import android.view.Window
 import androidx.activity.compose.LocalActivity
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import org.omarchy.flux.protocol.groupKey
 
 /**
@@ -14,14 +22,21 @@ import org.omarchy.flux.protocol.groupKey
  * one, so that the user taps Pair or Approve.
  */
 object Overlays {
+    /** Shown in place of the action when [obscured] refused a tap. */
+    const val BLOCKED =
+        "Another window covered Flux, so Flux ignored the tap. " +
+            "It can be an app's bubble or floating button, or the S Pen Air Command button. " +
+            "Move it off the button or close it, then tap again."
+
     /** True when a window of another app covered the touch point of [ev], or a part of the window before Android 12. */
     fun obscured(ev: MotionEvent): Boolean = obscured(ev.flags, Build.VERSION.SDK_INT)
 
     /**
      * Decides from the [flags] of a touch on Android [sdk]. From Android 12,
      * [hide] removes the windows of other apps, so only a window over the
-     * touch point counts. A window that the system keeps, such as the handle
-     * of an edge panel, then covers only a part and does not block a tap.
+     * touch point counts. A window that the system or the phone maker keeps
+     * stays. It blocks a tap only where it covers the touch point, such as
+     * the S Pen Air Command button on Samsung devices.
      * Before Android 12, a window over any part of the window counts too.
      */
     internal fun obscured(flags: Int, sdk: Int): Boolean {
@@ -47,6 +62,19 @@ fun HideOverlays() {
         Overlays.hide(activity.window, true)
         onDispose { Overlays.hide(activity.window, false) }
     }
+}
+
+/** The notice of a refused tap. It stays while [show] is true, and TalkBack reads it when it appears. */
+@Composable
+fun BlockedNotice(show: Boolean, align: TextAlign = TextAlign.Center) {
+    if (!show) return
+    Text(
+        Overlays.BLOCKED,
+        Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.error,
+        textAlign = align,
+    )
 }
 
 /**
