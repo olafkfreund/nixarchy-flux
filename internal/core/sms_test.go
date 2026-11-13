@@ -461,6 +461,48 @@ func TestSmsOutboxFails(t *testing.T) {
 	}
 }
 
+// TestSmsOutboxClockBehind checks that a phone whose clock is far
+// behind still confirms its sent message, and that an older message
+// with the same text still does not.
+func TestSmsOutboxClockBehind(t *testing.T) {
+	d, dev, _ := smsDaemon(t)
+	d.addOutbox(dev, "+4791234567", "On my way")
+	phone := time.Now().Add(-10 * time.Minute)
+	old := wireMessage(1, 12, phone.Add(-(smsClockSlack+10)*time.Second).UnixMilli(), 2, 1, addr("+4791234567", ""))
+	old["body"] = "On my way"
+	d.handleSms(dev, smsPacket(map[string]any{"now": phone.UnixMilli(), "messages": []any{old}}))
+	if got := outboxOf(t, d); len(got) != 1 {
+		t.Fatalf("an older message removed the entry: %+v", got)
+	}
+	sent := wireMessage(2, 12, phone.UnixMilli(), 2, 1, addr("+4791234567", ""))
+	sent["body"] = "On my way"
+	d.handleSms(dev, smsPacket(map[string]any{"now": phone.UnixMilli(), "messages": []any{sent}}))
+	if got := outboxOf(t, d); len(got) != 0 {
+		t.Fatalf("the sent message did not remove the entry: %+v", got)
+	}
+}
+
+// TestSmsOutboxClockNear checks that a small gap, such as the delay of
+// the link, and a phone ahead match as without the time of the phone.
+func TestSmsOutboxClockNear(t *testing.T) {
+	d, dev, _ := smsDaemon(t)
+	d.addOutbox(dev, "+4791234567", "On my way")
+	old := wireMessage(1, 12, time.Now().Add(-(smsClockSlack+10)*time.Second).UnixMilli(), 2, 1, addr("+4791234567", ""))
+	old["body"] = "On my way"
+	late := time.Now().Add(-20 * time.Second).UnixMilli()
+	d.handleSms(dev, smsPacket(map[string]any{"now": late, "messages": []any{old}}))
+	if got := outboxOf(t, d); len(got) != 1 {
+		t.Fatalf("a link delay let an older message remove the entry: %+v", got)
+	}
+	sent := wireMessage(2, 12, time.Now().UnixMilli(), 2, 1, addr("+4791234567", ""))
+	sent["body"] = "On my way"
+	ahead := time.Now().Add(10 * time.Minute).UnixMilli()
+	d.handleSms(dev, smsPacket(map[string]any{"now": ahead, "messages": []any{sent}}))
+	if got := outboxOf(t, d); len(got) != 0 {
+		t.Fatalf("a phone ahead did not confirm the message: %+v", got)
+	}
+}
+
 // TestSmsOutboxLimits checks that a send that fails leaves no entry, and
 // that the outbox keeps the newest maxOutbox entries.
 func TestSmsOutboxLimits(t *testing.T) {

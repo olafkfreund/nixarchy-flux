@@ -39,9 +39,11 @@ var smsSendWait = 60 * time.Second
 // new entry removes the oldest entry.
 const maxOutbox = 50
 
-// smsClockSlack is the largest time in seconds that the clock of the phone
-// can be behind the clock of the computer. A message of the phone that is
-// older than its entry by more than this is a different message.
+// smsClockSlack is the largest time in seconds that a message of the
+// phone can be older than its entry: the link, and a small gap between
+// the clocks. A message that is older by more is a different message.
+// When the phone is further behind, handleSms measures the gap from
+// the time of the phone in the packet.
 const smsClockSlack = 120
 
 // OutboxMessage is a text message that fluxd sent through the phone and
@@ -188,9 +190,21 @@ func (d *Daemon) handleSms(dev *Device, p *proto.Packet) {
 		// thread of the phone. An older app sends no marker, and fluxd then
 		// only adds messages.
 		Conversations bool `json:"conversations"`
+		// Now is the clock of the phone when it sent the packet, in
+		// milliseconds. An older phone leaves it out.
+		Now int64 `json:"now"`
 	}
 	if p.Decode(&b) != nil {
 		return
+	}
+	// behind is how far the clock of the phone is behind this computer, in
+	// seconds. A smaller gap, or a phone ahead, is left to smsClockSlack,
+	// so the link delay and a clock that jumps ahead don't move the times.
+	var behind int64
+	if b.Now > 0 {
+		if s := time.Now().Unix() - b.Now/1000; s > smsClockSlack {
+			behind = s
+		}
 	}
 	msgs := make([]SmsMessage, 0, len(b.Messages))
 	for _, w := range b.Messages {
@@ -226,7 +240,7 @@ func (d *Daemon) handleSms(dev *Device, p *proto.Packet) {
 		c.Changes = changes
 	}
 	pruneConversations(dev.conversations, maxConversations)
-	confirmOutboxLocked(dev, msgs)
+	confirmOutboxLocked(dev, msgs, behind)
 	if b.ThreadID != nil {
 		answer := *b.ThreadID
 		for _, ch := range dev.threadWait[answer] {
@@ -364,22 +378,24 @@ func (d *Daemon) failOutbox(dev *Device, seq int64) {
 
 // confirmOutboxLocked removes the entries of the outbox that the phone
 // reports in msgs. A failed entry also goes, because the message of the
-// phone then shows its real state. The caller holds d.mu.
-func confirmOutboxLocked(dev *Device, msgs []SmsMessage) {
+// phone then shows its real state. behind is how far the clock of the phone
+// is behind, in seconds. The caller holds d.mu.
+func confirmOutboxLocked(dev *Device, msgs []SmsMessage, behind int64) {
 	if len(dev.outbox) == 0 {
 		return
 	}
 	dev.outbox = slices.DeleteFunc(dev.outbox, func(e OutboxMessage) bool {
-		return slices.ContainsFunc(msgs, e.reportedBy)
+		return slices.ContainsFunc(msgs, func(m SmsMessage) bool { return e.reportedBy(m, behind) })
 	})
 }
 
 // reportedBy reports whether m from the phone is the message of the entry.
 // The thread or the address of m must match. The phone can put a message
 // in another thread than the conversation that the user replied to, for
-// example when it has 2 threads with the same number.
-func (e OutboxMessage) reportedBy(m SmsMessage) bool {
-	if !m.Outgoing || m.Time < e.Time-smsClockSlack || !sameSmsText(m.Body, e.Body) {
+// example when it has 2 threads with the same number. behind moves the time
+// of m to the clock of this computer.
+func (e OutboxMessage) reportedBy(m SmsMessage, behind int64) bool {
+	if !m.Outgoing || m.Time+behind < e.Time-smsClockSlack || !sameSmsText(m.Body, e.Body) {
 		return false
 	}
 	if e.Thread >= 0 && m.Thread == e.Thread {
