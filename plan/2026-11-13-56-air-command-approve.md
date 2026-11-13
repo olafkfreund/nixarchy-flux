@@ -4,7 +4,7 @@ issue: 56
 spec: spec/2026-11-13-56-air-command-approve.md
 coders:
   1: coder   # a constant, a small composable, a KDoc line and one unit test
-  2: codex   # the per-request blocked state and the scroll effect in two activities: small but easy to get wrong
+  2: coder   # the per-request state and scroll effect, given in full below; keeps codex an independent reviewer
   3: coder   # the same pattern in two sheets, given in full below
   4: coder   # three short doc edits
 reviewers:
@@ -51,6 +51,10 @@ reviewers:
   - the design text in `docs/approve.md:128-130`.
 
 ## Steps
+
+Steps 1-4 run in order on the branch, and the lead commits each one before
+the next starts, so steps 2 and 3 build on step 1's `BlockedNotice`. There
+is no local Android SDK, so CI in step 5 is the first compile.
 
 1. **`android/app/src/main/java/org/omarchy/flux/ui/Overlays.kt`**
    - In `object Overlays`, add:
@@ -107,20 +111,24 @@ reviewers:
      // The request whose last tap a window covered. AskView shows the notice for it.
      private val blockedFor = mutableStateOf<String?>(null)
      ```
-   - The request key:
+   - The request key, as a local `val requestKey` in both `start(r)` and
+     `AskView(r)`:
      - in `ApproveActivity`, `"${r.computerId}/${r.id}"`;
-     - in `SshSignActivity`, `r.id`.
+     - in `SshSignActivity`, `"${r.computerId}/${r.id}"` too (`SshRequest`
+       has `computerId`, `core/SshMessage.kt:28`).
+
+     Never call it `key`: `ApproveActivity.start` already has
+     `val key: ApproveKeys.Pending?` (`:289`), which stays unchanged.
    - **In `start(r)`:**
      - the `if (touchObscured)` branch (`ApproveActivity.kt:279-282`,
        `SshSignActivity.kt:206-209`) becomes:
        ```kotlin
        if (touchObscured) {
-           blockedFor.value = key
+           blockedFor.value = requestKey
            return
        }
        blockedFor.value = null
        ```
-       with `key` computed as above;
      - the `FluxCore.toast(...)` line goes.
    - **In `AskView`:**
      - lift the scroll state: `val scroll = rememberScrollState()` before
@@ -128,11 +136,19 @@ reviewers:
        column (`ApproveActivity.kt:177-178`, `SshSignActivity.kt:149-150`);
      - as the last child of that inner, scrolling column, add:
        ```kotlin
-       val blocked = blockedFor.value == key
+       val blocked = blockedFor.value == requestKey
        BlockedNotice(blocked)
-       LaunchedEffect(blocked) { if (blocked) scroll.animateScrollTo(scroll.maxValue) }
+       LaunchedEffect(blocked) {
+           if (!blocked) return@LaunchedEffect
+           // Wait one frame, so that maxValue includes the notice.
+           withFrameNanos { }
+           scroll.animateScrollTo(scroll.maxValue)
+       }
        ```
-       with `key` the shown request's key.
+       with the import `androidx.compose.runtime.withFrameNanos`. The
+       spec's one-line effect read `maxValue` before the notice was laid
+       out, so the frame wait is a correction (recorded as P1 when the step
+       is done).
    - Leave `track()` unchanged; don't write any state from it.
 
    Verify: CI in step 5.
@@ -177,6 +193,12 @@ reviewers:
      - add `BlockedNotice(blocked, align = TextAlign.Start)` directly above
        the Not now / Start `Row`.
    - The two `FluxCore.toast("Another app draws over Flux ...")` lines go.
+   - Imports:
+     - both files: `androidx.compose.ui.text.style.TextAlign`;
+     - `StreamRequestUi.kt` also needs
+       `androidx.compose.foundation.rememberScrollState` and
+       `androidx.compose.foundation.verticalScroll`; `TiledScreens.kt`
+       already has them.
 
    Verify: CI in step 5.
 
@@ -229,53 +251,86 @@ reviewers:
    - Before the push, `nix flake check path:.` must pass.
 
 6. **Device tests (the lead and the owner).**
-   - Install the branch's `android-debug` APK on the tablet
-     (`192.168.1.97:37937`) and the Pixel (`192.168.1.81:44549`) with
-     `adb -s <serial> install -r`.
-   - Use the running #13 setup: `fluxd` from the scratchpad build, both
-     paired, the tablet enrolled.
-   - **First:** with the Air Command button over Approve, tap next to its
-     icon and check that the notice shows. If no tap shows it, stop and
-     report: the fix doesn't help that case.
-   - **Then, for each flow:** three covered taps (no action, the notice
-     shows and stays), then move the button and tap once (the action goes
-     on and the notice is gone).
 
-     | Flow | Start it with |
-     | --- | --- |
-     | Approve | `PAM_TYPE=auth PAM_USER=olafkfreund PAM_SERVICE=sudo PAM_TTY=/dev/pts/9 <scratchpad>/flux-core/lib/flux/flux-approve` |
-     | Enroll | `sudo <scratchpad>/flux-core/bin/flux-cli approve enroll`, with the key code through a pipe |
-     | Pair | `flux-cli unpair "olafs Tab S8 Ultra"`, then `flux-cli pair "olafs Tab S8 Ultra"` |
-     | SSH signing | turn on the SSH key in Flux on the tablet, then `SSH_AUTH_SOCK=/run/user/1000/flux/ssh-agent.sock ssh-keygen -Y sign -n test -f <the tablet's public key file> <a file>` |
-     | Stream request | `flux-cli webcam start` |
+   In the commands, `$b` is `<scratchpad>/r13/flux-core`, the build that
+   runs `fluxd` now. Use `$b/bin/flux-cli` and `$b/lib/flux/flux-approve`,
+   never a `flux-cli` from `PATH`.
 
-   - **Also:**
-     - an approval left covered times out at 20 s as before;
-     - a new request starts with no notice;
-     - TalkBack reads the notice once, and Deny, Cancel and Not now work.
-   - **Large font:**
-     - read `adb -s <tablet> shell settings get system font_scale`, then
-       set `2.0`;
-     - with Flux in split screen, in portrait and landscape, show the
-       notice on Approve and on the pair sheet;
-     - check that the notice and all buttons are reachable;
-     - put the value back.
-   - **Pixel:** one approval with nothing over the button.
-   - Record the results in the PR.
+   **Setup:**
+   1. Read the serials with `adb devices`, because wireless ports change.
+   2. **Install.** Compare the signing certificate of the installed app
+      with the branch's `android-debug` APK. No debug keystore is
+      committed, so each CI run may sign with a new key.
+      - Use `adb -s <serial> shell pm dump org.omarchy.flux | grep -A1 signatures`
+        for the installed app, against `keytool -printcert -jarfile app-debug.apk`.
+      - The same: `adb -s <serial> install -r`.
+      - Different: ask the owner, then `adb uninstall` and install. That
+        drops the pairing and keys on the device, so pair again with
+        `$b/bin/flux-cli pair` and `accept`, and enroll the tablet again.
+   3. **Enrollment** uses the method that worked in #13: `sudo -n` with
+      stdin from a FIFO. The tablet shows the key code after the
+      fingerprint; the owner sends it, and the lead writes it to the
+      FIFO.
+
+   **First check:** with the Air Command button over Approve, tap next to
+   its icon and check that the notice shows. If no tap shows it, stop and
+   report: the fix doesn't help that case.
+
+   **Then, in this order** (pairing goes last, because an unpair deletes the
+   tablet's approval key). For each flow, three covered taps: no action,
+   and the notice shows and stays. Then move the button and tap once: the
+   action goes on and the notice is gone.
+
+   | # | Flow on the tablet | Start it with |
+   | --- | --- | --- |
+   | 1 | Approve | `PAM_TYPE=auth PAM_USER=olafkfreund PAM_SERVICE=sudo PAM_TTY=/dev/pts/9 $b/lib/flux/flux-approve`. `PAM_TTY` is only shown on the phone, so any value works. |
+   | 2 | Approve, left covered | the same: it times out at 20 s, as before |
+   | 3 | Approve, the next request | the same: it starts with no notice |
+   | 4 | Large font | font scale 2.0, split screen, portrait and landscape, notice on Approve: all buttons reachable (see below) |
+   | 5 | SSH signing | turn on the SSH key in Flux, then `SSH_AUTH_SOCK=/run/user/1000/flux/ssh-agent.sock ssh-keygen -Y sign -n test -f <the tablet's public key file> <a file>` |
+   | 6 | Stream request | `$b/bin/flux-cli webcam start --device "olafs Tab S8 Ultra"` |
+   | 7 | Enroll | `sudo -n $b/bin/flux-cli approve enroll`, with the FIFO |
+   | 8 | Pair, and the pair sheet at font scale 2.0 | `$b/bin/flux-cli unpair "olafs Tab S8 Ultra"`, Flux open on the tablet, `$b/bin/flux-cli discover`, then `$b/bin/flux-cli pair "olafs Tab S8 Ultra"` and `accept` |
+
+   **Also:** TalkBack reads the notice once, and Deny, Cancel and Not now
+   work (during flow 1).
+
+   **Large font:**
+   - Read `adb -s <tablet> shell settings get system font_scale` first.
+   - Set `2.0`.
+   - Afterwards, restore the old value. If it was `null`, run
+     `settings delete system font_scale` instead.
+
+   **Pixel regression:** enroll the Pixel (`sudo -n ... approve enroll` with
+   the Pixel the only connected device, as in #13), then one approval with
+   nothing over the button. The key file holds one device, so this
+   replaces the tablet's enrollment.
+
+   Record the results in the PR.
 
 7. **PR (the lead).** Open the PR linking the intent, spec and plan, with
    the CI and device results and which steps each implementer did.
 
-8. **Clean up the test setup (the lead), after the device tests.**
-   - `sudo <scratchpad>/flux-core/bin/flux-cli approve remove`.
-   - `sudo rmdir /etc/flux/approve /etc/flux`, only if empty.
-   - Unpair both devices with `flux-cli unpair`.
-   - Stop the scratchpad `fluxd`.
-   - Delete the state it made: `~/.config/flux`, and every entry under
-     `~/.local/share/flux` except `browser-extension`. List them first.
-   - `adb -s <serial> uninstall org.omarchy.flux` on both devices, after
-     the owner confirms, since that removes the pairing and keys on the
-     device.
+8. **Clean up the test setup (the lead), after the device tests, with the
+   owner's OK for each delete.**
+
+   The state before the #13 test, checked on 2026-11-13:
+   - `/etc/flux` did not exist;
+   - `~/.config/flux` did not exist;
+   - `~/.local/share/flux` held only `browser-extension/`;
+   - no `fluxd.service` ran.
+
+   So everything else there was made by the test.
+   1. `sudo $b/bin/flux-cli approve remove`.
+   2. `sudo rmdir /etc/flux/approve /etc/flux`. It fails, and stops, if a
+      folder isn't empty.
+   3. `$b/bin/flux-cli unpair` for each device.
+   4. Stop the scratchpad `fluxd`.
+   5. List `~/.config/flux` and `~/.local/share/flux`. With the owner's
+      OK, delete `~/.config/flux` and every entry of `~/.local/share/flux`
+      except `browser-extension`.
+   6. With the owner's OK, `adb -s <serial> uninstall org.omarchy.flux` on
+      both devices.
 
 ## Tests
 
@@ -294,6 +349,20 @@ reviewers:
 
 - Revert the PR's squash commit. The guard never changed, so a revert
   only brings back the toasts.
+
+## Review changes
+
+| Finding | Change |
+| --- | --- |
+| Codex 2, agy 1: `key` clashes with `val key: ApproveKeys.Pending?` | `requestKey`, never `key`. |
+| Codex 3, agy 2: missing imports | Listed in steps 2 and 3. |
+| agy 3: `maxValue` is read before the notice is laid out | Wait one frame with `withFrameNanos`. A refinement of the spec's snippet, to be recorded as P1. |
+| Codex 5, agy 4: an unpair deletes the approval key; the Pixel isn't enrolled; `--device`; bare `flux-cli` | Pairing goes last, the Pixel is enrolled before its check, `--device` on `webcam start`, and `$b/bin/flux-cli` everywhere. |
+| Codex 4, agy 4: enrollment reads `/dev/tty`, so a pipe can't work | Refuted by #13: both piped enrollments (`sudo -n`, no terminal) read the code from the FIFO and enrolled. The code is written after the phone shows it. |
+| Codex 1, agy 5: the cleanup can delete real Flux data | The state before #13 is written down, and each delete needs the owner's OK. |
+| agy 6: `font_scale` may be `null`; serials change; the APK may not install over the old one | `settings delete` for `null`; serials read first; certificates compared, with an uninstall only on the owner's OK. |
+| agy 7: step order without a compiler; Codex reviews its own step | Steps run in order with a commit each. Step 2 goes to `coder`, so Codex stays an independent reviewer. `master` is this repo's base. |
+| agy 8: SSH request IDs can repeat across computers | `"${r.computerId}/${r.id}"`, as for approvals. A refinement of the spec. |
 
 ## Corrections
 
