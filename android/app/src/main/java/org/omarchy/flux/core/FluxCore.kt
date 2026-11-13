@@ -174,7 +174,9 @@ object FluxCore {
      * system reports a change, and before a switch publishes.
      */
     fun refreshAccess() {
+        val hadDnd = dndAccess
         dndAccess = DndSync.hasAccess(app)
+        if (hadDnd != dndAccess) DndSync.reportState(this)
         mediaAccess = CaptureWatch.hasAccess(app)
         notificationAccess = Android.hasNotificationAccess(app)
         callAccess = Android.hasPhoneState(app)
@@ -668,6 +670,7 @@ object FluxCore {
     fun setSyncDnd(on: Boolean) {
         settings.syncDnd = on
         refreshAccess()
+        DndSync.reportState(this)
         publish()
     }
 
