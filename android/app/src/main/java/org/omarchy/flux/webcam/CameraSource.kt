@@ -10,11 +10,14 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.util.Range
 import android.util.Size
@@ -36,7 +39,7 @@ class CameraSource(context: Context) {
     private val executor = Executor { handler.post(it) }
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
-    private var active: Pair<Choice, Surface>? = null
+    private var active: Triple<Choice, Surface, (String) -> Unit>? = null
     @Volatile private var sessionAttempt = 0
 
     // Each open and close takes a new number, so that callbacks of an
@@ -47,8 +50,14 @@ class CameraSource(context: Context) {
     // True after release(). No camera opens after it.
     @Volatile private var released = false
 
-    /** Zoom, exposure, and white balance. They change without a new session. */
-    data class Controls(val zoom: Float = 1f, val exposureIndex: Int = 0, val awbMode: Int = CameraMetadata.CONTROL_AWB_MODE_AUTO)
+    /** Called on the camera thread when the flash of camera [name] did not light. [never] is true when it never lit. */
+    @Volatile var onTorchLost: (name: String, never: Boolean) -> Unit = { _, _ -> }
+
+    // The watch of the newest torch activation. A zoom or exposure change keeps it.
+    @Volatile private var torchWatch: TorchWatch? = null
+
+    /** Zoom, exposure, white balance, and the torch. They change without a new session. */
+    data class Controls(val zoom: Float = 1f, val exposureIndex: Int = 0, val awbMode: Int = CameraMetadata.CONTROL_AWB_MODE_AUTO, val torch: Boolean = false)
 
     /** The controls for the next request. Set them with [setControls]. */
     @Volatile var controls = Controls()
@@ -58,6 +67,8 @@ class CameraSource(context: Context) {
      * A camera to open, with the facts that the renderer and the settings
      * need. [exposureStep] is the EV of 1 step of exposure compensation.
      * With a [physicalId], the frames come from that lens of camera [id].
+     * [torch] is true when the opened camera has a flash that has not
+     * failed to light.
      */
     data class Choice(
         val id: String,
@@ -73,6 +84,7 @@ class CameraSource(context: Context) {
         val exposureStep: Float,
         val whiteBalance: List<String>,
         val activeArray: Rect?,
+        val torch: Boolean,
     )
 
     /**
@@ -191,12 +203,15 @@ class CameraSource(context: Context) {
             exposureStep = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0f,
             whiteBalance = WHITE_BALANCE_MODES.filter { AWB_MODES[it] in awb }.ifEmpty { listOf("auto") },
             activeArray = p.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE),
+            torch = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true && named.name !in noTorch,
         )
     }
 
-    /** Changes zoom, exposure, and white balance on the running camera. */
+    /** Changes zoom, exposure, white balance, and the torch on the running camera. */
     fun setControls(next: Controls) {
         if (next == controls) return
+        // A new watch for each off → on; none while off, so late frames of an old request don't count (P4).
+        if (next.torch != controls.torch) torchWatch = if (next.torch) TorchWatch() else null
         controls = next
         val attempt = sessionAttempt
         handler.post { repeat(attempt) }
@@ -206,7 +221,9 @@ class CameraSource(context: Context) {
     private fun repeat(attempt: Int, firstFailure: ((String) -> Unit)? = null) {
         if (attempt != sessionAttempt) return
         val s = session ?: return
-        val (choice, target) = active ?: return
+        val (choice, target, fail) = active ?: return
+        // The request and its callback read the same controls.
+        val c = controls
         try {
             // A request that sets keys of a lens must name that lens when it is made.
             val builder = choice.physicalId?.takeIf { choice.physicalCrop }?.let { s.device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD, setOf(it)) }
@@ -215,7 +232,6 @@ class CameraSource(context: Context) {
                 addTarget(target)
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                 choice.fps?.let { set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
-                val c = controls
                 set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, c.exposureIndex.coerceIn(choice.exposureRange.lower, choice.exposureRange.upper))
                 set(CaptureRequest.CONTROL_AWB_MODE, c.awbMode)
                 val zoom = c.zoom.coerceIn(1f, choice.zoomMax)
@@ -229,12 +245,42 @@ class CameraSource(context: Context) {
                 } else {
                     choice.activeArray?.let { set(CaptureRequest.SCALER_CROP_REGION, cropFor(it, zoom)) }
                 }
+                if (choice.torch) {
+                    // The torch lights only with AE mode ON or OFF.
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                    set(CaptureRequest.FLASH_MODE, if (c.torch) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF)
+                }
             }.build()
-            s.setRepeatingRequest(request, null, handler)
+            val watch = torchWatch.takeIf { choice.torch && c.torch }
+            s.setRepeatingRequest(request, watch?.let { callbackFor(it, attempt, choice) }, handler)
         } catch (e: Exception) {
             Log.w(TAG, "camera request failed", e)
-            firstFailure?.invoke("The camera stopped: ${e.message}")
+            when {
+                firstFailure != null -> firstFailure("The camera stopped: ${e.message}")
+                !choice.torch -> Unit
+                // The request failed, not the flash: the setting goes off and the switch stays (P1).
+                c.torch -> onTorchLost(choice.name, false)
+                else -> {
+                    // The old request may still light the torch.
+                    closeNow()
+                    fail("The camera stopped: ${e.message}")
+                }
+            }
         }
+    }
+
+    private fun callbackFor(watch: TorchWatch, attempt: Int, choice: Choice) = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, result: TotalCaptureResult) {
+            val lit = result.get(CaptureResult.FLASH_STATE)?.let { it == CaptureResult.FLASH_STATE_FIRED }
+            if (watch.onResult(lit, SystemClock.elapsedRealtime())) torchLost(watch, attempt, choice)
+        }
+    }
+
+    private fun torchLost(watch: TorchWatch, attempt: Int, choice: Choice) {
+        // Only the newest torch request of this session reports.
+        if (watch !== torchWatch || attempt != sessionAttempt) return
+        if (!watch.everLit) noTorch += choice.name
+        onTorchLost(choice.name, !watch.everLit)
     }
 
     /**
@@ -324,7 +370,7 @@ class CameraSource(context: Context) {
                 override fun onConfigured(s: CameraCaptureSession) {
                     if (!current() || attempt != sessionAttempt || device !== camera) return s.close()
                     session = s
-                    active = choice to target
+                    active = Triple(choice, target) { message: String -> if (current()) fail(message) }
                     repeat(attempt, ::attemptFailed)
                 }
 
@@ -383,6 +429,9 @@ class CameraSource(context: Context) {
     }
 
     companion object {
+        /** Cameras whose flash did not light, by name, until the app process ends. Their switch stays hidden. */
+        val noTorch: MutableSet<String> = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+
         fun physicalCropSupported(keyNames: Collection<String>?): Boolean = "android.scaler.cropRegion" in keyNames.orEmpty()
 
         /** The longest frame at 30 fps, in nanoseconds, with a little room. */
