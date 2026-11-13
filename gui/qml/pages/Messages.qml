@@ -31,6 +31,9 @@ Item {
   // The error of the last send, or "". It shows above the message field,
   // for example for a message that is too long. A new draft clears it.
   property string sendError: ""
+  // The error of a reload of the thread that already shows, or "". The
+  // messages stay, so the error shows above the message field.
+  readonly property string staleError: loaded && !composing && loadError !== "" ? "The thread may be out of date: " + loadError : ""
   // True when messages belong to the selected thread.
   readonly property bool loaded: !!selected && loadedFor === selectedDev + ":" + selected.thread
   // The New message form shows in place of the thread. sentTo is the
@@ -457,7 +460,7 @@ Item {
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.top: root.composing ? to.bottom : threadName.bottom
-      anchors.bottom: sendErrorLine.visible ? sendErrorLine.top : inputRow.top
+      anchors.bottom: errorLine.visible ? errorLine.top : inputRow.top
       anchors.leftMargin: 19
       anchors.rightMargin: 19
       anchors.topMargin: 10
@@ -534,20 +537,36 @@ Item {
       }
     }
 
-    // The error of the last send from fluxd.
-    Txt {
-      id: sendErrorLine
-      visible: root.sendError !== ""
+    // The error of the last send from fluxd, or of a reload of the thread.
+    Row {
+      id: errorLine
+      visible: root.sendError !== "" || root.staleError !== ""
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.bottom: inputRow.top
       anchors.leftMargin: 19
       anchors.rightMargin: 19
       anchors.bottomMargin: 8
-      text: root.sendError
-      color: Theme.err
-      font.pixelSize: 12
-      wrapMode: Text.Wrap
+      spacing: 10
+      Txt {
+        width: parent.width - (retryStale.visible ? retryStale.width + parent.spacing : 0)
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.sendError !== "" ? root.sendError : root.staleError
+        color: Theme.err
+        font.pixelSize: 12
+        wrapMode: Text.Wrap
+      }
+      OutlineButton {
+        id: retryStale
+        visible: root.sendError === "" && root.staleError !== "" && root.online
+        anchors.verticalCenter: parent.verticalCenter
+        icon: "refresh"
+        text: "Retry"
+        padX: 10
+        padY: 4
+        fontSize: 11
+        onClicked: root.load(root.selected)
+      }
     }
 
     Row {
