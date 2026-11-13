@@ -184,3 +184,23 @@ are unknown.
 
      The NixOS config and `/etc/pam.d` don't change.
 3. **The SSH key:** out of scope, for the reason in Constraints.
+
+## Result
+
+Tested on 2026-11-13 with the master debug build (`build.yml` run
+43329559309), `fluxd` from this repo on p620, and the approval helper run
+directly with the `PAM_*` variables.
+
+| Device | StrongBox | Enrollment | Approval |
+| --- | --- | --- | --- |
+| Pixel 11 Pro XL, Android 17 | KeyMint on Titan M (`keymint-service.citadel` in the log) | fingerprint and face: signed | fingerprint, after an app restart: approved |
+| Galaxy Tab S8 Ultra (SM-X900), Android 16 | Keymaster 4.0 (`keymaster@4.0-strongbox-service-qti`) | fingerprint: signed | fingerprint: approved |
+
+Neither device gives -26, so cause 1 is not confirmed on the owner's
+devices, and nothing here points to another cause. The owner decided to
+close #13 as not reproducible, with no code change. No spec or plan
+follows.
+
+The tablet test found a separate bug: the floating S Pen Air Command
+button over the Approve button makes Flux refuse the tap as an overlay
+(`ApproveActivity.kt:279-282`). That is tracked in its own issue.
