@@ -46,7 +46,8 @@ object WebcamSession {
     /** The camera side, which starts and stops the encoder. */
     interface Listener {
         fun onConnected(out: OutputStream, width: Int, height: Int)
-        fun onEnded()
+        /** [restart] is true when [WebcamSession.restart] ends the stream to start it again. */
+        fun onEnded(restart: Boolean)
     }
 
     private val _status = MutableStateFlow(Status())
@@ -130,11 +131,14 @@ object WebcamSession {
 
     /**
      * Starts the stream again with a new frame size: "stop", then a new
-     * "start" with a new port. It does nothing when no stream runs.
+     * "start" with a new port. It does nothing when no stream runs. The
+     * listener hears that this end is a restart. A stop that came first
+     * wins, and no new stream starts.
      */
     fun restart(core: FluxCore, width: Int, height: Int) {
-        val (target, l) = synchronized(lock) { deviceId to listener }
+        val (target, l, id) = synchronized(lock) { Triple(deviceId, listener, attempt) }
         if (target == null || l == null) return
+        if (!end(core, notify = true, Status(), id, restart = true)) return
         start(core, target, width, height, l)
     }
 
@@ -198,9 +202,10 @@ object WebcamSession {
         }
     }
 
-    private fun end(core: FluxCore, notify: Boolean, status: Status, id: Int) {
+    /** Ends attempt [id]. Returns false when another stop or start came first. */
+    private fun end(core: FluxCore, notify: Boolean, status: Status, id: Int, restart: Boolean = false): Boolean {
         val (target, srv, sock, l, w) = synchronized(lock) {
-            if (attempt != id) return
+            if (attempt != id) return false
             attempt++
             val r = Parts(deviceId, server, socket, listener, watch)
             deviceId = null
@@ -212,11 +217,12 @@ object WebcamSession {
             r
         }
         w?.cancel(false)
-        if (l != null) synchronized(listenerLock) { l.onEnded() }
+        if (l != null) synchronized(listenerLock) { l.onEnded(restart) }
         runCatching { srv?.close() }
         runCatching { sock?.close() }
         if (notify && target != null && (sock != null || srv != null)) core.device(target)?.send(WebcamPackets.stop())
         _status.value = status
+        return true
     }
 
     private data class Parts(

@@ -58,6 +58,16 @@ class WebcamController(context: Context) : WebcamSession.Listener {
 
     init {
         if (orientation.canDetectOrientation()) orientation.enable()
+        camera.onTorchLost = { name, never ->
+            // On the main thread, where openCamera runs, so a camera that
+            // opened since is not changed (P2).
+            main.post {
+                if (choice?.name != name) return@post
+                // A lens that never lit hides its switch; a flash that went dark only turns off.
+                if (never) WebcamSettings.setCaps(WebcamSettings.caps.value.copy(torch = false))
+                else WebcamSettings.update { it.copy(torch = false) }
+            }
+        }
     }
 
     var extraRotation: Int
@@ -114,7 +124,7 @@ class WebcamController(context: Context) : WebcamSession.Listener {
         _cameraError.value = null
         // The settings name the camera that opened, so a missing camera
         // does not reopen as another one when the caps clamp the settings.
-        applied = config.copy(camera = c.name)
+        applied = config.copy(camera = c.name, torch = false)
         WebcamSettings.setCaps(
             WebcamCaps(
                 zoomMax = c.zoomMax,
@@ -123,6 +133,7 @@ class WebcamController(context: Context) : WebcamSession.Listener {
                 exposureStep = c.exposureStep,
                 whiteBalance = c.whiteBalance,
                 cameras = cameraList(runCatching { camera.cameras() }.getOrDefault(emptyList()).map { it.name }, c.name),
+                torch = c.torch,
             ),
             camera = c.name,
         )
@@ -134,7 +145,10 @@ class WebcamController(context: Context) : WebcamSession.Listener {
             val surface = cameraSurface ?: Surface(texture).also { cameraSurface = it }
             synchronized(cameraLock) {
                 // The app went to the background, or the screen closed, before GL was ready.
-                if (want == cameraWanted) camera.open(c, surface) { message -> _cameraError.value = message }
+                if (want == cameraWanted) camera.open(c, surface) { message ->
+                    _cameraError.value = message
+                    WebcamSettings.update { it.copy(torch = false) }
+                }
             }
         }
     }
@@ -145,6 +159,7 @@ class WebcamController(context: Context) : WebcamSession.Listener {
             zoom = config.zoom,
             exposureIndex = if (step > 0f) (config.exposure / step).roundToInt() else 0,
             awbMode = CameraSource.AWB_MODES[config.whiteBalance] ?: CameraSource.AWB_MODES.getValue("auto"),
+            torch = config.torch,
         )
     }
 
@@ -187,11 +202,13 @@ class WebcamController(context: Context) : WebcamSession.Listener {
         }
     }
 
-    override fun onEnded() {
+    override fun onEnded(restart: Boolean) {
         // Stop drawing into the encoder before the encoder frees its surface.
         renderer.setEncoder(null, 0, 0)
         encoder?.release()
         encoder = null
+        // A stop turns the light off. A restart for a new frame size keeps it.
+        if (!restart) WebcamSettings.update { it.copy(torch = false) }
     }
 
     /** Stops everything, also the stream that this controller runs. The controller cannot start again. */
@@ -199,7 +216,7 @@ class WebcamController(context: Context) : WebcamSession.Listener {
         main.removeCallbacks(sendConfig)
         WebcamSession.stopOwnedBy(FluxCore, this)
         // Free an encoder that the stream did not free.
-        onEnded()
+        onEnded(restart = false)
         orientation.disable()
         synchronized(cameraLock) {
             cameraWanted++
@@ -208,5 +225,6 @@ class WebcamController(context: Context) : WebcamSession.Listener {
         renderer.release()
         cameraSurface?.release()
         cameraSurface = null
+        choice = null
     }
 }
