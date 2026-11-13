@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 57
 spec: spec/2026-11-13-57-call-approval-state.md
 coders:
