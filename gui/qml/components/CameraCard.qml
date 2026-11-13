@@ -247,7 +247,7 @@ Card {
       columnSpacing: 32
       rowSpacing: 16
 
-      // Chips and the mirror switch
+      // Chips, and the mirror and flashlight switches
       Column {
         Layout.fillWidth: true
         Layout.alignment: Qt.AlignTop
@@ -312,6 +312,14 @@ Card {
           text: "Mirror the image"
           checked: !!root.config.mirror
           onToggled: function (checked) { root.setKey("mirror", checked) }
+        }
+
+        Toggle {
+          objectName: "torchToggle"
+          visible: root.caps.torch === true
+          text: "Use the flashlight"
+          checked: !!root.config.torch
+          onToggled: function (checked) { root.setKey("torch", checked) }
         }
       }
 

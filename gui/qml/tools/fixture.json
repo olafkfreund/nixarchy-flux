@@ -375,7 +375,8 @@
     "brightness": 0.0,
     "contrast": 1.0,
     "saturation": 1.0,
-    "warmth": 0.0
+    "warmth": 0.0,
+    "torch": false
    },
    "caps": {
     "zoomMax": 8,
@@ -402,7 +403,8 @@
     "resolutions": [
      720,
      1080
-    ]
+    ],
+    "torch": true
    }
   }
  },
