@@ -39,7 +39,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -620,13 +622,18 @@ private fun EntryMenu(e: SendEntry, context: Context, content: @Composable (onTe
             .onGloballyPositioned { self = it }
             .pointerInput(e.id, running) {
                 if (running) return@pointerInput
-                detectTapGestures(onLongPress = { p ->
+                // Not detectTapGestures: it consumes the down, which cancels the text selection below.
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
                     // The selectable text keeps its own long press.
                     val s = self
                     val t = text
                     val box = if (s != null && t != null && s.isAttached && t.isAttached) s.localBoundingBoxOf(t) else null
-                    if (box == null || !box.contains(p)) at = IntOffset(p.x.toInt(), p.y.toInt())
-                })
+                    if (box != null && box.contains(down.position)) return@awaitEachGesture
+                    val long = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                    long.consume()
+                    at = IntOffset(long.position.x.toInt(), long.position.y.toInt())
+                }
             }
             .semantics(mergeDescendants = true) {
                 if (!running) customActions = listOf(CustomAccessibilityAction("Delete") { delete(); true })
