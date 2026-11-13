@@ -29,7 +29,7 @@ through it, so files, transfers, and the screen mirror work away from home.
 2. On the phone, open **Sync** and turn on **Remote access**.
 3. Enter a tailnet auth key from the Tailscale admin console.
    Use a key with an expiry, and remove the phone from the tailnet when you
-   stop using it.
+   stop using it. The phone forgets the key once the node is up.
 4. Copy the address that Flux shows, for example `100.101.102.103`.
 5. On the computer, add the address:
 
@@ -43,7 +43,12 @@ through it, so files, transfers, and the screen mirror work away from home.
    flux-cli doctor
    ```
 
-The node keeps its key and identity in the app storage.
+The node keeps its identity in the app storage. It uploads no logs to Tailscale.
+**Change key** makes a new node with a new address: add the new address on
+each computer, and remove the old node in the admin console. If the new key
+fails, the phone keeps the old node.
+**Forget node** removes the node from the phone. Remove it in the admin
+console too.
 It starts with the Flux service and stops when Flux is off.
 The node is in the arm64 APK. A build without it shows that the helper is
 missing, and the app works as before on the local network.

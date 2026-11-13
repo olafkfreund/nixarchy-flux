@@ -181,9 +181,18 @@ The Android phone, the iPhone, and the Mac also listen on TCP ports 12100 to 121
 They listen on TCP ports 12070 to 12099 for payloads, tunnels, and streams.
 Flux for Android takes a link from a computer that is not paired only while Flux is on the screen or while it scans.
 
+## Remote access
+
+With **Remote access** on, Flux for Android runs a userspace Tailscale node.
+It connects to Tailscale's control servers, to Tailscale's DERP relays, and to the peers in the tailnet.
+It uploads no logs to Tailscale and keeps no log buffer, so Tailscale support has no logs of it.
+This was checked against tailscale v1.104.4, and the check runs again with each update (see the [release guide](releasing.md#pinned-tools)).
+The node's state is in the app's files, and app backup is off.
+The auth key is kept only until the node is up.
+
 ## Album art
 
-Besides the paired computers, the apps connect to 1 other kind of host.
+Besides the paired computers and, with Remote access, Tailscale, the apps connect to 1 other kind of host.
 The **Media** screen loads the album art from the `https` address that a player on the computer reports.
 That host is usually a server of the music or video service, and it sees the IP address of the device.
 `fluxd` sends only `https` addresses to the devices, never a `file:` address with a local path.
