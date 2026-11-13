@@ -82,13 +82,18 @@ on its own. Work happens in the worktree `/mnt/code/Source-home/GitHub/nixarchy-
    - `internal/core/telephony.go` `callEvent` (`:117-184`): inside the first `d.mu` section (`:117-136`, which already
      validates pairing and the link), apply the table:
      - ringing: set `call` (keep `since` if `callOK` and it was ringing) and clear `missed`
-     - talking: `state = talking`, keep `since` if it was ringing, clear `missed`
+     - talking: if there was no ringing call (an outgoing call starts here, `Calls.kt:48`), set `callOK`, `caller`,
+       `number` and `since = now`; else keep `since`. Then set `state = talking` and clear `missed`. A repeat talking
+       packet keeps `since`.
      - cancel: clear `call`
      - missedCall: clear `call`, set `missed` with `at = now`, and start `time.AfterFunc(10*time.Minute, d.markDirty)`
 
      Then call `d.markDirty()` after the unlock.
-   - `dropCall` (`:191-203`) clears `callOK`.
+   - `dropCall` (`:191-203`) clears `callOK` and calls `d.markDirty()` after its unlock. It runs on the media worker
+     after the link closes (`:138-141`), which can be after `receive`'s own `markDirty` (`daemon.go:1112`).
    - `internal/core/pairing.go` `dropTrustLocked` (`:233-252`) clears `callOK` and `missedOK`.
+   - `internal/core/api.go` (`:135-140`): an unpaired device's view drops `Call`, `MissedCall` and `Dnd`, as it already
+     drops `Battery`, `Notifications`, `Conversations` and `Outbox`.
 
    Verify with new tests in `telephony_test.go`, next to `TestHandleTelephony` (`:82`) and `TestDropCall` (`:114`), using
    `telephonyPacket` (`:78`):
@@ -109,12 +114,19 @@ on its own. Work happens in the worktree `/mnt/code/Source-home/GitHub/nixarchy-
 2. **Approvals.**
    - `internal/core/approve.go`:
      - `approval` (`:53-60`) gains `since time.Time`, set in `ApproveRequest` (`:236`).
-     - New `book.cancel(id)` sets `result` to the existing cancelled result, closes `done` once (guard with the
-       existing done-closed check), and removes the entry, all under the book mutex.
+     - New `book.cancel(id)`, under the book mutex:
+       - if `a.result == nil`, set `a.result = &approvalResult{State: "failed", Error: "cancelled"}` and close `a.done`
+         (the same guard `deliver` uses, `:111`)
+       - then remove the entry
+
+       "failed" already fails closed in the helper (`internal/approve/helper.go:237-238`) and in enroll
+       (`enroll.go:127-128`), so no new state is introduced.
      - `ApproveCancel` (`:320-327`) uses it.
      - New `book.views()` returns the sudo list under the book mutex, using the `pending()` filter (`:91-102`).
      - `add` (`:69-89`), `deliver` (`:107-127`), `remove` (`:161-169`) and `wait`'s expiry branch (`:154`) call
-       `d.markDirty()`. Give the book a `dirty func()` set by the daemon, so the book never takes `d.mu`.
+       `b.dirty()`. The book gets a `dirty func()` field, set in `New` (`daemon.go:311-333`) to `d.markDirty`. Every
+       call is guarded with `if b.dirty != nil`, because tests build `&Daemon{}` without `New` (`approve_test.go:20`,
+       `ssh_test.go:149`). The book never takes `d.mu`.
      - At creation, call `time.AfterFunc(deadline-now, d.markDirty)`.
    - `internal/core/ssh.go`:
      - `sshSign` (`:56-61`) gains `since`. `add` (`:88-97`, called before the send at `:261`) leaves it zero, so the
@@ -131,7 +143,9 @@ on its own. Work happens in the worktree `/mnt/code/Source-home/GitHub/nixarchy-
          collects the device id and calls `dropApprovals` after its unlock.
      - Each of those paths gets a test that a pending sudo request is cancelled.
    - `internal/core/api.go` `Snapshot` (`:113-200`): collect `approvals` from both books' `views()` before `d.mu.Lock()`
-     (`:114`), and add `"approvals"` to the `state` map (`:156-198`).
+     (`:114`), and add `"approvals"` to the `state` map (`:156-198`). The order is deterministic, since the books are
+     maps: `sudo` before `ssh`, then ascending `since`, then device id. It starts from `[]ApprovalView{}`, so the JSON
+     is `[]`, never null.
 
    Verify with new tests in `approve_test.go` (helpers `approveDaemon` `:19`, `approveRaw` `:27`) and `ssh_test.go`
    (`sshSetup` `:126`, fake `sshPhone` `:35-122`), as listed in the spec. The key one: a goroutine blocked in
@@ -154,9 +168,11 @@ on its own. Work happens in the worktree `/mnt/code/Source-home/GitHub/nixarchy-
      backend.
    - `internal/core/device.go`:
      - `Device` gains `dnd DndView; dndOK bool`.
+     - `DndView` is `{On *bool \`json:"on"\`; By string \`json:"by"\`; At int64 \`json:"at"\`}`. `on` has no `omitempty`,
+       so an unknown state serializes as `"on": null`.
      - `DeviceView` gains `Dnd *DndView \`json:"dnd,omitempty"\`` (as a copy).
      - `plugins()` (`:235-245`) gains `{"dnd", dev.accepts(proto.TypeFluxDndSet) && dev.supports(proto.TypeFluxDndState)}`.
-   - `dropTrustLocked` and the link-drop path clear `dndOK`.
+   - `dropTrustLocked` and the link-drop path (`daemon.go:1088-1091`) clear `dndOK`.
    - `internal/core/api.go`:
      - `params` (`:222-244`) gains `On *bool \`json:"on"\``.
      - Add `"dnd.set"` to `deviceMethods` (`:481-491`).
@@ -185,11 +201,18 @@ on its own. Work happens in the worktree `/mnt/code/Source-home/GitHub/nixarchy-
        Otherwise apply it through the existing apply path with `DndGuard` marked remote, so `onLocalChange` doesn't
        broadcast. Don't forward it, then `report("set")`.
      - Add `report(by, to = all paired)`, which sends `flux.dnd.state {on, by}`.
-     - Call `report` from `onLocalChange` (`:38-44`, `by "phone"`) and from `onPacket` (`:50-61`, after applying, `by
-       "sync"`). Also call it on link-up for that computer (`by "connect"`) and when the sync switch or policy access
-       changes.
+     - Call `report` from:
+       - `onLocalChange` (`:38-44`), `by "phone"`
+       - `onPacket` (`:50-61`), after applying, `by "sync"`
+       - link-up for that computer (`Plugins.kt:72`), `by "connect"`
+       - the sync switch change (`FluxCore.kt:668-672`) and a policy-access change (`FluxService.kt:82-86`,
+         `FluxCore.kt:176`), `by "phone"`, with `on` null when sync is off or access is missing
+       - a refused `onSet`, `by "set"`, with `on` null
+
+       Only these four `by` values are ever sent, and fluxd maps anything else to `""`.
    - `Plugins.kt:130`: dispatch the new type.
-   - The identity's type lists: declare `flux.dnd.set` incoming and `flux.dnd.state` outgoing, next to `flux.dnd`.
+   - `android/app/src/main/java/org/omarchy/flux/protocol/Identity.kt`: the type constants next to `:43`, and the
+     incoming and outgoing lists (`:116-141`). Declare `flux.dnd.set` incoming and `flux.dnd.state` outgoing.
 
    Verify with a new `DndSyncTest.kt` next to `DndGuardTest.kt`, with the four cases in the spec.
 
