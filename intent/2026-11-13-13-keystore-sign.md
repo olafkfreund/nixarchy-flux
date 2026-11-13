@@ -4,13 +4,13 @@ issue: 13
 author: olafkfreund
 ---
 
-# Intent: Fingerprint enrollment fails with "Key user not authenticated"
+# Intent: Approval enrollment fails with "Key user not authenticated"
 
 ## Problem
 
 On some Android phones, `sudo flux-cli approve enroll` always fails. The
-phone shows the fingerprint prompt and the user touches the sensor, then
-the command prints:
+phone shows the biometric prompt and the user passes it, then the command
+prints:
 
 ```
 flux-cli: the phone could not make the key: The phone could not sign the request: android.security.KeyStoreException: Key user not authenticated (internal Keystore code: -26 message: system/security/keystore2/src/operation.rs:853: KeystoreOpera
@@ -18,57 +18,102 @@ flux-cli: the phone could not make the key: The phone could not sign the request
 
 This is upstream `bjarneo/flux#136`, still open there. Clearing the app's
 data doesn't help. Without enrollment, the phone cannot approve `sudo` or
-logins, which is one of the features the owner wants on the phones and the
-tablet.
+logins, which the owner wants on the phones and the tablet.
 
-Facts from the code:
+### Facts from the code
 
-- **The key** (`android/app/src/main/java/org/omarchy/flux/core/ApproveKeys.kt:87-109`):
-  an EC P-256 signing key with `setUserAuthenticationRequired(true)`, a
-  strong biometric for each use (`setUserAuthenticationParameters(0,
-  AUTH_BIOMETRIC_STRONG)` on Android 11+), and
-  `setInvalidatedByBiometricEnrollment(true)`. It's made in **StrongBox**
-  when the phone has it, else in the TEE (`ApproveKeys.kt:63-67`).
-- **The flow** (`ui/ApproveActivity.kt:277-338`):
-  1. make the key and `initSign` a `Signature`;
-  2. `BiometricPrompt` with a `CryptoObject` for that `Signature`,
-     `BIOMETRIC_STRONG` only;
-  3. after `onAuthenticationSucceeded`, `update` and `sign`.
+- **The key** (`android/app/src/main/java/org/omarchy/flux/core/ApproveKeys.kt:83-104`):
+  - EC P-256 for signing;
+  - a strong biometric for each use: `setUserAuthenticationParameters(0,
+    AUTH_BIOMETRIC_STRONG)` on Android 11+, a validity of -1 s on Android 10;
+  - `setInvalidatedByBiometricEnrollment(true)`, so any new biometric,
+    fingerprint or face, invalidates it.
 
-  Error -26 (`KEY_USER_NOT_AUTHENTICATED`) comes from step 3. So the
-  prompt succeeded, but Keystore did not accept its authentication for this
-  key.
-- **The SSH key** (`core/SshKeys.kt:118-135`) uses the same pattern, also in
-  StrongBox when available, but it also allows the device credential and
-  isn't invalidated by a new biometric. No failure is reported for it.
-- **The error text is cut** at 200 characters (`core/ApproveMessage.kt:169-176`),
-  so the report lost the end of the Keystore message. The phone logs the
-  full exception (`ApproveActivity.kt:105`), but the user doesn't see it,
-  and it doesn't say whether the key was in StrongBox or the TEE.
-- **The likely cause, unverified:** on some phones the strong-biometric
-  authentication token is not accepted by the StrongBox chip for a key that
-  needs authentication for each use, while the TEE accepts it. The common
-  fix in other apps is to fall back to a TEE key when a StrongBox key fails
-  this way. The reporter's phone model is unknown.
-- **The owner's Pixel 11 Pro XL** (API 37) has StrongBox
-  (`android.hardware.strongbox_keystore=400`), a strong fingerprint and a
-  strong face sensor. Whether enrollment works on it is not yet tested.
-- The earlier symptom in the issue, `flux-cli` waiting forever, was fixed
-  upstream before the fork (upstream#138): the phone now sends the error at
-  once.
+  It's made in **StrongBox** when the phone has it, else without StrongBox
+  (`ApproveKeys.kt:62-66`). The code never checks where the key really
+  lives (`KeyInfo`), and `Pending` doesn't record it. `SshKeys.kt:72-86`
+  already reads the security level for SSH keys.
+- **The flow:**
+  1. `start()` (`ui/ApproveActivity.kt:278-338`) makes the key, runs
+     `initSign` and opens `BiometricPrompt` with a `CryptoObject`. The
+     prompt allows `BIOMETRIC_STRONG` only, so a strong face also counts.
+  2. `onAuthenticationSucceeded` (`ApproveActivity.kt:89-109`) runs `update`
+     and `sign`, and that's where -26 (`KEY_USER_NOT_AUTHENTICATED`) is
+     thrown.
+
+  So the prompt succeeded, but Keystore did not accept an authentication
+  for this operation.
+- **The error text is cut.** `ApproveMessage.failure` (`core/ApproveMessage.kt:169-176`)
+  and `failed` (`:162`) both cut it to 200 characters. The report lost the
+  rest of the Keystore message and any `Caused by`. A wire field must stay
+  at most 256 bytes of valid UTF-8 without control characters
+  (`ApproveMessage.kt:38,47-55`), or `fluxd` drops it.
+- **Phone logs:** the phone logs the full exception
+  (`ApproveActivity.kt:105`), without the key's security level, the
+  Android version or the build.
+- **Timeouts:** an enrollment waits 120 s (`internal/approve/enroll.go:15`).
+  An approval waits 20 s by default (`approve_timeout`).
+
+### Possible causes
+
+All unverified. -26 at `update` or `sign` after a successful prompt can
+mean any of these:
+
+1. **The authentication isn't accepted** for a StrongBox key while the TEE
+   accepts it. The token signing shared between the biometric hardware and
+   StrongBox is broken on some OEM builds. If this is the cause, a TEE key
+   works.
+2. **The authentication doesn't reach the operation:** `keystore2` finds no
+   matching token before it calls the hardware. This affects TEE and
+   StrongBox keys alike.
+3. **The authenticator IDs don't match.** `setInvalidatedByBiometricEnrollment(true)`
+   binds the key to the authenticator IDs of the enrolled biometrics. A
+   vendor biometric that reports a different or zero ID, for example face
+   against fingerprint, fails even with a TEE key. The SSH key is not bound
+   to them (`SshKeys.kt:124-129`).
+4. **The operation is mishandled:** a hardware implementation that handles
+   a per-use token badly across `update` and then `finish`, or an
+   operation pruned while the prompt waits. Pruning usually gives -28, not
+   -26.
+
+The reporter's phone model, Android version and whether it has StrongBox
+are unknown.
+
+### The owner's Pixel 11 Pro XL
+
+- API 37, with StrongBox (`android.hardware.strongbox_keystore=400`).
+- A strong fingerprint sensor and a strong face sensor.
+- Flux is not installed now, and p620 has no `/etc/flux`.
+- Whether enrollment fails on it is not yet tested.
 
 ## Proposed outcome
 
-- On a phone where the StrongBox key cannot be used this way, enrollment
-  still succeeds: the phone falls back to a TEE key, with the same
-  rules (a strong biometric for each use, invalidated by a new biometric).
-- Approvals with that key keep working afterwards.
-- When signing fails anyway, the error tells the cause. It names where the
-  key lives (StrongBox or TEE), and the Keystore reason is not cut off
-  before the useful part.
-- `docs/approve.md` says when the phone uses StrongBox and when it falls
-  back.
-- On the owner's Pixel, enrollment and an approval work end to end.
+1. **The cause is known before the fix.**
+   - Reproduce on the Pixel with today's code, with fingerprint and with
+     face.
+   - The phone logs the full exception chain, the key's security level,
+     the Android version and the build.
+   - If the Pixel doesn't fail, the fix rests on the cause these logs
+     support. It is then tested by forcing the failure in a debug build,
+     and stated as unverified on affected hardware.
+2. **Diagnostics.** When signing fails, the message to the computer is a
+   short, structured line within the 256-byte field limit:
+   - what failed (make, init, sign);
+   - where the key was (StrongBox, TEE, software, unknown);
+   - the exception class and the numeric Keystore code.
+
+   The phone keeps the full chain in its log.
+3. **Fallback, only if cause 1 holds** (or can't be ruled out, and the
+   owner agrees). During an enrollment, a -26 from a key that the phone
+   verified as StrongBox-backed triggers one retry:
+   - a new key, verified as TEE-backed (`KeyInfo`), with the same rules;
+   - a new `Signature`, and a second prompt with the same settings;
+   - on a TEE key that fails as well, the enrollment ends with the
+     diagnostic line.
+4. **Approvals keep working** with the key that was enrolled, including
+   after the app restarts.
+5. **`docs/approve.md`** says when the phone uses StrongBox and when it
+   falls back.
 
 ## Affected users and systems
 
@@ -77,42 +122,65 @@ Facts from the code:
   `core/ApproveMessage.kt` and their unit tests.
 - `docs/approve.md`.
 - Not affected: `fluxd`, the approval protocol, the PAM module, iOS,
-  macOS, Windows, and the SSH keys.
+  macOS, Windows and the SSH keys.
 
 ## Constraints
 
-- No weaker security: still a strong biometric for each use, no device
-  PIN, no time window, and still invalidated by a new fingerprint. A TEE
-  key is hardware-backed, so the fallback keeps the key off the app's
-  memory.
-- No protocol change, so a computer with an earlier `fluxd` still accepts
-  the enrollment.
-- An enrollment that fails keeps the current key (`ApproveKeys.create`
-  and `commit`).
-- The test needs the desktop side: `fluxd` and `flux-cli approve enroll`
-  on a computer. p620 has no Flux installed now.
+- **The authentication rules stay the same:** a strong biometric for each
+  use, no device PIN, no time window, and invalidated by a new biometric.
+  - A TEE key gives up StrongBox's extra isolation from the main
+    processor. That is the trade-off, and it applies only to phones where
+    StrongBox fails.
+  - A key that isn't verified as hardware-backed (software or unknown) is
+    refused, as on iOS and macOS.
+- **The fallback runs only:**
+  - during an enrollment, never during an approval, because the computer
+    pins the enrolled public key;
+  - once per enrollment;
+  - on -26 from a verified StrongBox key.
+
+  Cancel, error, timeout, an invalidated key or any other failure ends the
+  enrollment as today.
+- The second prompt keeps `BIOMETRIC_STRONG`, `setConfirmationRequired(true)`
+  and the overlay checks.
+- A failed or cancelled enrollment keeps the current key (`ApproveKeys.create`
+  and `commit`). Today's limit stays: the phone commits once it sent the
+  key, so a wrong key code on the computer leaves no working key until the
+  next enrollment (`docs/approve.md:117-125`).
+- No protocol change: every field stays a valid field, so a computer with
+  an earlier `fluxd` still gets the error.
+- **The SSH key stays out of scope.** It is a different case: its key is
+  published before any signature (`SshKeys.kt:99-109`), so replacing it on
+  failure would change a public key that servers already trust.
 
 ## Open questions
 
 1. **Fallback only after the failure, or never StrongBox for approval
    keys?**
-   - Proposed: fall back after the -26 failure. The phone deletes the
-     StrongBox key, makes a TEE key and asks for the fingerprint once more.
-     Phones where StrongBox works keep it.
-   - The alternative, TEE only, is simpler: one prompt and no retry path.
-     But it gives up StrongBox on every phone.
-2. **How to test on the Pixel?** Enrollment needs a real computer side:
-   `fluxd`, then `sudo flux-cli approve enroll`, which writes
-   `/etc/flux/approve/<user>` as root (`internal/approve/keyfile.go:21`).
-   - Proposed: on p620, run `fluxd` as the user with `nix run` from this
-     repo and pair the Pixel. Enroll with today's code first, then with
-     the fix. Afterwards, delete `/etc/flux/approve/` and unpair. The NixOS
-     config and `/etc/pam.d` don't change, so this tests the enrollment,
-     not a `sudo` approval through PAM. That needs `services.flux` in the
-     NixOS config, which is the owner's call.
-   - If the Pixel fails with -26 today, that directly tests the fix. If
-     it works, a debug-only switch forces the fallback for the test.
-   - `tools/test_peer.py` has no approval requests, so it can't do this
-     without new code.
-3. **Also the SSH key?** Proposed: no, out of scope, since nothing is
-   reported for it. Same pattern, so a follow-up issue if it shows up.
+   - Proposed: only after the failure, within the constraints above, so
+     phones where StrongBox works keep it.
+   - TEE only is simpler (one prompt, no retry), but gives up StrongBox on
+     every phone.
+   - Either way, only if the logs from outcome 1 support cause 1.
+2. **The test setup on p620 and the Pixel.** Proposed:
+   - Run `fluxd` as the owner's user with `nix run` from this repo, and
+     pair the Pixel.
+   - Enroll with `sudo flux-cli approve enroll`. That writes
+     `/etc/flux/approve/olafkfreund.pub` and creates `/etc/flux`, which
+     doesn't exist today.
+   - Test an approval without PAM: run the `flux-approve` helper directly
+     as the user, with `PAM_USER`, `PAM_SERVICE=sudo` and `PAM_TTY` set
+     (`docs/approve.md:270-290`).
+   - Test enroll and approve with fingerprint and with face, after an app
+     restart, and a cancel of the second prompt in the forced-fallback
+     debug build.
+   - Clean up:
+     - `sudo flux-cli approve remove`;
+     - `rmdir` of `/etc/flux/approve` and `/etc/flux` if they are empty;
+     - unpair, and remove the `fluxd` state the test made in the owner's
+       home, keeping `~/.local/share/flux/browser-extension`, which exists
+       today;
+     - uninstall the debug app.
+
+     The NixOS config and `/etc/pam.d` don't change.
+3. **The SSH key:** out of scope, for the reason in Constraints.
