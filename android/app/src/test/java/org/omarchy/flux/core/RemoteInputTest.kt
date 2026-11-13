@@ -167,6 +167,18 @@ class RemoteInputTest {
     }
 
     @Test
+    fun trackpadMoveIsTheTouchpadMoveDividedByTheZoom() {
+        val s = RemoteInput.pointerScale(5f)
+        val (x1, y1) = RemoteInput.trackpadMove(3f, 4f, 1f)
+        assertEquals("at zoom 1 it is the touchpad screen's move", 3f * s, x1, 0.0001f)
+        assertEquals(4f * s, y1, 0.0001f)
+        val (x4, y4) = RemoteInput.trackpadMove(3f, 4f, 4f)
+        assertEquals(x1 / 4, x4, 0.0001f)
+        assertEquals(y1 / 4, y4, 0.0001f)
+        assertEquals("a zoom under 1 counts as 1", x1, RemoteInput.trackpadMove(3f, 4f, 0.5f).first, 0.0001f)
+    }
+
+    @Test
     fun positionsOfTheRemoteDesktop() {
         val at = roundTrip(RemoteInput.at(0.123456f, 2f))
         assertEquals("0.1235", at.body["x"].toString())

@@ -15,10 +15,10 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -89,9 +89,12 @@ import kotlinx.coroutines.delay
 import org.omarchy.flux.core.DeviceUi
 import org.omarchy.flux.core.FluxCore
 import org.omarchy.flux.core.RemoteInput
+import org.omarchy.flux.core.ScrollMode
 import org.omarchy.flux.desktop.DesktopSession
 import org.omarchy.flux.desktop.DesktopViewport
 import org.omarchy.flux.desktop.ExtendSize
+import org.omarchy.flux.desktop.Finger
+import org.omarchy.flux.desktop.TrackpadGesture
 import org.omarchy.flux.protocol.Packet
 import org.omarchy.flux.voice.Dictation
 import org.omarchy.flux.voice.rememberVoiceTyping
@@ -121,7 +124,7 @@ private const val EXTEND_SETTLE_MS = 300L
  * monitor. The monitor goes away when the stream stops.
  */
 @Composable
-fun DesktopScreen(d: DeviceUi, onBack: () -> Unit, extend: Boolean = false) {
+fun DesktopScreen(d: DeviceUi, scroll: ScrollMode, onBack: () -> Unit, extend: Boolean = false) {
     val audio by DesktopSession.audio.collectAsState()
     val volume by DesktopSession.volume.collectAsState()
     val audioText = Tn.text
@@ -146,6 +149,9 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit, extend: Boolean = false) {
     // In landscape, a rail at the side holds the buttons, so that the video has the full height.
     val wide = ready && landscape
     val shown = panel.takeIf { control }
+    // The trackpad mode lasts for this visit. It is off without remote input.
+    var trackpad by rememberSaveable(d.id) { mutableStateOf(false) }
+    val pad = trackpad && control
     // A click, a dictation, or the Omarchy panel can move the cursor of the computer, so the type field then starts again.
     // It also starts again when the keys hide.
     val typing = remember(d.id) { RemoteTyping() }
@@ -184,6 +190,10 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit, extend: Boolean = false) {
         if (ready && control) {
             if (d.shortcutsSupported) PanelButton(Ic.grid, "Omarchy", shown == Panel.Omarchy) { toggle(Panel.Omarchy) }
             PanelButton(Ic.keyboard, "Keys", shown == Panel.Keys) { toggle(Panel.Keys) }
+            PanelButton(Ic.touchpad, "Trackpad", pad) {
+                trackpad = !trackpad
+                FluxCore.toast(if (trackpad) "Trackpad: 1 finger moves the pointer, a tap clicks" else "Touch: a tap clicks at the finger")
+            }
             if (voice.available) {
                 // Green marks a live microphone, as the privacy dot of Android does.
                 PanelButton(Ic.mic, if (dictating) "Stop dictation" else "Dictate", dictating, Tn.green) {
@@ -237,12 +247,18 @@ fun DesktopScreen(d: DeviceUi, onBack: () -> Unit, extend: Boolean = false) {
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             SquareButton(Ic.back, "Back", onBack)
-                            Spacer(Modifier.weight(1f))
-                            buttons()
+                            // The buttons keep the bottom of the rail, and scroll when they don't fit, for example with the phone keyboard open.
+                            BoxWithConstraints(Modifier.weight(1f)) {
+                                Column(
+                                    Modifier.verticalScroll(rememberScrollState()).heightIn(min = maxHeight),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.Bottom),
+                                ) { buttons() }
+                            }
                         }
                     }
                     Column(Modifier.weight(1f).fillMaxHeight()) {
-                        RemoteDesktop(d, monitor, extend, extendSize, wide, hint = shown == null && !wide, onClick = typing::end)
+                        RemoteDesktop(d, monitor, extend, extendSize, wide, hint = shown == null && !wide, trackpad = pad, scroll = scroll, onClick = typing::end)
                     }
                     if (wide) {
                         when (shown) {
@@ -330,7 +346,8 @@ private fun sendInput(d: DeviceUi, p: Packet) {
  * The video of the computer screen, with its gestures. The stream runs
  * while the app shows. [hint] shows the gestures under the video.
  * [onClick] runs for each click and each drag on the computer. With
- * [extend], the stream starts after the video has its size in landscape,
+ * [trackpad], the video works as a touchpad, see trackpadGestures. [scroll]
+ * is the touchpad's scroll setting. With [extend], the stream starts after the video has its size in landscape,
  * see [wide], and [extendSize] keeps that size.
  */
 @Composable
@@ -341,6 +358,8 @@ private fun ColumnScope.RemoteDesktop(
     extendSize: MutableState<ExtendSize?>,
     wide: Boolean,
     hint: Boolean,
+    trackpad: Boolean,
+    scroll: ScrollMode,
     onClick: () -> Unit,
 ) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -411,15 +430,36 @@ private fun ColumnScope.RemoteDesktop(
     // A new view size keeps the zoom, and a new video size starts at scale 1, see DesktopViewport.resized.
     val vp = viewport.value.resized(box.width.toFloat(), box.height.toFloat(), videoW, videoH, focus)
     SideEffect { viewport.value = vp }
+    // The release skips the control gate of send, so a button pressed with control is released after control ends.
+    val release by rememberUpdatedState { RemoteInput.send(FluxCore, d.id, RemoteInput.hold(false)); Unit }
+    // The gestures start once per key, so they read control through this state.
+    val controlState = rememberUpdatedState(control)
+    // The gestures start once per key, so they read the direction through this state.
+    val natural = rememberUpdatedState(RemoteInput.naturalScroll(scroll, d.naturalScroll))
     val clicked by rememberUpdatedState { p: Pair<Float, Float> ->
         focus = p
         if (control) onClick()
     }
+    // A trackpad click has no position on the view, so the view keeps its center when the keyboard opens.
+    val padClicked by rememberUpdatedState {
+        focus = null
+        if (control) onClick()
+    }
+    LaunchedEffect(trackpad) { if (trackpad) focus = null }
     // The gestures work only on a live video. Over a wait or an error, a tap must not click on the computer.
-    val gestures = if (live && status.width > 0) {
-        Modifier.desktopGestures(viewport, { viewport.value = it }, { send(it) }, { clicked(it) }) { haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
-    } else {
-        Modifier
+    val gestures = when {
+        !(live && status.width > 0) -> Modifier
+        trackpad -> Modifier.trackpadGestures(viewport, natural, { viewport.value = it }, { send(it) }, { release() }, { padClicked() }) {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        }
+        else -> Modifier.desktopGestures(viewport, controlState, { viewport.value = it }, { send(it) }, { release() }, { clicked(it) }) {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        }
+    }
+    // The pointer starts where the user looks. A relative move can't find it on another monitor.
+    val videoReady = live && status.width > 0 && box != IntSize.Zero
+    LaunchedEffect(trackpad, videoReady, status.monitor) {
+        if (trackpad && videoReady) vp.toVideo(box.width / 2f, box.height / 2f, clamp = true)?.let { (x, y) -> send(RemoteInput.at(x, y)) }
     }
     Box(Modifier.weight(1f).fillMaxWidth().clipToBounds().background(Color.Black).onSizeChanged { box = it }.then(gestures)) {
         if (box != IntSize.Zero) {
@@ -449,8 +489,11 @@ private fun ColumnScope.RemoteDesktop(
     }
     if (hint) {
         T(
-            if (control) "Tap clicks · hold for the right button · hold, then move to drag\n2 fingers scroll · pinch zooms · 1 finger moves the zoomed view"
-            else "View only · pinch zooms · 1 finger moves the zoomed view",
+            when {
+                trackpad -> "1 finger moves the pointer · tap clicks · hold, then move to drag\n2 fingers scroll · tap with 2 for the right button · pinch zooms · 3 fingers move the zoomed view"
+                control -> "Tap clicks · hold for the right button · hold, then move to drag\n2 fingers scroll · pinch zooms · 1 finger moves the zoomed view"
+                else -> "View only · pinch zooms · 1 finger moves the zoomed view"
+            },
             Modifier.fillMaxWidth().padding(horizontal = TiledGutter, vertical = 8.dp),
             size = 11, color = Tn.sub, align = TextAlign.Center, lineHeight = 1.5f,
         )
@@ -519,125 +562,220 @@ private class Tap(val time: Long, val point: Offset, val position: Pair<Float, F
  * still clicks the right button, or drags when it then moves. 2 fingers
  * scroll, and a tap with 2 fingers clicks the right button. A pinch zooms,
  * and 1 finger moves the zoomed view. [onClick] gets the position of each
- * click and each drag start. [onHold] runs when a finger holds.
+ * click and each drag start. [onHold] runs when a finger holds. [release]
+ * lets go of the left button without the control gate; it runs once when a
+ * drag ends without its lift.
  */
 private fun Modifier.desktopGestures(
     viewport: State<DesktopViewport>,
+    control: State<Boolean>,
     onViewport: (DesktopViewport) -> Unit,
     send: (Packet) -> Unit,
+    release: () -> Unit,
     onClick: (Pair<Float, Float>) -> Unit,
     onHold: () -> Unit,
-): Modifier = pointerInput(viewport) {
+): Modifier = pointerInput("touch", viewport) {
     val slop = viewConfiguration.touchSlop
     val doubleTap = DoubleTapDistance.toPx()
     var lastTap: Tap? = null
     awaitEachGesture {
-        val first = awaitFirstDown(requireUnconsumed = false)
-        val start = first.position
-        val holdAt = first.uptimeMillis + DESKTOP_HOLD_MS
-        var mode = Touch.Pending
-        var last = start
-        var ids = listOf(first.id)
-        var startCentroid = start
-        var startSpan = 0f
-        var lastCentroid = start
-        var lastSpan = 0f
-        fun video(p: Offset, clamp: Boolean = false) = viewport.value.toVideo(p.x, p.y, clamp)
+        // True while the computer holds the left button for a drag.
+        var buttonDown = false
+        try {
+            val first = awaitFirstDown(requireUnconsumed = false)
+            val start = first.position
+            val holdAt = first.uptimeMillis + DESKTOP_HOLD_MS
+            var mode = Touch.Pending
+            var cancelled = false
+            var last = start
+            var ids = listOf(first.id)
+            var startCentroid = start
+            var startSpan = 0f
+            var lastCentroid = start
+            var lastSpan = 0f
+            fun video(p: Offset, clamp: Boolean = false) = viewport.value.toVideo(p.x, p.y, clamp)
 
-        while (true) {
-            val event = if (mode == Touch.Pending) {
-                val left = holdAt - SystemClock.uptimeMillis()
-                if (left > 0) withTimeoutOrNull(left) { awaitPointerEvent() } else null
-            } else {
-                awaitPointerEvent()
-            }
-            if (event == null) {
-                // The finger held still: the pointer goes under it.
-                mode = Touch.Held
-                onHold()
-                video(start)?.let { (x, y) -> send(RemoteInput.at(x, y)) }
-                continue
-            }
-            val down = event.changes.filter { it.pressed }
-            if (down.isEmpty()) break
-            val nowIds = down.map { it.id }
-            if (down.size >= 2 && (mode == Touch.Pending || mode == Touch.Pan)) {
-                mode = Touch.Multi
-                startCentroid = centroid(down)
-                startSpan = span(down, startCentroid)
-            }
-            when (mode) {
-                Touch.Pending, Touch.Pan -> {
-                    val p = down[0].position
-                    if (mode == Touch.Pending && (p - start).getDistance() >= slop) mode = Touch.Pan
-                    if (mode == Touch.Pan) onViewport(viewport.value.pan(p.x - last.x, p.y - last.y))
-                    if (mode == Touch.Pan) last = p
+            while (true) {
+                val event = if (mode == Touch.Pending) {
+                    val left = holdAt - SystemClock.uptimeMillis()
+                    if (left > 0) withTimeoutOrNull(left) { awaitPointerEvent() } else null
+                } else {
+                    awaitPointerEvent()
                 }
-                Touch.Held, Touch.Drag -> {
-                    val p = (down.firstOrNull { it.id == first.id } ?: down[0]).position
-                    if (mode == Touch.Held && (p - start).getDistance() >= slop) {
-                        mode = Touch.Drag
-                        video(start, clamp = true)?.let { (x, y) ->
-                            onClick(x to y)
-                            send(RemoteInput.holdAt(true, x, y))
-                        }
+                if (event == null) {
+                    // The finger held still: the pointer goes under it.
+                    mode = Touch.Held
+                    onHold()
+                    video(start)?.let { (x, y) -> send(RemoteInput.at(x, y)) }
+                    continue
+                }
+                val down = event.changes.filter { it.pressed }
+                if (down.isEmpty()) {
+                    // Compose marks the changes of a cancelled touch as consumed when they arrive.
+                    cancelled = event.changes.any { it.isConsumed }
+                    break
+                }
+                val nowIds = down.map { it.id }
+                if (down.size >= 2 && (mode == Touch.Pending || mode == Touch.Pan)) {
+                    mode = Touch.Multi
+                    startCentroid = centroid(down)
+                    startSpan = span(down, startCentroid)
+                }
+                when (mode) {
+                    Touch.Pending, Touch.Pan -> {
+                        val p = down[0].position
+                        if (mode == Touch.Pending && (p - start).getDistance() >= slop) mode = Touch.Pan
+                        if (mode == Touch.Pan) onViewport(viewport.value.pan(p.x - last.x, p.y - last.y))
+                        if (mode == Touch.Pan) last = p
                     }
-                    if (mode == Touch.Drag && p != last) video(p, clamp = true)?.let { (x, y) -> send(RemoteInput.at(x, y)) }
-                    last = p
-                }
-                Touch.Multi, Touch.Pinch, Touch.Scroll -> if (down.size >= 2) {
-                    val c = centroid(down)
-                    val s = span(down, c)
-                    // A finger that lands or lifts moves the center. The next motion starts from there.
-                    if (nowIds == ids) {
-                        if (mode == Touch.Multi) {
-                            if (abs(s - startSpan) > slop) {
-                                mode = Touch.Pinch
-                            } else if ((c - startCentroid).getDistance() > slop) {
-                                mode = Touch.Scroll
-                                // The scroll goes to the window under the fingers.
-                                video(startCentroid)?.let { (x, y) -> send(RemoteInput.at(x, y)) }
+                    Touch.Held, Touch.Drag -> {
+                        val p = (down.firstOrNull { it.id == first.id } ?: down[0]).position
+                        if (mode == Touch.Held && (p - start).getDistance() >= slop) {
+                            mode = Touch.Drag
+                            video(start, clamp = true)?.let { (x, y) ->
+                                onClick(x to y)
+                                send(RemoteInput.holdAt(true, x, y))
+                                // send drops the packet without control.
+                                if (control.value) buttonDown = true
                             }
                         }
-                        val v = viewport.value
-                        when (mode) {
-                            Touch.Pinch -> onViewport(
-                                v.zoom(if (lastSpan > 0f) s / lastSpan else 1f, lastCentroid.x, lastCentroid.y, c.x - lastCentroid.x, c.y - lastCentroid.y),
-                            )
-                            // Natural scrolling: the content follows the fingers.
-                            Touch.Scroll -> send(RemoteInput.scroll(-(c.x - lastCentroid.x) / v.pixel, -(c.y - lastCentroid.y) / v.pixel))
-                            else -> Unit
-                        }
+                        if (mode == Touch.Drag && p != last) video(p, clamp = true)?.let { (x, y) -> send(RemoteInput.at(x, y)) }
+                        last = p
                     }
-                    lastCentroid = c
-                    lastSpan = s
+                    Touch.Multi, Touch.Pinch, Touch.Scroll -> if (down.size >= 2) {
+                        val c = centroid(down)
+                        val s = span(down, c)
+                        // A finger that lands or lifts moves the center. The next motion starts from there.
+                        if (nowIds == ids) {
+                            if (mode == Touch.Multi) {
+                                if (abs(s - startSpan) > slop) {
+                                    mode = Touch.Pinch
+                                } else if ((c - startCentroid).getDistance() > slop) {
+                                    mode = Touch.Scroll
+                                    // The scroll goes to the window under the fingers.
+                                    video(startCentroid)?.let { (x, y) -> send(RemoteInput.at(x, y)) }
+                                }
+                            }
+                            val v = viewport.value
+                            when (mode) {
+                                Touch.Pinch -> onViewport(
+                                    v.zoom(if (lastSpan > 0f) s / lastSpan else 1f, lastCentroid.x, lastCentroid.y, c.x - lastCentroid.x, c.y - lastCentroid.y),
+                                )
+                                // Natural scrolling: the content follows the fingers.
+                                Touch.Scroll -> send(RemoteInput.scroll(-(c.x - lastCentroid.x) / v.pixel, -(c.y - lastCentroid.y) / v.pixel))
+                                else -> Unit
+                            }
+                        }
+                        lastCentroid = c
+                        lastSpan = s
+                    }
                 }
+                ids = nowIds
+                event.changes.forEach { it.consume() }
             }
-            ids = nowIds
-            event.changes.forEach { it.consume() }
-        }
-        when (mode) {
-            Touch.Pending -> video(start)?.let { position ->
-                val now = SystemClock.uptimeMillis()
-                val prev = lastTap
-                val at = if (prev != null && now - prev.time < DOUBLE_TAP_MS && (start - prev.point).getDistance() < doubleTap) prev.position else position
-                onClick(at)
-                send(RemoteInput.clickAt(RemoteInput.Click.Left, at.first, at.second))
-                lastTap = Tap(now, start, at)
+            if (!cancelled) when (mode) {
+                Touch.Pending -> video(start)?.let { position ->
+                    val now = SystemClock.uptimeMillis()
+                    val prev = lastTap
+                    val at = if (prev != null && now - prev.time < DOUBLE_TAP_MS && (start - prev.point).getDistance() < doubleTap) prev.position else position
+                    onClick(at)
+                    send(RemoteInput.clickAt(RemoteInput.Click.Left, at.first, at.second))
+                    lastTap = Tap(now, start, at)
+                }
+                Touch.Held -> video(start)?.let { (x, y) ->
+                    onClick(x to y)
+                    send(RemoteInput.clickAt(RemoteInput.Click.Right, x, y))
+                }
+                Touch.Drag -> video(last, clamp = true)?.let { (x, y) ->
+                    send(RemoteInput.holdAt(false, x, y))
+                    // Without control send drops it, and the finally releases.
+                    if (control.value) buttonDown = false
+                }
+                Touch.Multi -> video(startCentroid)?.let { (x, y) ->
+                    onClick(x to y)
+                    send(RemoteInput.clickAt(RemoteInput.Click.Right, x, y))
+                }
+                else -> Unit
             }
-            Touch.Held -> video(start)?.let { (x, y) ->
-                onClick(x to y)
-                send(RemoteInput.clickAt(RemoteInput.Click.Right, x, y))
-            }
-            Touch.Drag -> video(last, clamp = true)?.let { (x, y) -> send(RemoteInput.holdAt(false, x, y)) }
-            Touch.Multi -> video(startCentroid)?.let { (x, y) ->
-                onClick(x to y)
-                send(RemoteInput.clickAt(RemoteInput.Click.Right, x, y))
-            }
-            else -> Unit
+        } finally {
+            // The gesture's coroutine ends without a lift: a mode change, the stream or the screen stops.
+            if (buttonDown) release()
         }
     }
 }
+
+/**
+ * The gestures of the trackpad mode, see TrackpadGesture. The video box
+ * has no child that takes touches, so a change that arrives consumed is a
+ * cancelled touch. A child that takes touches must change that test.
+ * [onClick] runs for each click and each hold, [onHold] when a finger holds.
+ */
+private fun Modifier.trackpadGestures(
+    viewport: State<DesktopViewport>,
+    natural: State<Boolean>,
+    onViewport: (DesktopViewport) -> Unit,
+    send: (Packet) -> Unit,
+    release: () -> Unit,
+    onClick: () -> Unit,
+    onHold: () -> Unit,
+): Modifier = pointerInput("trackpad", viewport) {
+    val slop = viewConfiguration.touchSlop
+    val dpPerPx = 1f / 1.dp.toPx()
+    awaitEachGesture {
+        val g = TrackpadGesture(slop, dpPerPx)
+        fun act(outs: List<TrackpadGesture.Out>) = outs.forEach { o ->
+            when (o) {
+                is TrackpadGesture.Out.Move -> send(RemoteInput.move(o.dx, o.dy))
+                is TrackpadGesture.Out.Scroll -> send(RemoteInput.touchpadScroll(o.dx, o.dy, natural.value))
+                is TrackpadGesture.Out.Click -> {
+                    onClick()
+                    send(RemoteInput.click(o.button))
+                }
+                is TrackpadGesture.Out.Hold -> if (o.down) {
+                    onHold()
+                    onClick()
+                    send(RemoteInput.hold(true))
+                } else {
+                    release()
+                }
+                is TrackpadGesture.Out.Pan -> onViewport(viewport.value.pan(o.dx, o.dy))
+                is TrackpadGesture.Out.Zoom -> onViewport(viewport.value.zoom(o.factor, o.x, o.y, o.dx, o.dy))
+            }
+        }
+        try {
+            val first = awaitFirstDown(requireUnconsumed = false)
+            val holdAt = first.uptimeMillis + DESKTOP_HOLD_MS
+            // Two fingers can land in the first event.
+            val firstDown = currentEvent.changes.filter { it.pressed }.ifEmpty { listOf(first) }
+            act(g.fingers(firstDown.map { it.finger() }, viewport.value.scale))
+            while (true) {
+                val event = if (g.waitsForHold) {
+                    val left = holdAt - SystemClock.uptimeMillis()
+                    if (left > 0) withTimeoutOrNull(left) { awaitPointerEvent() } else null
+                } else {
+                    awaitPointerEvent()
+                }
+                if (event == null) {
+                    act(g.holdTimeout())
+                    continue
+                }
+                val down = event.changes.filter { it.pressed }
+                if (down.isEmpty()) {
+                    // Compose marks the changes of a cancelled touch as consumed when they arrive.
+                    act(g.end(cancelled = event.changes.any { it.isConsumed }))
+                    break
+                }
+                act(g.fingers(down.map { it.finger() }, viewport.value.scale))
+                event.changes.forEach { it.consume() }
+            }
+        } finally {
+            // The gesture's coroutine ends without a lift: a mode change, the stream or the screen stops.
+            if (g.pressed) release()
+        }
+    }
+}
+
+private fun PointerInputChange.finger() = Finger(id.value, position.x, position.y)
 
 private fun centroid(down: List<PointerInputChange>): Offset {
     var sum = Offset.Zero

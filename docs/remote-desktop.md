@@ -206,6 +206,28 @@ The point of your last tap stays in view, for example the text field that you ta
 Pinch to see more of the screen.
 A rotation of the phone shows the full screen again.
 
+## Use the trackpad (Android)
+
+On the Android phone or tablet, select the trackpad button next to the keys button.
+The video then works as a touchpad, and the pointer goes to the middle of the view.
+Select the button again to use the touches.
+
+| Gesture | Result |
+| --- | --- |
+| Move 1 finger | Move the pointer. On a zoomed view, the pointer moves less, so it stays with the finger. |
+| Tap | Click at the pointer |
+| Tap 2 times fast | Double-click |
+| Hold 1 finger still, then lift it | Click |
+| Hold 1 finger still, then move it | Drag. The drag ends when the finger lifts. |
+| Move 2 fingers | Scroll, in the direction of the touchpad setting |
+| Tap with 2 fingers | Right-click |
+| Tap with 3 fingers | Middle-click |
+| Pinch | Zoom the view on the phone, up to 6 times |
+| Move 3 fingers | Move the zoomed view |
+
+When the keys or the phone keyboard open, the view keeps its middle.
+The trackpad stays on until you leave the screen.
+
 ## Move around Omarchy
 
 Select the grid button to show the Omarchy panel.
