@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 12
 spec: spec/2026-11-13-12-webcam-torch.md
 coders:
