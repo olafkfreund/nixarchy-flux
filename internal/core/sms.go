@@ -311,10 +311,18 @@ func (d *Daemon) SendSms(dev *Device, addresses []string, body string) error {
 		return apiErr("bad_params", "The message has %d characters. Send at most %d", n, maxSmsSend)
 	}
 	d.mu.Lock()
+	// A device gets its features from its identity when it connects, so an
+	// offline device has none yet. An offline or unpaired device gets its
+	// error from d.send.
+	off := dev.Paired && dev.link != nil && !dev.supports(proto.TypeSmsMessages)
+	name := dev.Name
 	sub := conversationSim(dev.conversations, clean)
 	d.mu.Unlock()
+	if off {
+		return apiErr("not_supported", "%s does not share text messages. Turn on Text messages in Computers > Sync on the phone", name)
+	}
 	if len(list) > 1 {
-		return apiErr("unsupported", "%s sends a text message to 1 address. Send group messages on the phone", dev.Name)
+		return apiErr("unsupported", "%s sends a text message to 1 address. Send group messages on the phone", name)
 	}
 	b := map[string]any{"version": 2, "addresses": list, "messageBody": body}
 	if sub >= 0 {

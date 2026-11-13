@@ -306,6 +306,33 @@ func TestSendSmsLength(t *testing.T) {
 	}
 }
 
+// TestSmsSendNeedsTextMessages checks that a connected phone without
+// Text messages refuses a send at once and keeps no entry, and that an
+// unpaired phone still gets not_paired.
+func TestSmsSendNeedsTextMessages(t *testing.T) {
+	d, dev, fromDesk := smsDaemon(t)
+	d.mu.Lock()
+	dev.Outgoing = nil
+	d.mu.Unlock()
+	if err := d.SendSms(dev, []string{"+4791234567"}, "Hi"); errCode(err) != "not_supported" {
+		t.Fatalf("send: %v", err)
+	}
+	if got := outboxOf(t, d); len(got) != 0 {
+		t.Fatalf("outbox %+v", got)
+	}
+	select {
+	case p := <-fromDesk:
+		t.Fatalf("the phone got %s", p.Type)
+	case <-time.After(200 * time.Millisecond):
+	}
+	d.mu.Lock()
+	dev.Paired = false
+	d.mu.Unlock()
+	if err := d.SendSms(dev, []string{"+4791234567"}, "Hi"); errCode(err) != "not_paired" {
+		t.Fatalf("send to an unpaired phone: %v", err)
+	}
+}
+
 func TestSamePhone(t *testing.T) {
 	cases := []struct {
 		a, b string
