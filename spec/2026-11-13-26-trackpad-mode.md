@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 26
 intent: intent/2026-11-13-26-trackpad-mode.md
 ---
