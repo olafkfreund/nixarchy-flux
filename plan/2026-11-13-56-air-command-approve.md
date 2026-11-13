@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 56
 spec: spec/2026-11-13-56-air-command-approve.md
 coders:
