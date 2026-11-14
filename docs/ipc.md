@@ -442,6 +442,7 @@ It stops an automatic image send at once, and a text send before its next device
 A send that passed its check just before the pause can still go out; it holds a copy from before the pause.
 Every copy made while paused is dropped, however late its record arrives.
 A copy made in the 250 ms after a resume is dropped too, so a new copy in that time isn't synced.
+The watcher ignores a repeat of the last copy at any time, so a value copied while paused doesn't sync by copying it again after the resume; copy something different or send it by hand.
 The 250 ms count from the start of the watcher script, so on a very loaded machine a copy whose script starts more than 250 ms after the copy, with a resume in between, can still sync.
 Manual `clipboard.send` still works while paused, and clips from devices still arrive.
 Both methods are idempotent, and the last call wins.

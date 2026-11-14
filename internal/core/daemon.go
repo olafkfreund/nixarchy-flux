@@ -65,7 +65,7 @@ type Daemon struct {
 	clipPauseFile string
 	pauseMu       sync.Mutex
 	// clipHook is nil in production. A test sets it to act at a stage of
-	// an automatic send: "image", "image-send", "image-end" or "text". It
+	// an automatic send: "image", "image-end" or "text". It
 	// runs without mu.
 	clipHook       func(stage string)
 	transfers      []*Transfer

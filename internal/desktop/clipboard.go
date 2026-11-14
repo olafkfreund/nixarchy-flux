@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -68,6 +69,9 @@ type Clipboard struct {
 	// clipboard and that Watch did not see yet, the oldest first. 2 fast
 	// writes can come before Watch sees the first one.
 	written []string
+
+	// badTime is set once record logged a time line that doesn't parse.
+	badTime bool
 }
 
 // NewClipboard returns a clipboard that uses wl-paste and wl-copy.
@@ -142,6 +146,13 @@ func (c *Clipboard) watchOnce(ctx context.Context, typ string, onText func(strin
 func (c *Clipboard) record(typ string, lines [4]string, initial bool, onText func(string, time.Duration), onImage func([]byte, string, time.Duration)) {
 	at, err := time.ParseDuration(lines[0] + "s")
 	if err != nil || at < 0 {
+		c.mu.Lock()
+		logged := c.badTime
+		c.badTime = true
+		c.mu.Unlock()
+		if !logged {
+			log.Printf("clipboard: dropping a copy with a bad time line %q (is /proc/uptime readable?)", lines[0])
+		}
 		return
 	}
 	state, encoded, types := lines[1], lines[2], strings.Fields(lines[3])

@@ -133,8 +133,9 @@ The [workflow controls](workflows.md) add an offline desktop outbox, folder arch
 `flux-cli clipboard status` prints `paused`, `syncing`, or `off` when `auto_clipboard` is off.
 While paused, a copy stays on this computer: no device gets it, the history doesn't keep it, and a device that connects later doesn't get it.
 Sending the clipboard by hand (`flux-cli clip`, Send clipboard) still works, and clips from your devices still arrive.
-The pause doesn't change `config.toml`. It survives a restart of fluxd, and ends at reboot.
-A new copy in the first 250 ms after a resume isn't synced. If you need it on a device, copy something different or send it by hand.
+The pause doesn't change `config.toml`. It survives a restart of fluxd, and ends at reboot, and at logout when lingering is off.
+A new copy in the first 250 ms after a resume isn't synced.
+The watcher also ignores a repeat of the last copy at any time, so a value you copied while paused doesn't sync when you copy it again after the resume. Copy something different, or send it by hand.
 The Chat page shows "Clipboard sync paused" with Resume, and the bar mark dims.
 
 A clipboard manager's private mode can run `flux-cli clipboard pause` when it starts and `flux-cli clipboard resume` when it ends.

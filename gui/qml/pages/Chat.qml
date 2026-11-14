@@ -198,6 +198,7 @@ Item {
   // Search, saved clips, and Clear.
   Item {
     id: toolbar
+    objectName: "chatToolbar"
     width: parent.width
     height: search.implicitHeight
 

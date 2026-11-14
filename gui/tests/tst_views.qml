@@ -1256,7 +1256,9 @@ Item {
       var list = findBy(page(view), "objectName", "chatList")
       verify(list.y >= row.y + row.height)
       var text = findBy(page(view), "objectName", "clipPausedText")
+      var button = findBy(page(view), "objectName", "clipResume")
       verify(text.contentWidth <= text.width)
+      verify(text.x + text.width <= button.x)
       compare(text.wrapMode, Text.Wrap)
       view.selectedId = top.iphone
       tryVerify(function () { var r = findBy(page(view), "objectName", "clipPaused"); return !!r && r.visible })
@@ -1269,6 +1271,9 @@ Item {
     function test_noPausedLineWhileSyncing() {
       var view = chat()
       verify(!findBy(page(view), "objectName", "clipPaused").visible)
+      var bar = findBy(page(view), "objectName", "chatToolbar")
+      var list = findBy(page(view), "objectName", "chatList")
+      compare(list.y, bar.y + bar.height + 14)
     }
 
     // At a compact width the text wraps beside the button.
@@ -1279,7 +1284,9 @@ Item {
       tryVerify(function () { return page(view).compact })
       var text = findBy(page(view), "objectName", "clipPausedText")
       verify(text.lineCount > 1)
+      var button = findBy(page(view), "objectName", "clipResume")
       verify(text.contentWidth <= text.width)
+      verify(text.x + text.width <= button.x)
     }
 
     function test_textGoesToTheClipboardOfTheDevice() {

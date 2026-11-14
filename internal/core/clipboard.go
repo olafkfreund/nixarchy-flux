@@ -334,9 +334,14 @@ func writePauseFile(path string) error {
 // loadClipPause sets the marker path and starts paused when it exists.
 func (d *Daemon) loadClipPause(path string) {
 	d.clipPauseFile = path
-	if _, err := os.Stat(path); err == nil {
+	// Any error but "no marker" fails closed: a copy must not leak.
+	_, err := os.Stat(path)
+	if err == nil {
 		d.clipPaused = true
 		d.logf("clipboard sync is paused (%s)", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		d.clipPaused = true
+		d.logf("clipboard sync is paused, the marker can't be read: %v", err)
 	}
 }
 
@@ -448,7 +453,6 @@ func (d *Daemon) onLocalImage(data []byte, mime string, at time.Duration) {
 			if !ok || ctx.Err() != nil {
 				continue
 			}
-			d.hook("image-send")
 			lctx, lcancel := context.WithCancel(ctx)
 			cancelOnLinkDown(lctx, t.l, lcancel)
 			err := sendClipImage(lctx, t.l, data, mime)

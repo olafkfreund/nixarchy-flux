@@ -823,11 +823,13 @@ func TestPausedText(t *testing.T) {
 func TestPausedImage(t *testing.T) {
 	d, _ := clipDaemon(t, true)
 	d.devices["phone"] = &Device{ID: "phone", Paired: true}
+	d.onLocalClipboard("before", desktop.BootTime())
 	if err := d.PauseClipboard(); err != nil {
 		t.Fatal(err)
 	}
+	local, at := d.lastLocalClip, d.lastClipAt
 	d.onLocalImage(testPNG(1), "image/png", desktop.BootTime())
-	if len(d.clipboard) != 0 || clipFiles(t, d.clipDir) != 0 || d.clipSend != nil || d.lastClipAt.IsZero() {
+	if len(d.clipboard) != 1 || clipFiles(t, d.clipDir) != 0 || d.clipSend != nil || !d.lastLocalClip.Equal(local) || !d.lastClipAt.After(at) {
 		t.Fatalf("history %+v, %d files", d.clipboard, clipFiles(t, d.clipDir))
 	}
 }
@@ -844,9 +846,14 @@ func TestLateRecordsAfterResume(t *testing.T) {
 		d.onLocalClipboard(fmt.Sprint("late ", at), at)
 		d.onLocalImage(testPNG(1), "image/png", at)
 	}
+	grace1 := afterGrace(d)
+	time.Sleep(2 * time.Millisecond)
 	_ = d.PauseClipboard()
 	_ = d.ResumeClipboard()
-	d.onLocalClipboard("first cycle", paused)
+	// grace1 is after cycle 1's grace but inside cycle 2's.
+	for _, at := range []time.Duration{paused, grace1} {
+		d.onLocalClipboard("first cycle", at)
+	}
 	if len(d.clipboard) != 0 || clipFiles(t, d.clipDir) != 0 || d.content.lastClip != "" {
 		t.Fatalf("history %+v", d.clipboard)
 	}
@@ -864,7 +871,14 @@ func TestConnectAfterPause(t *testing.T) {
 	d, _ := clipDaemon(t, true)
 	d.onLocalClipboard("before", desktop.BootTime())
 	_ = d.PauseClipboard()
+	// Only the pause check may stop this send.
+	d.mu.Lock()
+	d.content.lastClip, d.lastLocalClip = "stale", time.Now()
+	d.mu.Unlock()
 	d.sendConnectClipboard(onDesk)
+	d.mu.Lock()
+	d.content.lastClip = ""
+	d.mu.Unlock()
 	_ = d.ResumeClipboard()
 	d.sendConnectClipboard(onDesk)
 	d.onLocalClipboard("after", afterGrace(d))
@@ -993,6 +1007,7 @@ func TestOldTextKeepsNewerImage(t *testing.T) {
 // write fail after the file exists, with part of the data in it.
 func TestFailedImageSave(t *testing.T) {
 	signal.Ignore(syscall.SIGXFSZ)
+	t.Cleanup(func() { signal.Reset(syscall.SIGXFSZ) })
 	var old syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &old); err != nil {
 		t.Fatal(err)
@@ -1100,6 +1115,19 @@ func TestPauseSurvivesSettings(t *testing.T) {
 	}
 }
 
+// A resume while syncing opens no new grace.
+func TestResumeWhileSyncing(t *testing.T) {
+	d, _ := clipDaemon(t, true)
+	_ = d.PauseClipboard()
+	_ = d.ResumeClipboard()
+	first := d.resumedAt
+	time.Sleep(2 * time.Millisecond)
+	_ = d.ResumeClipboard()
+	if d.resumedAt != first {
+		t.Fatalf("resumedAt moved from %v to %v", first, d.resumedAt)
+	}
+}
+
 // The marker keeps the pause over a restart, and a failed write or
 // removal gives not_saved with the pause in memory as asked.
 func TestClipPauseMarker(t *testing.T) {
@@ -1125,6 +1153,16 @@ func TestClipPauseMarker(t *testing.T) {
 	}
 	if err := d.ResumeClipboard(); err != nil {
 		t.Fatal("a second resume:", err)
+	}
+	// A marker that can't be read fails closed.
+	f, _ := clipDaemon(t, true)
+	plain := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(plain, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.loadClipPause(filepath.Join(plain, "marker")) // ENOTDIR
+	if !f.clipPaused {
+		t.Fatal("an unreadable marker did not pause")
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the marker stays: %v", err)

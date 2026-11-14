@@ -209,6 +209,9 @@ func TestClipboardRecordTime(t *testing.T) {
 		c.record("text", [4]string{bad, "data", enc([]byte("bad " + bad)), "text/plain"}, false, onText, onImage)
 	}
 	c.record("text", [4]string{"12345.67", "data", enc([]byte("good")), "text/plain"}, false, onText, onImage)
+	if !c.badTime {
+		t.Fatal("the bad time line was not logged")
+	}
 	if !slices.Equal(texts, []string{"good"}) || ats[0] != 12345*time.Second+670*time.Millisecond {
 		t.Fatalf("texts %q at %v", texts, ats)
 	}
