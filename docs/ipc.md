@@ -58,7 +58,8 @@ Method names and parameter handling live in `internal/core/api.go`.
 ## State and events
 
 Call `state` for a snapshot.
-The snapshot includes `self`, `devices`, `approvals`, `clipboard`, `transfers`, `commands`, `settings`, `webcam`, `mic`, `screen`, `desktop`, `speaker`, `browse`, `herdr`, and `motion`.
+The snapshot includes `self`, `devices`, `approvals`, `clipboard`, `clipboardPaused`, `transfers`, `commands`, `settings`, `webcam`, `mic`, `screen`, `desktop`, `speaker`, `browse`, `herdr`, and `motion`.
+`clipboardPaused` is true while `clipboard.pause` holds. It survives a restart of fluxd, not a reboot.
 `motion` is the state of the [motion cues](motion-cues.md): `running`, the feeding `device` and its `deviceName`, `auto` for a start of vehicle detection, `active` while fresh motion arrives, and the last phone `error`.
 `browse` lists the [Browse PC](features.md#browse-pc) sessions, the oldest first: the `device` ID, the `name`, and `since`, the Unix time of the start.
 `approvals` lists the requests that wait for a phone, `sudo` before `ssh`, then the oldest first: `kind` (`sudo` or `ssh`), the `device` ID, and `since`, the Unix time when the wait started.
@@ -180,7 +181,7 @@ A device that is not paired shows only while it has a link.
 | Pairing | `pair.address`, `pair.request`, `pair.accept`, `pair.reject`, `pair.unpair` |
 | Addresses | `addresses.add`, `addresses.remove` |
 | Device | `ring`, `ping`, `dnd.set` |
-| Sharing | `clipboard.send`, `clipboard.copy`, `share.files`, `share.text`, `share.url`, `transfer.cancel`, `transfer.open`, `transfer.copy` |
+| Sharing | `clipboard.send`, `clipboard.copy`, `clipboard.pause`, `clipboard.resume`, `share.files`, `share.text`, `share.url`, `transfer.cancel`, `transfer.open`, `transfer.copy` |
 | Commands | `commands.add`, `commands.remove`, `commands.run` |
 | Notifications | `notification.dismiss`, `notification.dismissAll`, `notification.reply`, `notification.action`, `notify.send` |
 | Text messages | `sms.refresh`, `sms.thread`, `sms.send` |
@@ -216,6 +217,7 @@ Without `device`, a method uses the only connected paired device.
 | `dnd.set` | `device`, and `on` (`true` or `false`). It sets Do Not Disturb on that phone only and returns `{"sent":true}`. The phone's next `dnd` report shows the result. Errors: `bad_params` without `on`, `not_supported` when the device lacks `dnd` in `plugins`, `offline` without a link. |
 | `clipboard.send` | `device`, and `text`. Without `text`, the clipboard of the computer. |
 | `clipboard.copy` | `id` of an entry, or `text`, or `path` of an image in the history |
+| `clipboard.pause`, `clipboard.resume` | None |
 | `share.files` | `device`, and `paths`, a list of absolute paths. The result has the IDs of the new `transfers`. |
 | `share.text`, `share.url` | `device`, and `text` or `url` |
 | `transfer.cancel` | `id` of a transfer |
@@ -310,7 +312,7 @@ These codes need a step from the client:
 | `not_paired`, `offline` | The device is not paired, or it has no link now. |
 | `unreachable` | `pair.address` cannot open a link to the address. The message gives the cause. |
 | `no_request` | No device with the name has an open pair request, or the open pairing has another `key`. |
-| `not_saved` | `pair.unpair` could not save `devices.json`. The device is unpaired only until fluxd restarts. |
+| `not_saved` | `pair.unpair` could not save `devices.json`; the device is unpaired only until fluxd restarts. Or `clipboard.pause` or `clipboard.resume` could not write or remove the pause marker; the call took effect, but a restart of fluxd brings back the state before it. |
 | `too_large` | The text has more than 256 KiB, the most that fluxd sends to a device. |
 | `bad_params`, `bad_setting` | A parameter or a setting is missing or has the wrong type. |
 
@@ -432,6 +434,17 @@ To put an entry on the desktop clipboard again, call `clipboard.copy` with its `
 The call copies the full text or the image of the entry.
 `clipboard.copy` also accepts `text`, or `path` with the `image` of an entry in the history.
 `clipboard.send` without `text` sends the image on the desktop clipboard, or else its text.
+
+`clipboard.pause` stops the automatic sync of copies on this computer until `clipboard.resume`.
+A copy that fluxd handles while paused goes to no device, stays out of the history, and is not sent to a device that connects later.
+A pause also clears the last copy that a device would get when it connects.
+It stops an automatic image send at once, and a text send before its next device.
+A send that passed its check just before the pause can still go out; it holds a copy from before the pause.
+Every copy made while paused is dropped, however late its record arrives.
+A copy made in the 250 ms after a resume is dropped too, so a new copy in that time isn't synced.
+The 250 ms count from the start of the watcher script, so on a very loaded machine a copy whose script starts more than 250 ms after the copy, with a resume in between, can still sync.
+Manual `clipboard.send` still works while paused, and clips from devices still arrive.
+Both methods are idempotent, and the last call wins.
 
 ## Text messages
 

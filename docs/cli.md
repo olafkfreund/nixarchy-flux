@@ -290,6 +290,7 @@ See [clipboard images](features.md#clipboard-images).
 `flux-cli clipboard clear` removes unpinned clipboard history. Add `--all` to also remove saved snippets.
 `flux-cli clipboard delete ID` deletes a history entry or saved snippet.
 `flux-cli clipboard limit [N]` shows or sets the number of clipboard history entries to keep (1 to 500, default 50).
+`flux-cli clipboard pause` and `resume` stop and restart the automatic sync of copies to your devices; `status` prints `paused`, `syncing`, or `off`. See [pause clipboard sync](features.md#pause-clipboard-sync).
 `flux-cli notifications clear` dismisses the phone notifications on the phone and on the desktop. Ongoing notifications stay.
 
 To send an SMS, set the recipient and message first:

@@ -127,6 +127,18 @@ Update Flux on the computer, then connect the phone to it 1 time.
 
 The [workflow controls](workflows.md) add an offline desktop outbox, folder archives, and saved clipboard snippets.
 
+### Pause clipboard sync
+
+`flux-cli clipboard pause` stops sending what you copy on this computer to your devices, until `flux-cli clipboard resume`.
+`flux-cli clipboard status` prints `paused`, `syncing`, or `off` when `auto_clipboard` is off.
+While paused, a copy stays on this computer: no device gets it, the history doesn't keep it, and a device that connects later doesn't get it.
+Sending the clipboard by hand (`flux-cli clip`, Send clipboard) still works, and clips from your devices still arrive.
+The pause doesn't change `config.toml`. It survives a restart of fluxd, and ends at reboot.
+A new copy in the first 250 ms after a resume isn't synced. If you need it on a device, copy something different or send it by hand.
+The Chat page shows "Clipboard sync paused" with Resume, and the bar mark dims.
+
+A clipboard manager's private mode can run `flux-cli clipboard pause` when it starts and `flux-cli clipboard resume` when it ends.
+
 Use **Chat** in the desktop window, or run:
 
 ```sh
