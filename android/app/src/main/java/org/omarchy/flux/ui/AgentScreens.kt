@@ -1702,8 +1702,10 @@ private fun AgentDock(
         HerdrSync.sendKeys(FluxCore, d.id, agent.pane, c.keys)
     }
     // A move to another question of Codex also makes the choices on screen stale.
+    // The output is read when the lock passes, not at the tap: a new output may come while the lock waits.
+    val currentOut by rememberUpdatedState(out)
     fun move(key: String) = guarded {
-        answered = out
+        answered = currentOut
         HerdrSync.sendKeys(FluxCore, d.id, agent.pane, listOf(key))
     }
     // After a reply that failed, the screen reads the output again. The choices then show the question that waits now.
@@ -2129,8 +2131,9 @@ internal fun keyRows(shares: List<Float>, width: Dp, gap: Dp): List<List<Int>> =
 @Composable
 private fun SmallKeyRows(shares: List<Float>, height: Dp, draw: @Composable (Int, Modifier) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val width = maxWidth
         Column(verticalArrangement = Arrangement.spacedBy(SmallKeyGap)) {
-            for (r in keyRows(shares, maxWidth, SmallKeyGap)) {
+            for (r in keyRows(shares, width, SmallKeyGap)) {
                 Row(Modifier.fillMaxWidth().height(height), horizontalArrangement = Arrangement.spacedBy(SmallKeyGap)) {
                     for (i in r) draw(i, Modifier.weight(shares[i]))
                 }

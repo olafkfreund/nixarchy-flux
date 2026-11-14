@@ -456,3 +456,4 @@ found no compile error in the given code and confirmed the `keyRows` counts.
 
 | # | Step | What changed and why |
 | --- | --- | --- |
+| P1 | 4 | CI compile error: `SmallKeyRows` reads `maxWidth` into a local before the inner `Column` (the implicit `BoxWithConstraintsScope` receiver is not reachable there). Codex review: the dock's `move` records the output current when the lock passes (`rememberUpdatedState`), not the one at the tap, so choices of an output that arrived while the lock waited stay off. agy's low notes (row balancing, wiring not unit-tested) are left as they are; the wiring needs a device check, deferred by the owner. |
