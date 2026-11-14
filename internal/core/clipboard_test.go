@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1239,5 +1240,38 @@ func TestPausedCopyKeepsStaleRule(t *testing.T) {
 	})
 	if len(d.clipboard) != 1 || d.clipboard[0].Text != "fresh" {
 		t.Fatalf("history %+v", d.clipboard)
+	}
+}
+
+// The state shows the pause outside the settings.
+func TestSnapshotClipboardPaused(t *testing.T) {
+	d := testDaemon()
+	for _, want := range []bool{true, false} {
+		if want {
+			_ = d.PauseClipboard()
+		} else {
+			_ = d.ResumeClipboard()
+		}
+		var s struct {
+			Paused   *bool          `json:"clipboardPaused"`
+			Settings map[string]any `json:"settings"`
+		}
+		if err := json.Unmarshal(d.Snapshot(), &s); err != nil {
+			t.Fatal(err)
+		}
+		if s.Paused == nil || *s.Paused != want || s.Settings["clipboardPaused"] != nil {
+			t.Fatalf("state %+v", s)
+		}
+	}
+}
+
+// The IPC methods take no parameters and act on the computer.
+func TestCallClipboardPause(t *testing.T) {
+	d := testDaemon()
+	if _, err := d.Call(context.Background(), "clipboard.pause", nil); err != nil || !d.clipPaused {
+		t.Fatal(err)
+	}
+	if _, err := d.Call(context.Background(), "clipboard.resume", nil); err != nil || d.clipPaused {
+		t.Fatal(err)
 	}
 }

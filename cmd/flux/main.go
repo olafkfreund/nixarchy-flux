@@ -60,6 +60,7 @@ Commands:
   transfers [retry ID|cancel ID]  Show or control the outbox
   clip [TEXT]            Send the clipboard, or TEXT
   clipboard [clear [--all]|delete ID|limit [N]]  Manage clipboard history and limit
+  clipboard pause|resume|status  Stop or restart sending copies to devices, or show it
   snippets [search TEXT|save ID [DURATION]|remove ID|copy ID]  Manage saved clipboard entries
   url URL                Open a URL on the phone
   sms NUMBER TEXT...     Send a text message through the phone

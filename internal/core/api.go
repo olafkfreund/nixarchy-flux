@@ -172,12 +172,13 @@ func (d *Daemon) Snapshot() json.RawMessage {
 			"tcpPort": d.lanPort(), "version": d.opts.Version,
 			"pendingVersion": d.pendingVersion,
 		},
-		"devices":   views,
-		"approvals": approvals,
-		"update":    d.updateViewLocked(),
-		"clipboard": clip,
-		"transfers": transfers,
-		"commands":  commands,
+		"devices":         views,
+		"approvals":       approvals,
+		"update":          d.updateViewLocked(),
+		"clipboard":       clip,
+		"clipboardPaused": d.clipPaused,
+		"transfers":       transfers,
+		"commands":        commands,
 		"settings": map[string]any{
 			"autoClipboard":     d.cfg.AutoClipboard,
 			"clipboardLimit":    d.cfg.ClipLimit(),
@@ -347,6 +348,10 @@ func (d *Daemon) Call(ctx context.Context, method string, raw json.RawMessage) (
 		return ok, d.unpinClip(p.ID)
 	case "clipboard.search":
 		return d.searchClips(p.Text), nil
+	case "clipboard.pause":
+		return ok, d.PauseClipboard()
+	case "clipboard.resume":
+		return ok, d.ResumeClipboard()
 	case "transfer.cancel":
 		return ok, d.CancelTransfer(p.ID)
 	case "transfer.open":

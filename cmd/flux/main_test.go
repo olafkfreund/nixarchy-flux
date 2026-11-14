@@ -334,6 +334,25 @@ func TestClipboardCommandArgs(t *testing.T) {
 	}
 }
 
+func TestClipboardPauseArgs(t *testing.T) {
+	for _, args := range [][]string{{"pause", "5m"}, {"resume", "now"}, {"status", "x"}} {
+		if err := clipboardCommand(args); err == nil {
+			t.Errorf("clipboard %q should fail", args)
+		}
+	}
+}
+
+func TestClipboardStatusWord(t *testing.T) {
+	for _, c := range []struct {
+		paused, auto bool
+		want         string
+	}{{true, true, "paused"}, {true, false, "paused"}, {false, false, "off"}, {false, true, "syncing"}} {
+		if got := clipboardStatusWord(c.paused, c.auto); got != c.want {
+			t.Errorf("paused %v auto %v: %q, want %q", c.paused, c.auto, got, c.want)
+		}
+	}
+}
+
 func TestMotionText(t *testing.T) {
 	var s motionStatus
 	if got := motionText(s); !strings.Contains(got, "flux-cli motion on") {
