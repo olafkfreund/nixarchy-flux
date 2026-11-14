@@ -199,6 +199,13 @@ A desktop copy above 256 KiB goes only to the clipboard history. When a paired d
 The clipboard history keeps at most 16 MiB of text and drops the oldest entries first.
 When `fluxd` restarts, the desktop clipboard loses text or an image that came from a device.
 
+The phone can search its own part of the clipboard history: **History** in a computer's chat menu.
+It lists the texts and links that the phone sent to the computer or the computer sent to the phone, newest first.
+It never shows images, saved snippets, files, or the entries of another device.
+A search finds the newest 50 matches in the full text; a tap copies an entry to the phone, and a link opens.
+It needs Clipboard on for the phone, and it works while clipboard sync is paused.
+The phone and `fluxd` both list `flux.clipboard.history`.
+
 `fluxd` makes the name of a received file safe:
 
 - It keeps only the file name and removes control characters and characters that change the text direction.

@@ -181,6 +181,9 @@ A copy on the phone reaches the computer while Flux is on the screen.
 For a copy in another app, use a 1-tap path.
 See [send a copy from another app](features.md#send-a-copy-from-another-app).
 
+**History** in a computer's chat menu searches this phone's part of the computer's clipboard history and copies an entry back.
+The phone lists `flux.clipboard.history` as a packet it sends and takes, and it needs a `fluxd` that lists it too.
+
 ## Webcam and mic requests
 
 The computer can ask the phone to start the webcam or the mic, or to play the audio of the computer:
