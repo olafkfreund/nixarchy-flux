@@ -178,13 +178,13 @@ fun ChatsScreen(state: UiState, active: Boolean, notices: InboxNotices, actions:
 
 /** The search field of the list: 44 dp high, on `tile` with a `line` border, with Clear while it holds text. */
 @Composable
-private fun SearchField(value: String, onValue: (String) -> Unit, modifier: Modifier) {
+internal fun SearchField(value: String, onValue: (String) -> Unit, modifier: Modifier, placeholder: String = "Search agents, computers, files") {
     val shape = RoundedCornerShape(22.dp)
     var focused by remember { mutableStateOf(false) }
     BasicTextField(
         value = value,
         onValueChange = onValue,
-        modifier = modifier.fillMaxWidth().semantics { contentDescription = "Search agents, computers, files" }
+        modifier = modifier.fillMaxWidth().semantics { contentDescription = placeholder }
             .onFocusChanged { focused = it.isFocused },
         textStyle = TextStyle(color = Tn.text, fontSize = 14.sp),
         cursorBrush = SolidColor(Tn.blue),
@@ -199,7 +199,7 @@ private fun SearchField(value: String, onValue: (String) -> Unit, modifier: Modi
             ) {
                 Sym(Ic.search, tint = Tn.sub, size = 20.dp)
                 Box(Modifier.weight(1f)) {
-                    if (value.isEmpty()) T("Search agents, computers, files", Modifier.clearAndSetSemantics {}, size = 14, color = Tn.sub, maxLines = 1)
+                    if (value.isEmpty()) T(placeholder, Modifier.clearAndSetSemantics {}, size = 14, color = Tn.sub, maxLines = 1)
                     inner()
                 }
                 if (value.isNotEmpty()) {

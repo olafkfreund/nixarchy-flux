@@ -545,6 +545,7 @@ private fun DetailScreen(route: Route, state: UiState, current: () -> Nav, go: (
         page == "desktop" -> DesktopScreen(device, state.touchpadScroll, pop)
         page == EXTEND_PAGE -> DesktopScreen(device, state.touchpadScroll, pop, extend = true)
         page == OMARCHY_PAGE -> OmarchyScreen(device, pop)
+        page == CLIP_HISTORY_PAGE -> ClipHistoryScreen(device, pop)
         // The Webcam was a mode of the camera. Debug builds still open it with "camera:webcam".
         page == WEBCAM_PAGE || page == "camera:webcam" -> WebcamScreen(device, pop)
         // Debug builds open a mode with "camera:<mode>".

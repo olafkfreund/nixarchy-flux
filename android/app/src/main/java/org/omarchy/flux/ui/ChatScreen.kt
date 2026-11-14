@@ -252,7 +252,8 @@ internal fun computerContext(d: DeviceUi): String = when {
 
 /**
  * The menu of the chat of a computer: Control with the computer in scope,
- * its agents and terminals, a new agent or terminal, and Clear chat when [onClear] is set.
+ * its agents and terminals, a new agent or terminal, History when the computer shares it,
+ * and Clear chat when [onClear] is set.
  */
 @Composable
 private fun ComputerMenu(d: DeviceUi, actions: ChatActions, onClear: (() -> Unit)?) {
@@ -270,6 +271,7 @@ private fun ComputerMenu(d: DeviceUi, actions: ChatActions, onClear: (() -> Unit
                 Triple("Control", Ic.tune) { actions.control(d.id) },
                 if (d.herdrSupported) Triple("Agents and terminals", Ic.agent) { actions.open(Route(d.id, AGENTS_PAGE)) } else null,
                 if (d.online && herdr?.anyRunning == true && herdr.control) Triple("New agent or terminal", Ic.add) { actions.open(Route(d.id, NEW_PANE_PAGE)) } else null,
+                if (d.clipHistorySupported) Triple("History", Ic.search) { actions.open(Route(d.id, CLIP_HISTORY_PAGE)) } else null,
                 if (onClear != null) Triple("Clear chat", Ic.delete, onClear) else null,
             )
             for ((label, icon, action) in items) {
