@@ -145,6 +145,10 @@ data class DeviceUi(
     val shortcutsSupported: Boolean = false,
     /** The key bindings and workspaces of the computer, or null before the first answer. */
     val shortcuts: ShortcutsState? = null,
+    /** True when the computer shares this phone's clipboard history, see ClipHistory. */
+    val clipHistorySupported: Boolean = false,
+    /** The last answer to the History screen's list request, or null. */
+    val clipHistory: ClipHistoryAnswer? = null,
     /** The time that the last link to the computer ended, in milliseconds since the epoch, or 0 when no link ended while the app ran. */
     val lastSeen: Long = 0,
     /** True when the computer sent the network cards that can wake it. See [Wake]. */
