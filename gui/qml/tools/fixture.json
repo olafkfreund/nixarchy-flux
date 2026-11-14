@@ -316,6 +316,7 @@
     "time": -86400
    }
   ],
+  "clipboardPaused": false,
   "settings": {
    "autoClipboard": true,
    "clipboardLimit": 50,

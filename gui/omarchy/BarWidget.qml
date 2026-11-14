@@ -6,6 +6,7 @@ import "Flux/components" as FluxUi
 
 // The Flux bar widget: the Flux mark alone. The mark takes the accent color
 // while a paired device is connected. The tooltip lists every paired device.
+// The mark dims while clipboard sync is paused, and the tooltip says so.
 // A left click opens or closes the Flux window. The widget reads the state
 // of fluxd from the Flux service, or from its own Backend under a
 // replacement bar.
@@ -33,11 +34,13 @@ BarWidget {
   readonly property var paired: backend ? (backend.devices || []).filter(d => d.paired) : []
   readonly property var primary: paired.find(d => d.online) || null
   readonly property bool linked: up && !!primary
+  readonly property bool clipPaused: up && !!backend.state && backend.state.clipboardPaused === true
 
   readonly property string tooltip: {
     if (!backend) return "Flux"
     if (!up) return "Flux · fluxd is not running"
-    if (paired.length === 0) return "Flux · no paired devices"
+    var paused = root.clipPaused ? "\nClipboard sync paused" : ""
+    if (paired.length === 0) return "Flux · no paired devices" + paused
     var lines = []
     // The connected device comes first.
     var sorted = paired.slice().sort(function (a, b) {
@@ -47,7 +50,7 @@ BarWidget {
     })
     for (var i = 0; i < sorted.length; i++)
       lines.push(sorted[i].name + " · " + (sorted[i].online ? "connected" : "offline"))
-    return lines.join("\n")
+    return lines.join("\n") + paused
   }
 
   function togglePanel() {
@@ -75,6 +78,7 @@ BarWidget {
       id: mark
       anchors.centerIn: parent
       size: 14
+      opacity: root.clipPaused ? 0.5 : 1
       fg: button.foreground
       accent: root.linked ? Commons.Color.accent : button.foreground
     }

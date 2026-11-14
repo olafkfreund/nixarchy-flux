@@ -89,6 +89,7 @@ QtObject {
     else if (method === "clipboard.pin" || method === "clipboard.unpin") setState(function(s) { s.clipboard.forEach(e => { if (e.id === params.id) e.pinned = method === "clipboard.pin" }) })
     else if (method === "clipboard.delete") setState(function(s) { s.clipboard = (s.clipboard || []).filter(e => e.id !== params.id) })
     else if (method === "clipboard.clear") setState(function(s) { s.clipboard = params && params.all ? [] : (s.clipboard || []).filter(e => e.pinned) })
+    else if (method === "clipboard.pause" || method === "clipboard.resume") setState(function(s) { s.clipboardPaused = method === "clipboard.pause" })
     else if (method === "device.settings.set") setState(function(s) {
       s.settings.deviceRules = s.settings.deviceRules || {}
       s.settings.deviceRules[params.device] = s.settings.deviceRules[params.device] || {}

@@ -66,6 +66,8 @@ Item {
   readonly property bool canSend: online && !sending && composer.text.trim() !== ""
   // A narrow page shows the dock buttons with icons only.
   readonly property bool compact: width < 560
+  // Clipboard sync is paused for every device (clipboard.pause).
+  readonly property bool clipPaused: !!(view && view.backend && view.backend.state && view.backend.state.clipboardPaused)
 
   onDevIdChanged: sendError = ""
   onAllClipsChanged: if (query !== "") searchDelay.restart()
@@ -242,6 +244,43 @@ Item {
     }
   }
 
+  // A paused clipboard sync, with Resume. It shows on every device.
+  Item {
+    id: pausedRow
+    objectName: "clipPaused"
+    visible: root.clipPaused
+    anchors.top: toolbar.bottom
+    anchors.topMargin: 10
+    width: parent.width
+    height: Math.max(pausedText.implicitHeight, resumeButton.implicitHeight)
+
+    Txt {
+      id: pausedText
+      objectName: "clipPausedText"
+      anchors.left: parent.left
+      anchors.right: resumeButton.left
+      anchors.rightMargin: 12
+      anchors.verticalCenter: parent.verticalCenter
+      text: "Clipboard sync paused. Copies on this computer stay here."
+      color: Theme.dim
+      font.pixelSize: 12
+      wrapMode: Text.Wrap
+    }
+    OutlineButton {
+      id: resumeButton
+      objectName: "clipResume"
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      text: "Resume"
+      fontSize: 12
+      padY: 6
+      onClicked: {
+        var v = root.view
+        v.call("clipboard.resume", {}, function () { v.toast("Clipboard sync resumed") })
+      }
+    }
+  }
+
   // The entries follow the items by key, so a progress event of a file
   // changes only its card.
   KeyedModel {
@@ -254,7 +293,7 @@ Item {
   ListView {
     id: list
     objectName: "chatList"
-    anchors.top: toolbar.bottom
+    anchors.top: pausedRow.visible ? pausedRow.bottom : toolbar.bottom
     anchors.topMargin: 14
     anchors.bottom: errorLine.visible ? errorLine.top : dock.top
     anchors.bottomMargin: 12
