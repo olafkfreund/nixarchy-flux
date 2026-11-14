@@ -74,7 +74,7 @@ type ClipEntry struct {
 func (d *Daemon) addClipLocked(e ClipEntry) {
 	if len(d.clipboard) > 0 {
 		top := &d.clipboard[0]
-		if top.Text == e.Text && top.sum == e.sum && top.Dir == e.Dir {
+		if top.Text == e.Text && top.sum == e.sum && top.Dir == e.Dir && top.Device == e.Device {
 			top.Time = e.Time
 			for _, id := range e.To {
 				if !slices.Contains(top.To, id) {
