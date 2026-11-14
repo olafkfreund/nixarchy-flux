@@ -76,6 +76,9 @@ object Types {
     /** The computer sends its Hyprland key bindings and workspaces, and runs them for this phone. Both sides send it. */
     const val FLUX_SHORTCUTS = "flux.shortcuts"
 
+    /** This phone asks the computer for its entries of the clipboard history, and the computer answers. Both sides send it. */
+    const val FLUX_CLIPBOARD_HISTORY = "flux.clipboard.history"
+
     /**
      * The computer sends its active Omarchy theme, {"name", "mode", "colors":
      * {key: "#rrggbb"}, "border": {"colors": ["#rrggbbaa"], "angle": deg}},
@@ -131,6 +134,7 @@ val INCOMING = listOf(
     Types.FLUX_SPEAKER,
     Types.FLUX_SSH,
     Types.FLUX_MOTION,
+    Types.FLUX_CLIPBOARD_HISTORY,
 )
 
 /** Packet types that the phone sends. */
@@ -144,6 +148,7 @@ val OUTGOING = listOf(
     Types.FLUX_SPEAKER,
     Types.FLUX_SSH,
     Types.FLUX_MOTION,
+    Types.FLUX_CLIPBOARD_HISTORY,
 )
 
 /**

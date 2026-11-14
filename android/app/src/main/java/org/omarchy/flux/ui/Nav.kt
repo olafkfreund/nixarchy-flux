@@ -56,6 +56,9 @@ const val AGENTS_PAGE = "agents"
 /** The Omarchy panel: workspaces, windows, and key bindings. */
 const val OMARCHY_PAGE = "omarchy"
 
+/** This phone's entries of a computer's clipboard history, with search. */
+const val CLIP_HISTORY_PAGE = "history"
+
 /** The extended screen: the computer adds a monitor that this phone shows. */
 const val EXTEND_PAGE = "extend"
 
@@ -133,7 +136,7 @@ data class Nav(val tab: Tab = Tab.Chat, val stack: List<Route> = emptyList()) {
 
         /** The destination that holds a page of a computer, so that Back goes there. */
         fun tabOf(page: String): Tab = when {
-            page == "browse" || page.startsWith("camera") && !page.endsWith(":webcam") -> Tab.Chat
+            page == "browse" || page == CLIP_HISTORY_PAGE || page.startsWith("camera") && !page.endsWith(":webcam") -> Tab.Chat
             page == CHAT_PAGE || page == CHAT_TRAY_PAGE || page.startsWith(AGENT_PAGE) -> Tab.Chat
             else -> Tab.Control
         }
