@@ -108,9 +108,31 @@ class HerdrTerminalFocusTest {
         assertEquals("backspace", terminalKeyName(KeyEvent.KEYCODE_DEL, shift = false))
         assertEquals("esc", terminalKeyName(KeyEvent.KEYCODE_ESCAPE, shift = false))
         assertEquals("left", terminalKeyName(KeyEvent.KEYCODE_DPAD_LEFT, shift = false))
+        assertEquals("right", terminalKeyName(KeyEvent.KEYCODE_DPAD_RIGHT, shift = false))
+        assertEquals("shift+left", terminalKeyName(KeyEvent.KEYCODE_DPAD_LEFT, shift = true))
+        assertEquals("shift+right", terminalKeyName(KeyEvent.KEYCODE_DPAD_RIGHT, shift = true))
+        assertEquals("up", terminalKeyName(KeyEvent.KEYCODE_DPAD_UP, shift = true))
         // A digit is a character, not a named key.
         assertNull(terminalKeyName(KeyEvent.KEYCODE_4, shift = false))
         assertNull(terminalKeyName(KeyEvent.KEYCODE_BACK, shift = false))
+    }
+
+    @Test
+    fun aShiftedArrowThatWentOutCallsOnMove() {
+        var moves = 0
+        var accept = true
+        val input = TerminalInput().apply {
+            ready = true
+            onKey = { accept }
+            onMove = { moves++ }
+        }
+        assertTrue(input.send("shift+left"))
+        assertTrue(input.send("shift+right"))
+        assertTrue(input.send("left"))
+        assertEquals(2, moves)
+        accept = false
+        assertFalse(input.send("shift+left"))
+        assertEquals("a refused key is no move", 2, moves)
     }
 
     @Test

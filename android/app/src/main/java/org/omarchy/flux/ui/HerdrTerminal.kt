@@ -156,8 +156,9 @@ internal class SentLine {
 }
 
 /**
- * The named key of a key code, or null. Shift with Tab is Shift+Tab. Only
- * these keys go to the program as keys. Other keys type their character.
+ * The named key of a key code, or null. Shift with Tab, Left or Right gives the
+ * shifted key. Only these keys go to the program as keys. Other keys type
+ * their character.
  */
 internal fun terminalKeyName(keyCode: Int, shift: Boolean): String? = when (keyCode) {
     KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> "enter"
@@ -166,8 +167,8 @@ internal fun terminalKeyName(keyCode: Int, shift: Boolean): String? = when (keyC
     KeyEvent.KEYCODE_ESCAPE -> "esc"
     KeyEvent.KEYCODE_DPAD_UP -> "up"
     KeyEvent.KEYCODE_DPAD_DOWN -> "down"
-    KeyEvent.KEYCODE_DPAD_LEFT -> "left"
-    KeyEvent.KEYCODE_DPAD_RIGHT -> "right"
+    KeyEvent.KEYCODE_DPAD_LEFT -> if (shift) "shift+left" else "left"
+    KeyEvent.KEYCODE_DPAD_RIGHT -> if (shift) "shift+right" else "right"
     else -> null
 }
 
@@ -288,6 +289,9 @@ internal class TerminalInput {
     var onPaste: ((String) -> Boolean)? = null
     var onImage: ((Uri, () -> Unit) -> Boolean)? = null
 
+    /** Called after Shift+Left or Shift+Right went out, so the screen can drop choices that the move made stale. */
+    var onMove: (() -> Unit)? = null
+
     /** The terminal view on screen, or null. */
     var editor: TerminalWebView? = null
 
@@ -304,6 +308,7 @@ internal class TerminalInput {
         if (!ready) return false
         val sent = onKey?.invoke(name) == true
         if (sent && name == "enter") unsent = false
+        if (sent && (name == "shift+left" || name == "shift+right")) onMove?.invoke()
         return sent
     }
 
