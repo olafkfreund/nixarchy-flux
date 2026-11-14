@@ -223,11 +223,13 @@ final class HerdrTests: XCTestCase {
     }
 
     func testKeysMatchTheComputer() {
-        for k in ["enter", "esc", "tab", "shift+tab", "up", "down", "left", "right", "backspace", "space", "y", "n", "0", "9"] {
+        for k in ["enter", "esc", "tab", "shift+tab", "up", "down", "left", "right", "shift+left", "shift+right", "backspace", "space", "y", "n", "0", "9"] {
             XCTAssertTrue(HerdrWire.allowedKeys.contains(k), k)
         }
         XCTAssertFalse(HerdrWire.allowedKeys.contains("ctrl+c"))
-        XCTAssertEqual(HerdrWire.allowedKeys.count, 22)
+        XCTAssertEqual(HerdrWire.allowedKeys.count, 24)
+        XCTAssertFalse(HerdrWire.terminalKeys.contains("shift+left"))
+        XCTAssertFalse(HerdrWire.terminalKeys.contains("shift+right"))
         XCTAssertTrue(HerdrWire.allowed(["shift+tab"]))
         XCTAssertFalse(HerdrWire.allowed([]))
         XCTAssertFalse(HerdrWire.allowed(Array(repeating: "up", count: 9)), "fluxd takes at most 8 keys")

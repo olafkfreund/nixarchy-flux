@@ -175,6 +175,8 @@ The live terminal then takes the place of the thread.
 With a computer that supports live input, a key row takes the place of the dock.
 A line above it tells that the keys go straight to the pane.
 The key row has the digits of the choices of a blocked agent, Esc, Tab, Up, Down, Enter, and a keyboard key.
+A Codex agent also gets ⇧← and ⇧→ before Enter.
+When the keys do not fit 1 row at 48 dp each, they take 2 or more rows.
 The keyboard key shows the phone keyboard.
 A tap on the terminal does not open the keyboard.
 The keyboard types directly into the agent, and Return sends Enter.
@@ -197,6 +199,7 @@ When Live ends after you typed text with no Enter after it, a note above the tex
 **Refresh** does not show in the menu while Live is on.
 The phone then reads the output when Live opens, when the status changes, and after a tap on a choice, so the digits of the choices stay current.
 After a tap on a choice, the choices take no tap until the next output arrives.
+The phone also reads the output after ⇧← or ⇧→, and the choices take no tap until that read.
 Until the first full screen draws, a cover shows **Opening the terminal…**.
 The cover shows **Reconnecting…** while Live opens the stream again.
 The terminal uses the colors of the computer theme for the default colors, and it keeps the colors that the agent sets.
@@ -223,6 +226,7 @@ A correction reaches only the text that you typed after the last key of the key 
 After such a key, the agent can change its line, so the keyboard starts again with an empty line.
 A hardware keyboard types too.
 It sends Enter, Tab, Shift+Tab, Esc, Backspace, and the arrows as keys.
+Shift with Left or Right sends Shift+Left or Shift+Right.
 AltGr types its characters, for example `@` and `{`.
 A key with Ctrl does nothing.
 
@@ -356,7 +360,7 @@ systemctl --user reload fluxd
 The output screen then shows the reply controls:
 
 - When the agent is blocked, the phone shows the numbered choices of the dialog as buttons. A tap sends the number of the choice. opencode shows its choices in 1 row, for example **Allow once**, **Allow always**, and **Reject**. The phone numbers them, and a tap sends the arrow keys that select the choice, then Enter. On Android, the first choice has the accent fill. **Write** shows the text field in the place of the choices, and **Choices** shows the choices again.
-- The key bar sends Esc, Tab, Up, Down, and Enter. On Android, select **Keys** in the dock of a blocked agent, or **Show keys** in the menu, to show it. **Interrupt** on a working agent sends Esc.
+- The key bar sends Esc, Tab, Up, Down, and Enter. On Android, select **Keys** in the dock of a blocked agent, or **Show keys** in the menu, to show it. **Interrupt** on a working agent sends Esc. On a Codex agent, it also sends Shift+Left and Shift+Right (⇧← and ⇧→), which move to the pending questions and queued input of Codex and back. The Mac and the iPhone do not show them.
 - The text field sends a prompt to the agent. The clear key empties the field. The expand key opens a large editor with **Send** for a long prompt.
 - When the agent waits for a choice, `fluxd` refuses the text with the message `The agent waits for a choice. Pick a choice first.` A digit or Enter in the text can select a choice of the dialog, for example an approval. Pick a choice with the buttons or the key bar first.
 - After this refusal, the message shows **Send as answer** next to it while the field holds the same text. Select it when the agent asks a question that needs free text, for example an answer that is not in the choices. The app sends the same text again with `"answer": true`. `fluxd` checks that the agent still waits, types the text on one line, and presses Enter. The iPhone and the Mac show the same action.
@@ -367,10 +371,16 @@ See [Live terminal on Android](#live-terminal-on-android).
 Before the first reply, the phone asks for its fingerprint or screen lock.
 The unlock stays valid for 5 minutes.
 
-`fluxd` accepts these keys only: `enter`, `esc`, `tab`, `shift+tab`, `up`, `down`, `left`, `right`, `backspace`, `space`, `0` to `9`, `y`, and `n`.
+`fluxd` accepts these keys only: `enter`, `esc`, `tab`, `shift+tab`, `up`, `down`, `left`, `right`, `shift+left`, `shift+right`, `backspace`, `space`, `0` to `9`, `y`, and `n`.
 It does not accept `ctrl+c`, because that key can end the agent.
 A prompt can have up to 16 KB of text.
 `fluxd` removes control characters from a prompt, except line breaks and tabs.
+
+The keys are plain key presses.
+When the desktop answers or cancels a question first, ⇧← can land on queued input, and the next Enter acts there.
+The choices can come back for a dialog that no longer has focus, because Flux cannot tell which question has focus.
+Enter on the question clears the note about unsent text, although the text still waits.
+An older `fluxd` refuses the keys.
 
 ## Start an agent
 
@@ -807,7 +817,7 @@ An older app ignores the new kinds.
 
 A `terminal_input` types one event in the control stream of the phone.
 `text` goes as it is, on one line, with no Enter after it, and it can have up to 16 KB.
-`key` is `enter`, `tab`, `shift+tab`, `esc`, `backspace`, `up`, `down`, `left`, or `right`.
+`key` is `enter`, `tab`, `shift+tab`, `esc`, `backspace`, `up`, `down`, `left`, `right`, `shift+left`, or `shift+right`.
 `fluxd` encodes each key, and a text cannot hold a control character, so one event cannot hold an escape sequence.
 `fluxd` refuses an empty text, a text with a key, a control or directional character, and an unknown key with the code `invalid_input`.
 A bridge failure gets the code `input_failed` and ends the stream, so the phone does not type into a stream that stopped.

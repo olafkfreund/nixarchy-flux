@@ -705,7 +705,7 @@ fun herdrTerminalPasteImageBody(session: String): JsonObject =
     bodyOf("kind" to "terminal_paste_image", "session" to session)
 
 /** The key names that fluxd accepts in a keys packet. */
-val HERDR_KEYS: Set<String> = setOf("enter", "esc", "tab", "shift+tab", "up", "down", "left", "right", "backspace", "space", "y", "n") +
+val HERDR_KEYS: Set<String> = setOf("enter", "esc", "tab", "shift+tab", "up", "down", "left", "right", "shift+left", "shift+right", "backspace", "space", "y", "n") +
     (0..9).map { it.toString() }
 
 /** The key names that fluxd accepts in an input packet for a terminal. */
@@ -714,7 +714,7 @@ val HERDR_TERMINAL_KEYS: Set<String> = setOf("enter", "esc", "tab", "shift+tab",
 
 /** The named keys that fluxd accepts in a live terminal_input packet. */
 val HERDR_TERMINAL_INPUT_KEYS: Set<String> =
-    setOf("enter", "tab", "shift+tab", "esc", "backspace", "up", "down", "left", "right")
+    setOf("enter", "tab", "shift+tab", "esc", "backspace", "up", "down", "left", "right", "shift+left", "shift+right")
 
 /** The most keys in 1 keys packet. */
 const val HERDR_MAX_KEYS = 8

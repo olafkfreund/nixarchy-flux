@@ -525,6 +525,7 @@ const herdrTerminalInputMax = 16 << 10
 var herdrTerminalInputKeys = map[string]string{
 	"enter": "\r", "tab": "\t", "shift+tab": "\x1b[Z", "esc": "\x1b", "backspace": "\x7f",
 	"up": "\x1b[A", "down": "\x1b[B", "left": "\x1b[D", "right": "\x1b[C",
+	"shift+left": "\x1b[1;2D", "shift+right": "\x1b[1;2C",
 }
 
 // The codes of terminal_input_error.

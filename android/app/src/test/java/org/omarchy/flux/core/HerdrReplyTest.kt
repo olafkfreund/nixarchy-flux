@@ -198,10 +198,14 @@ class HerdrReplyTest {
 
     @Test
     fun keysMatchTheComputer() {
-        for (k in listOf("enter", "esc", "tab", "shift+tab", "up", "down", "left", "right", "backspace", "space", "y", "n", "0", "9")) {
+        for (k in listOf("enter", "esc", "tab", "shift+tab", "up", "down", "left", "right", "shift+left", "shift+right", "backspace", "space", "y", "n", "0", "9")) {
             assertTrue(k, k in HERDR_KEYS)
         }
         assertFalse("ctrl+c" in HERDR_KEYS)
-        assertEquals(22, HERDR_KEYS.size)
+        assertEquals(24, HERDR_KEYS.size)
+        for (k in listOf("shift+left", "shift+right")) {
+            assertTrue(k, k in HERDR_TERMINAL_INPUT_KEYS)
+            assertFalse(k, k in HERDR_TERMINAL_KEYS)
+        }
     }
 }
