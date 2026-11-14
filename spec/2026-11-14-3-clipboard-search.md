@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 3
 intent: intent/2026-11-14-3-clipboard-search.md
 ---
