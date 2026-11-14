@@ -22,6 +22,7 @@ import (
 var herdrReplyKeys = map[string]bool{
 	"enter": true, "esc": true, "tab": true, "shift+tab": true,
 	"up": true, "down": true, "left": true, "right": true,
+	"shift+left": true, "shift+right": true,
 	"backspace": true, "space": true, "y": true, "n": true,
 	"0": true, "1": true, "2": true, "3": true, "4": true,
 	"5": true, "6": true, "7": true, "8": true, "9": true,
