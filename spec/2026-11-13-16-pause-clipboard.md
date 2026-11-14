@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 16
 intent: intent/2026-11-13-16-pause-clipboard.md
 ---
