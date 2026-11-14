@@ -1701,6 +1701,11 @@ private fun AgentDock(
         onSent(SentAnswer(c.label, sentMeta(c), thread?.blocks?.lastOrNull()))
         HerdrSync.sendKeys(FluxCore, d.id, agent.pane, c.keys)
     }
+    // A move to another question of Codex also makes the choices on screen stale.
+    fun move(key: String) = guarded {
+        answered = out
+        HerdrSync.sendKeys(FluxCore, d.id, agent.pane, listOf(key))
+    }
     // After a reply that failed, the screen reads the output again. The choices then show the question that waits now.
     LaunchedEffect(reply) {
         if (answered != null && reply != null && !reply.sending && reply.error != null && !isDemo(d.id)) HerdrSync.read(FluxCore, d.id, agent.pane)
@@ -1798,9 +1803,11 @@ private fun AgentDock(
             else -> Unit
         }
         if (keysOpen) {
-            Row(Modifier.fillMaxWidth().height(40.dp), horizontalArrangement = Arrangement.spacedBy(SmallKeyGap)) {
-                for ((label, key, share) in DockKeys) {
-                    SmallKey(label, keyName(key), Modifier.weight(share), fill = Tn.bg, weight = FontWeight.Medium) { keys(key) }
+            val row = dockKeys(agent.agent)
+            SmallKeyRows(row.map { it.third }, 40.dp) { i, m ->
+                val (label, key, _) = row[i]
+                SmallKey(label, keyName(key), m, fill = Tn.bg, weight = FontWeight.Medium) {
+                    if (movesFocus(key)) move(key) else keys(key)
                 }
             }
         }
@@ -1885,16 +1892,28 @@ private fun AgentDock(
     }
 }
 
-/** The keys of the key row of the dock: the label, the key name for herdr, and the part of the row width. */
+/** The keys of the key rows of the dock and of Live: the label, the key name for herdr, and the part of the row width. */
 private val DockKeys = listOf(Triple("esc", "esc", 1f), Triple("tab", "tab", 1f), Triple("↑", "up", 1f), Triple("↓", "down", 1f), Triple("enter", "enter", 1.5f))
 
+/** The keys of Codex that move to its pending questions and back. */
+private val CodexKeys = listOf(Triple("⇧←", "shift+left", 1f), Triple("⇧→", "shift+right", 1f))
+
+/** The keys of the key rows for the agent kind [agent]. Codex also gets [CodexKeys], before Enter. */
+internal fun dockKeys(agent: String): List<Triple<String, String, Float>> =
+    if (agent == "codex") DockKeys.dropLast(1) + CodexKeys + DockKeys.last() else DockKeys
+
+/** True for the keys that move the focus of Codex. The choices on screen can then belong to another question. */
+internal fun movesFocus(key: String): Boolean = key == "shift+left" || key == "shift+right"
+
 /** What TalkBack reads for a key name of herdr. */
-private fun keyName(key: String): String = when (key) {
+internal fun keyName(key: String): String = when (key) {
     "esc" -> "Escape"
     "tab" -> "Tab"
     "up" -> "Up"
     "down" -> "Down"
     "enter" -> "Enter"
+    "shift+left" -> "Shift Left"
+    "shift+right" -> "Shift Right"
     else -> key
 }
 
@@ -2011,9 +2030,9 @@ private fun SendKey(enabled: Boolean, busy: Boolean, onClick: () -> Unit) {
 
 /**
  * The controls of the live terminal: a line that tells that the keys go
- * straight to the pane, and 1 row of keys. The digits of the choices of a
- * blocked agent come first, then Esc, Tab, Up, Down, Enter, and the
- * keyboard. Typed text and named keys go straight to the terminal through
+ * straight to the pane, and rows of keys. The digits of the choices of a
+ * blocked agent come first, then Esc, Tab, Up, Down, Shift+Left and
+ * Shift+Right for Codex, Enter, and the keyboard. Typed text and named keys go straight to the terminal through
  * [input], so the program draws its own prompt and its own menus. The mic
  * of the phone keyboard dictates into the terminal, so this row has no mic
  * key. The draft of the composer stays for the thread.
@@ -2022,6 +2041,14 @@ private fun SendKey(enabled: Boolean, busy: Boolean, onClick: () -> Unit) {
 private fun LiveControls(d: DeviceUi, agent: HerdrAgent, out: HerdrOutput?, input: TerminalInput) {
     // After an answer, the digits wait for the next output, so that a second tap does not answer the next question.
     var answered by remember(d.id, agent.pane) { mutableStateOf<HerdrOutput?>(null) }
+    // A sent Shift+Left or Shift+Right, from the row or a keyboard, moves Codex to another question.
+    SideEffect {
+        input.onMove = {
+            answered = out
+            if (!isDemo(d.id)) HerdrSync.rereadSoon(FluxCore, d.id, agent.pane)
+        }
+    }
+    DisposableEffect(input) { onDispose { input.onMove = null } }
     val on = input.ready
     val line = Tn.line
     Column(
@@ -2034,27 +2061,37 @@ private fun LiveControls(d: DeviceUi, agent: HerdrAgent, out: HerdrOutput?, inpu
         }
         val choices = if (agent.status == AgentStatus.Blocked) out?.choices.orEmpty() else emptyList()
         val open = on && choicesOpen(out, answered, sending = false)
-        Row(Modifier.fillMaxWidth().height(44.dp), horizontalArrangement = Arrangement.spacedBy(SmallKeyGap)) {
-            // A choice of 2 digits would go as 2 keys, and the first key can select another choice.
-            for (c in choices.filter { it.key.length == 1 && it.keys.isNotEmpty() }) {
-                SmallKey(c.key, "Answer ${c.key}: ${c.label}", Modifier.weight(1f), accent = true, enabled = open) {
-                    // A digit goes as typed text. The arrows and Enter of a menu go as keys.
-                    val sent = if (c.keys == listOf(c.key)) input.choose(c.key) else c.keys.all { input.key(it) }
-                    if (sent) {
-                        answered = out
-                        // A typed digit gets no sent answer, so the screen reads the next dialog itself.
-                        if (!isDemo(d.id)) HerdrSync.rereadSoon(FluxCore, d.id, agent.pane)
+        // A choice of 2 digits would go as 2 keys, and the first key can select another choice.
+        val digits = choices.filter { it.key.length == 1 && it.keys.isNotEmpty() }
+        val row = dockKeys(agent.agent)
+        SmallKeyRows(digits.map { 1f } + row.map { it.third } + 1f, 44.dp) { i, m ->
+            when {
+                i < digits.size -> {
+                    val c = digits[i]
+                    SmallKey(c.key, "Answer ${c.key}: ${c.label}", m, accent = true, enabled = open) {
+                        // A digit goes as typed text. The arrows and Enter of a menu go as keys.
+                        val sent = if (c.keys == listOf(c.key)) input.choose(c.key) else c.keys.all { input.key(it) }
+                        if (sent) {
+                            answered = out
+                            // A typed digit gets no sent answer, so the screen reads the next dialog itself.
+                            if (!isDemo(d.id)) HerdrSync.rereadSoon(FluxCore, d.id, agent.pane)
+                        }
                     }
                 }
+                i < digits.size + row.size -> {
+                    val (label, key, _) = row[i - digits.size]
+                    SmallKey(label, keyName(key), m, enabled = on) { input.key(key) }
+                }
+                else -> {
+                    val shape = RoundedCornerShape(8.dp)
+                    Box(
+                        m.fillMaxHeight().alpha(if (on) 1f else DimAlpha).clip(shape).background(Tn.tile).border(1.dp, Tn.line, shape)
+                            .clickable(enabled = on, onClickLabel = "Show the keyboard", role = Role.Button) { input.showKeyboard() }
+                            .clearAndSetSemantics { contentDescription = "Show the keyboard" },
+                        contentAlignment = Alignment.Center,
+                    ) { Sym(Ic.keyboard, tint = Tn.sub, size = 20.dp) }
+                }
             }
-            for ((label, key, share) in DockKeys) SmallKey(label, keyName(key), Modifier.weight(share), enabled = on) { input.key(key) }
-            val shape = RoundedCornerShape(8.dp)
-            Box(
-                Modifier.weight(1f).fillMaxHeight().alpha(if (on) 1f else DimAlpha).clip(shape).background(Tn.tile).border(1.dp, Tn.line, shape)
-                    .clickable(enabled = on, onClickLabel = "Show the keyboard", role = Role.Button) { input.showKeyboard() }
-                    .clearAndSetSemantics { contentDescription = "Show the keyboard" },
-                contentAlignment = Alignment.Center,
-            ) { Sym(Ic.keyboard, tint = Tn.sub, size = 20.dp) }
         }
     }
 }
@@ -2076,6 +2113,31 @@ private val KeyMaxWidth = 80.dp
 
 /** The narrowest key: the touch target of 48 dp. */
 private val KeyMinWidth = 48.dp
+
+/** True when keys of [shares] fit 1 row of [width] at [KeyMinWidth] each, with [gap] between them. */
+internal fun keysFitOneRow(shares: List<Float>, width: Dp, gap: Dp): Boolean =
+    KeyMinWidth * shares.sum() + gap * (shares.size - 1) <= width
+
+/** The fewest rows of even length in which keys of [shares] keep [KeyMinWidth]. A key gets a row of its own at worst. */
+internal fun keyRows(shares: List<Float>, width: Dp, gap: Dp): List<List<Int>> =
+    (1..shares.size).firstNotNullOfOrNull { n ->
+        shares.indices.chunked((shares.size + n - 1) / n)
+            .takeIf { rows -> rows.all { r -> keysFitOneRow(r.map { shares[it] }, width, gap) } }
+    } ?: shares.indices.map { listOf(it) }
+
+/** Lays out keys of [shares] in the rows of [keyRows], each [height] tall. [draw] draws key i with its modifier. */
+@Composable
+private fun SmallKeyRows(shares: List<Float>, height: Dp, draw: @Composable (Int, Modifier) -> Unit) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        Column(verticalArrangement = Arrangement.spacedBy(SmallKeyGap)) {
+            for (r in keyRows(shares, maxWidth, SmallKeyGap)) {
+                Row(Modifier.fillMaxWidth().height(height), horizontalArrangement = Arrangement.spacedBy(SmallKeyGap)) {
+                    for (i in r) draw(i, Modifier.weight(shares[i]))
+                }
+            }
+        }
+    }
+}
 
 /**
  * The key bar of the agent and terminal screens. The keys share 1 row, up
