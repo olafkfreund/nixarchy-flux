@@ -99,6 +99,9 @@ class Device(private val core: FluxCore, var identity: Identity) {
     /** The key bindings and workspaces of the computer, or null before the first answer. */
     var shortcuts: ShortcutsState? = null
 
+    /** The last answer to a list request of the History screen, see ClipHistory. */
+    var clipHistory: ClipHistoryAnswer? = null
+
     /** The audio outputs of the computer, or null before the first answer. */
     var outputs: AudioOutputs? = null
 
@@ -184,6 +187,8 @@ class Device(private val core: FluxCore, var identity: Identity) {
         extendSupported = extendSupported,
         shortcutsSupported = Types.FLUX_SHORTCUTS in identity.incoming,
         shortcuts = shortcuts,
+        clipHistorySupported = Types.FLUX_CLIPBOARD_HISTORY in identity.incoming,
+        clipHistory = clipHistory,
         lastSeen = lastSeen,
         canWake = wake.isNotEmpty(),
         outputsSupported = Types.FLUX_AUDIO_REQUEST in identity.incoming,
