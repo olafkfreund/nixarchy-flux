@@ -220,6 +220,13 @@ func TestMediaGoesOneWay(t *testing.T) {
 	}
 }
 
+func TestClipboardHistoryGoesBothWays(t *testing.T) {
+	// The phone asks with the type, and fluxd answers with it.
+	if !slices.Contains(Incoming, TypeFluxClipboardHistory) || !slices.Contains(Outgoing, TypeFluxClipboardHistory) {
+		t.Error("the computer must take and send flux.clipboard.history")
+	}
+}
+
 func TestThemeGoesOneWay(t *testing.T) {
 	// The computer sends its Omarchy theme to the phone. It does not take
 	// a theme from the phone.

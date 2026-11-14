@@ -127,6 +127,8 @@ func (d *Daemon) handlePacket(dev *Device, l *lan.Link, p *proto.Packet) {
 		d.handleDesktop(dev, l, p)
 	case proto.TypeFluxShortcuts:
 		d.handleShortcuts(dev, l, p)
+	case proto.TypeFluxClipboardHistory:
+		d.handleClipHistory(dev, l, p)
 	case proto.TypeFluxApprove:
 		d.handleApprove(dev, p)
 	case proto.TypeFluxSSH:
