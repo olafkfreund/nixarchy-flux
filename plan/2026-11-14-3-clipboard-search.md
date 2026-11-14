@@ -1243,3 +1243,4 @@ its tests run on a copy of `feat/16-pause-clipboard`.
 
 | # | Step | What changed and why |
 | --- | --- | --- |
+| P1 | review, CI | CI compile error: the screen reused the existing `internal openLink` (AboutScreen.kt) instead of a second private one. Review fixes (Opus, Codex, agy): a cached answer is reused only when `ok` (screen restore), so Retry asks again; `FluxCore.detach` clears `clipHistory`, so a reconnect refetches. `ClipHistory.onPacket` delegates to a testable `handle`. New tests: fetch by id of another device's, a desktop-only, an image and a pinned entry through the handler (not_found), a fetch with the switch off and without the capability, filter before the cap, search past the 1 KiB preview; Android: list and entry packets, the full-entry copy, forgotten or replaced copies, wrong-device answers. Not changed: entry dates still show the time of day only. |
