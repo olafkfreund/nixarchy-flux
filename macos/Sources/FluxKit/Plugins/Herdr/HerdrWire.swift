@@ -324,7 +324,7 @@ public struct HerdrDone: Sendable, Equatable {
 /// internal/core/herdr.go in fluxd is the other side.
 public enum HerdrWire {
     /// The key names that fluxd accepts in a keys packet.
-    public static let allowedKeys: Set<String> = Set(["enter", "esc", "tab", "shift+tab", "up", "down", "left", "right", "backspace", "space", "y", "n"]
+    public static let allowedKeys: Set<String> = Set(["enter", "esc", "tab", "shift+tab", "up", "down", "left", "right", "shift+left", "shift+right", "backspace", "space", "y", "n"]
         + (0...9).map(String.init))
     /// The key names that fluxd accepts in an input packet for a terminal.
     public static let terminalKeys: Set<String> = Set(["enter", "esc", "tab", "shift+tab", "up", "down", "left", "right", "backspace", "space"]
