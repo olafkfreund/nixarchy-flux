@@ -707,8 +707,8 @@ func (d *Daemon) setSetting(key string, value any) error {
 		d.wakeDnd()
 	}
 	if key == "autoClipboard" && !b {
-		// An image that is on its way to the phones stops.
-		d.stopClipSend()
+		// An automatic image that is on its way to the phones stops.
+		d.stopAutoClipSend()
 	}
 	if key == "checkUpdates" {
 		d.wakeRelease()
@@ -743,8 +743,8 @@ func (d *Daemon) Reload() error {
 	d.wakeDnd()
 	d.wakeRelease()
 	if !auto {
-		// An image that is on its way to the phones stops.
-		d.stopClipSend()
+		// An automatic image that is on its way to the phones stops.
+		d.stopAutoClipSend()
 	}
 	d.policiesChanged()
 	return nil
