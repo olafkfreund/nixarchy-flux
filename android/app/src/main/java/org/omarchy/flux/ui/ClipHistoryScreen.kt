@@ -1,8 +1,5 @@
 package org.omarchy.flux.ui
 
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,8 +55,9 @@ fun ClipHistoryScreen(d: DeviceUi, onBack: () -> Unit) {
             ClipHistory.forget() // a copy in flight can't be answered on a lost link
             return@LaunchedEffect
         }
-        // After a rotation the answer to the saved request still holds.
-        if (d.clipHistory?.let { it.request == request && it.query == query } == true) return@LaunchedEffect
+        // After a rotation a good answer to the saved request still holds. Retry and a reconnect ask again
+        // (Retry only shows without a good answer, and a lost link clears the answer).
+        if (d.clipHistory?.let { it.state == "ok" && it.request == request && it.query == query } == true) return@LaunchedEffect
         if (query.isNotEmpty()) delay(300)
         request = ClipHistory.list(d.id, query) { FluxCore.device(d.id)?.send(it) == true }
     }
@@ -168,10 +166,4 @@ private fun copyEntry(d: DeviceUi, e: HistoryEntry) {
         return
     }
     if (!ClipHistory.copy(d.id, e.id) { FluxCore.device(d.id)?.send(it) == true }) FluxCore.toast("${d.name} is not reachable")
-}
-
-/** Opens a web link in the browser. */
-private fun openLink(context: Context, link: String) {
-    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link))) }
-        .onFailure { FluxCore.toast("No app opens this link") }
 }

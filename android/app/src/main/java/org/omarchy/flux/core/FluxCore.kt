@@ -420,6 +420,7 @@ object FluxCore {
             // no longer arrive, so a reconnect could never open a stream.
             if (!terminalSurvivesLinkChange(link, null)) d.herdrTerminal = null
             MotionCues.onLinkLost(d)
+            d.clipHistory = null // a reconnect asks again
             d.link = null
             d.lastSeen = System.currentTimeMillis()
             d.dropPairing()

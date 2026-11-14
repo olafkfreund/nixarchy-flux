@@ -72,6 +72,23 @@ func TestHistoryMatches(t *testing.T) {
 		t.Fatal("10 entries can't have more")
 	}
 
+	// Match first, then cap: 50 own entries that don't match come before the one that does.
+	var late []ClipEntry
+	for i := range maxHistoryAnswer {
+		late = append(late, ClipEntry{ID: fmt.Sprint("n", i), Text: "no", Dir: "in", Device: "phone"})
+	}
+	late = append(late, ClipEntry{ID: "hit", Text: "needle", Dir: "in", Device: "phone"})
+	if got, more := historyMatches(ownClips(late, nil, "phone"), "needle"); !slices.Equal(historyIDs(got), []string{"hit"}) || more {
+		t.Fatalf("needle after 50 misses: %v more %v", historyIDs(got), more)
+	}
+
+	// A query found only past the preview still matches: search runs over the whole text.
+	deep := strings.Repeat("a", maxClipPreview+10) + "needle"
+	got, _ = historyMatches([]ClipEntry{{ID: "d", Text: deep, Dir: "in", Device: "phone"}}, "NEEDLE")
+	if len(got) != 1 || !got[0].Truncated || strings.Contains(got[0].Text, "needle") {
+		t.Fatalf("deep match: %+v", got)
+	}
+
 	// A long text comes cut, as valid UTF-8, with its full size.
 	long := "a" + strings.Repeat("é", maxClipPreview)
 	got, _ = historyMatches([]ClipEntry{{ID: "l", Text: long, Dir: "in", Device: "phone"}}, "")
@@ -143,6 +160,12 @@ func TestClipHistoryHandler(t *testing.T) {
 	if b := ask(map[string]any{"request": 8.0, "entry": "a1"}); b["state"] != "ok" {
 		t.Fatalf("entry: %v", b)
 	}
+	// Another device's entry, an image, a pinned entry and a desktop-only copy: not_found, no entry.
+	for _, id := range []string{"a3", "a4", "a5", "a6"} {
+		if b := ask(map[string]any{"request": 12.0, "entry": id}); b["state"] != "not_found" || b["entry"] != nil {
+			t.Fatalf("entry %s: %v", id, b)
+		}
+	}
 	for _, body := range []map[string]any{
 		{"request": 9.0},
 		{"request": 9.0, "query": "a", "entry": "a1"},
@@ -157,6 +180,9 @@ func TestClipHistoryHandler(t *testing.T) {
 	if b := ask(map[string]any{"request": 10.0, "query": ""}); b["state"] != "disabled" || b["entries"] != nil {
 		t.Fatalf("disabled: %v", b)
 	}
+	if b := ask(map[string]any{"request": 10.0, "entry": "a1"}); b["state"] != "disabled" || b["entry"] != nil {
+		t.Fatalf("disabled fetch: %v", b)
+	}
 	d.cfg.Devices = nil
 
 	// A peer that doesn't list the type gets nothing.
@@ -165,6 +191,10 @@ func TestClipHistoryHandler(t *testing.T) {
 	d.handleClipHistory(dev, l, proto.New(proto.TypeFluxClipboardHistory, map[string]any{"request": 11.0, "query": ""}))
 	if len(sent()) != n {
 		t.Fatal("answered a peer without the capability")
+	}
+	d.handleClipHistory(dev, l, proto.New(proto.TypeFluxClipboardHistory, map[string]any{"request": 12.0, "entry": "a1"}))
+	if len(sent()) != n {
+		t.Fatal("fetched for a peer without the capability")
 	}
 }
 

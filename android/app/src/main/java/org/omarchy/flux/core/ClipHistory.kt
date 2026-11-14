@@ -134,23 +134,32 @@ object ClipHistory {
 
     /** Handles an answer. The core lock is held. */
     fun onPacket(core: FluxCore, d: Device, p: Packet) {
+        val from = d.identity.deviceName
+        handle(d.id, from, p, { main.post { it() } }, { Plugins.putRemoteText(core, d.id, from, it) }, core::toast) { d.clipHistory = it }
+    }
+
+    /** [onPacket] with its effects as arguments, so a test can run the posted work. */
+    internal fun handle(
+        deviceId: String, from: String, p: Packet,
+        post: (() -> Unit) -> Unit, put: (String) -> Boolean, toast: (String) -> Unit, store: (ClipHistoryAnswer) -> Unit,
+    ) {
         val request = p.long("request") ?: return
-        when (kind(d.id, request)) {
+        when (kind(deviceId, request)) {
             Kind.Copy -> {
-                val from = d.identity.deviceName
                 val state = p.string("state")
                 val text = p.obj("entry")?.str("text")
                 // On the main thread, where forget runs, so a forget that came first wins.
-                main.post {
-                    if (!takeCopy(d.id, request)) return@post
-                    if (state == "ok" && text != null) {
-                        if (Plugins.putRemoteText(core, d.id, from, text)) core.toast("Copied to this phone")
-                    } else {
-                        core.toast(copyMessage(state, from))
+                post {
+                    if (takeCopy(deviceId, request)) {
+                        if (state == "ok" && text != null) {
+                            if (put(text)) toast("Copied to this phone")
+                        } else {
+                            toast(copyMessage(state, from))
+                        }
                     }
                 }
             }
-            Kind.List -> acceptList(d.id, p)?.let { d.clipHistory = it }
+            Kind.List -> acceptList(deviceId, p)?.let(store)
             Kind.Stale -> Unit
         }
     }

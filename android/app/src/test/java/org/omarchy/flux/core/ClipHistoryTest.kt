@@ -120,4 +120,85 @@ class ClipHistoryTest {
         assertTrue(ClipHistory.fits("a".repeat(1020) + "😀"))
         assertFalse(ClipHistory.fits("a".repeat(1021) + "😀"))
     }
+
+    /** What [ClipHistory.handle] did: the work it posted, the texts it put, the toasts, the stored answers. */
+    private class Run {
+        val posted = mutableListOf<() -> Unit>()
+        val put = mutableListOf<String>()
+        val toasts = mutableListOf<String>()
+        val stored = mutableListOf<ClipHistoryAnswer>()
+        fun handle(device: String, p: Packet) =
+            ClipHistory.handle(device, "desk", p, { posted += it }, { put += it; true }, { toasts += it }) { stored += it }
+        fun runPosted() = posted.toList().also { posted.clear() }.forEach { it() }
+    }
+
+    private fun fullAnswer(request: Long, text: String) = answer("request" to request, "state" to "ok", "entry" to entry("e", text))
+
+    @Test
+    fun packetsHaveTypeRequestAndQuery() {
+        var list: Packet? = null
+        val id = ClipHistory.list("packet-pc", "git") { list = it; true }
+        assertEquals(Types.FLUX_CLIPBOARD_HISTORY, list!!.type)
+        assertEquals(id, list!!.long("request"))
+        assertEquals("git", list!!.string("query"))
+        assertFalse(list!!.has("entry"))
+        var copy: Packet? = null
+        ClipHistory.copy("packet-pc", "e9") { copy = it; true }
+        assertEquals(Types.FLUX_CLIPBOARD_HISTORY, copy!!.type)
+        assertEquals("e9", copy!!.string("entry"))
+        assertFalse(copy!!.has("query"))
+    }
+
+    @Test
+    fun aFullAnswerCopiesItsText() {
+        val run = Run()
+        var request = 0L
+        ClipHistory.copy("full-pc", "e") { request = it.long("request")!!; true }
+        run.handle("full-pc", fullAnswer(request, "the whole text"))
+        assertTrue("nothing happens before the main thread runs it", run.put.isEmpty())
+        run.runPosted()
+        assertEquals(listOf("the whole text"), run.put)
+        assertEquals(listOf("Copied to this phone"), run.toasts)
+    }
+
+    @Test
+    fun aForgottenOrReplacedCopyWritesNothing() {
+        val run = Run()
+        var first = 0L
+        ClipHistory.copy("late-pc", "e1") { first = it.long("request")!!; true }
+        run.handle("late-pc", fullAnswer(first, "old"))
+        ClipHistory.forget() // after the answer was queued, before it ran
+        run.runPosted()
+        var second = 0L
+        ClipHistory.copy("late-pc", "e2") { second = it.long("request")!!; true }
+        run.handle("late-pc", fullAnswer(second, "new"))
+        ClipHistory.copy("late-pc", "e3") { true } // a newer copy replaces it
+        run.runPosted()
+        assertTrue(run.put.isEmpty())
+        assertTrue(run.toasts.isEmpty())
+    }
+
+    @Test
+    fun anAnswerFromAnotherComputerIsIgnored() {
+        val run = Run()
+        var request = 0L
+        ClipHistory.copy("mine-pc", "e") { request = it.long("request")!!; true }
+        run.handle("other-pc", fullAnswer(request, "stolen"))
+        assertTrue(run.posted.isEmpty())
+        run.handle("mine-pc", fullAnswer(request, "right"))
+        run.runPosted()
+        assertEquals(listOf("right"), run.put)
+    }
+
+    @Test
+    fun aListAnswerIsStoredOnlyForTheCurrentRequest() {
+        val run = Run()
+        val first = ClipHistory.list("store-pc", "a") { true }
+        val second = ClipHistory.list("store-pc", "ab") { true }
+        run.handle("store-pc", answer("request" to first, "state" to "ok", "entries" to emptyList<Any>()))
+        run.handle("other-pc", answer("request" to second, "state" to "ok", "entries" to emptyList<Any>()))
+        assertTrue(run.stored.isEmpty())
+        run.handle("store-pc", answer("request" to second, "state" to "ok", "entries" to listOf(entry("a", "ab c"))))
+        assertEquals(listOf(second), run.stored.map { it.request })
+    }
 }
