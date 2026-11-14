@@ -1108,11 +1108,13 @@ func TestHerdrTerminalTypedInput(t *testing.T) {
 		{"kind": "terminal_input", "session": "ts1", "text": "src/main"},
 		{"kind": "terminal_input", "session": "ts1", "key": "down"},
 		{"kind": "terminal_input", "session": "ts1", "key": "shift+tab"},
+		{"kind": "terminal_input", "session": "ts1", "key": "shift+left"},
+		{"kind": "terminal_input", "session": "ts1", "key": "shift+right"},
 		{"kind": "terminal_input", "session": "ts1", "key": "enter"},
 	} {
 		d.handleHerdr(dev, desk, proto.New(proto.TypeFluxHerdr, ev))
 	}
-	want := []string{"@", "src/main", "\x1b[B", "\x1b[Z", "\r"}
+	want := []string{"@", "src/main", "\x1b[B", "\x1b[Z", "\x1b[1;2D", "\x1b[1;2C", "\r"}
 	got := echoedInputs(t, answers, len(want))
 	for i := range want {
 		if got[i] != want[i] {

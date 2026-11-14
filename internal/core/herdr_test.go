@@ -1007,6 +1007,7 @@ func TestHerdrInput(t *testing.T) {
 		{"agent pane", d.herdrInput(dev, "w1:p1", "ls", nil), "No terminal is in w1:p1"},
 		{"nothing", d.herdrInput(dev, "w1:p2", "\x1b", nil), "Send text or a key"},
 		{"key not allowed", d.herdrInput(dev, "w1:p2", "", []string{"f1"}), `The key "f1" is not allowed`},
+		{"shifted arrow", d.herdrInput(dev, "w1:p2", "", []string{"shift+left"}), `The key "shift+left" is not allowed`},
 		{"too many keys", d.herdrInput(dev, "w1:p2", "", strings.Split("up up up up up up up up up", " ")), "Send 0 to 8 keys"},
 	}
 	for _, c := range refused {
@@ -1328,6 +1329,14 @@ func TestHerdrReplies(t *testing.T) {
 	}
 	if calls := f.takeCalls(); len(calls) != 1 || calls[0] != `agent.send_keys {"keys":["2","enter"],"target":"w1:p1"}` {
 		t.Errorf("keys calls %v", calls)
+	}
+
+	body = sentBody(t, d.herdrKeys(dev, "w1:p1", []string{"shift+left", "shift+right"}))
+	if body["error"] != nil || body["action"] != "keys" {
+		t.Errorf("shifted keys: %v", body)
+	}
+	if calls := f.takeCalls(); len(calls) != 1 || calls[0] != `agent.send_keys {"keys":["shift+left","shift+right"],"target":"w1:p1"}` {
+		t.Errorf("shifted keys calls %v", calls)
 	}
 
 	body = sentBody(t, d.herdrPrompt(dev, "w1:p1", "  Run the tests\r\nagain\x1b[A  ", false))
