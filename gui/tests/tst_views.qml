@@ -1246,6 +1246,49 @@ Item {
       verify(items[0].at >= items[1].at)
     }
 
+    // A pause of clipboard sync shows on every device's chat, above the
+    // list, and Resume ends it.
+    function test_clipboardPausedLine() {
+      mock.setState(function (s) { s.clipboardPaused = true })
+      var view = chat()
+      var row = findBy(page(view), "objectName", "clipPaused")
+      verify(row.visible)
+      var list = findBy(page(view), "objectName", "chatList")
+      verify(list.y >= row.y + row.height)
+      var text = findBy(page(view), "objectName", "clipPausedText")
+      var button = findBy(page(view), "objectName", "clipResume")
+      verify(text.contentWidth <= text.width)
+      verify(text.x + text.width <= button.x)
+      compare(text.wrapMode, Text.Wrap)
+      view.selectedId = top.iphone
+      tryVerify(function () { var r = findBy(page(view), "objectName", "clipPaused"); return !!r && r.visible })
+      findBy(page(view), "objectName", "clipResume").clicked()
+      compare(requestsOf("clipboard.resume").length, 1)
+      tryVerify(function () { return !findBy(page(view), "objectName", "clipPaused").visible })
+      tryVerify(function () { return !!findBy(view, "text", "Clipboard sync resumed") })
+    }
+
+    function test_noPausedLineWhileSyncing() {
+      var view = chat()
+      verify(!findBy(page(view), "objectName", "clipPaused").visible)
+      var bar = findBy(page(view), "objectName", "chatToolbar")
+      var list = findBy(page(view), "objectName", "chatList")
+      compare(list.y, bar.y + bar.height + 14)
+    }
+
+    // At a compact width the text wraps beside the button.
+    function test_clipboardPausedLineCompact() {
+      mock.setState(function (s) { s.clipboardPaused = true })
+      var view = chat()
+      page(view).width = 270
+      tryVerify(function () { return page(view).compact })
+      var text = findBy(page(view), "objectName", "clipPausedText")
+      verify(text.lineCount > 1)
+      var button = findBy(page(view), "objectName", "clipResume")
+      verify(text.contentWidth <= text.width)
+      verify(text.x + text.width <= button.x)
+    }
+
     function test_textGoesToTheClipboardOfTheDevice() {
       var view = chat()
       var field = draft(view)

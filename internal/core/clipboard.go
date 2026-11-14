@@ -140,17 +140,22 @@ func (d *Daemon) addClipImage(e ClipEntry, data []byte, mime string) error {
 }
 
 // addClipImageIf is addClipImage with the condition ok, which runs under
-// d.mu after the save. When ok returns false, addClipImageIf removes the
-// saved file and the history does not change. A nil ok is always true.
+// d.mu before and after the save. When ok returns false, addClipImageIf
+// writes no file, or removes the saved one, and the history does not
+// change. A nil ok is always true. A failed save leaves no file.
 func (d *Daemon) addClipImageIf(e ClipEntry, data []byte, mime string, ok func() bool) error {
 	d.mu.Lock()
-	dir := d.clipDir
+	dir, stop := d.clipDir, ok != nil && !ok()
 	d.mu.Unlock()
+	if stop {
+		return nil
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	path := filepath.Join(dir, "clip-"+config.NewID(6)+imageExt(mime))
 	if err := os.WriteFile(path, data, 0o600); err != nil {
+		os.Remove(path)
 		return err
 	}
 	sum := sha256.Sum256(data)
@@ -211,36 +216,148 @@ func imageExt(mime string) string {
 	return ".png"
 }
 
-// newClipSend stops the clipboard image that fluxd sends, and returns the
-// context for the next one.
-func (d *Daemon) newClipSend() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(d.ctx, clipImageTimeout)
+// newClipSend stops the image that fluxd sends and registers the next
+// one. auto marks an automatic send. For an automatic send it first
+// checks that no pause came after gen, and returns ok false without
+// stopping anything when one did.
+func (d *Daemon) newClipSend(auto bool, gen uint64) (ctx context.Context, cancel context.CancelFunc, ok bool) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
+	if auto && (d.clipPaused || d.clipGen != gen) {
+		return nil, nil, false
+	}
+	ctx, cancel = context.WithTimeout(d.ctx, clipImageTimeout)
 	if d.clipSend != nil {
 		d.clipSend()
 	}
-	d.clipSend = cancel
-	d.mu.Unlock()
-	return ctx, cancel
+	d.clipSend, d.clipSendAuto = cancel, auto
+	return ctx, cancel, true
 }
 
-// stopClipSend stops the clipboard image that fluxd sends.
-func (d *Daemon) stopClipSend() {
-	d.mu.Lock()
-	if d.clipSend != nil {
+// stopAutoClipSendLocked stops the automatic image that fluxd sends. A
+// manual send goes on. The caller holds d.mu.
+func (d *Daemon) stopAutoClipSendLocked() {
+	if d.clipSend != nil && d.clipSendAuto {
 		d.clipSend()
 		d.clipSend = nil
 	}
+}
+
+// stopAutoClipSend is stopAutoClipSendLocked with the lock.
+func (d *Daemon) stopAutoClipSend() {
+	d.mu.Lock()
+	d.stopAutoClipSendLocked()
 	d.mu.Unlock()
 }
 
+// resumeGrace covers the time between a copy and the start of its
+// watcher script, so a copy made just before a resume counts as paused.
+const resumeGrace = 250 * time.Millisecond
+
+// copyPausedLocked reports whether a local copy made at the boot time at
+// is a paused copy: made while paused, before the last resume, or less
+// than resumeGrace after it. The caller holds d.mu.
+func (d *Daemon) copyPausedLocked(at time.Duration) bool {
+	return d.clipPaused || at <= d.resumedAt+resumeGrace
+}
+
+// autoAllowed reports whether automatic work admitted in generation gen
+// may go on. It takes d.mu.
+func (d *Daemon) autoAllowed(gen uint64) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cfg.AutoClipboard && !d.clipPaused && d.clipGen == gen
+}
+
+// hook calls clipHook for a test.
+func (d *Daemon) hook(stage string) {
+	if d.clipHook != nil {
+		d.clipHook(stage)
+	}
+}
+
+// PauseClipboard stops the automatic sync of local copies until
+// ResumeClipboard. It clears the last text for a device that connects,
+// and stops an automatic image send. The marker keeps the pause over a
+// restart of fluxd.
+func (d *Daemon) PauseClipboard() error {
+	d.pauseMu.Lock()
+	defer d.pauseMu.Unlock()
+	var err error
+	if d.clipPauseFile != "" {
+		err = writePauseFile(d.clipPauseFile) // first, so a crash after it stays paused
+	}
+	d.mu.Lock()
+	d.clipPaused = true
+	d.clipGen++
+	d.content.lastClip = ""
+	d.stopAutoClipSendLocked()
+	d.mu.Unlock()
+	d.markDirty()
+	if err != nil {
+		d.logf("clipboard pause: %v", err)
+		return apiErr("not_saved", "Clipboard sync is paused, but a restart of fluxd would resume it: %v", err)
+	}
+	return nil
+}
+
+// ResumeClipboard ends a pause. It sends nothing by itself.
+func (d *Daemon) ResumeClipboard() error {
+	d.pauseMu.Lock()
+	defer d.pauseMu.Unlock()
+	d.mu.Lock()
+	if d.clipPaused {
+		d.clipPaused = false
+		d.resumedAt = desktop.BootTime()
+	}
+	d.mu.Unlock()
+	d.markDirty()
+	if d.clipPauseFile == "" {
+		return nil
+	}
+	// After the memory change, so a crash before it stays paused.
+	if err := os.Remove(d.clipPauseFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		d.logf("clipboard resume: %v", err)
+		return apiErr("not_saved", "Clipboard sync resumed, but a restart of fluxd would pause it again: %v", err)
+	}
+	return nil
+}
+
+// writePauseFile writes the empty pause marker at path.
+func writePauseFile(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, nil, 0o600)
+}
+
+// loadClipPause sets the marker path and starts paused when it exists.
+func (d *Daemon) loadClipPause(path string) {
+	d.clipPauseFile = path
+	// Any error but "no marker" fails closed: a copy must not leak.
+	_, err := os.Stat(path)
+	if err == nil {
+		d.clipPaused = true
+		d.logf("clipboard sync is paused (%s)", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		d.clipPaused = true
+		d.logf("clipboard sync is paused, the marker can't be read: %v", err)
+	}
+}
+
 // onLocalClipboard sends a local clipboard change to every paired device.
-// A text above maxSentText goes only to the clipboard history.
-func (d *Daemon) onLocalClipboard(text string) {
+// A text above maxSentText goes only to the clipboard history. A paused
+// copy only updates lastClipAt.
+func (d *Daemon) onLocalClipboard(text string, at time.Duration) {
 	fits := len(text) <= maxSentText
 	d.mu.Lock()
-	d.lastLocalClip = time.Now()
-	d.lastClipAt = d.lastLocalClip
+	d.lastClipAt = time.Now()
+	if d.copyPausedLocked(at) {
+		d.mu.Unlock()
+		return
+	}
+	d.lastLocalClip = d.lastClipAt
+	gen := d.clipGen
 	// A device that connects later gets no older text in place of a text
 	// that is too large.
 	d.content.lastClip = ""
@@ -254,13 +371,17 @@ func (d *Daemon) onLocalClipboard(text string) {
 			to = d.featureDevicesLocked("clipboard")
 		}
 		d.addClipLocked(ClipEntry{Text: text, Dir: "out", DeviceName: "this pc", To: to, Time: time.Now().Unix()})
+		// The text replaces an automatic image that is still on its way.
+		d.stopAutoClipSendLocked()
 	}
 	d.mu.Unlock()
 	if !auto {
 		return
 	}
-	// The text replaces an image that is still on its way.
-	d.stopClipSend()
+	defer d.markDirty()
+	if !d.autoAllowed(gen) {
+		return
+	}
 	links := d.featureLinks("clipboard")
 	switch {
 	case !fits && len(links) > 0:
@@ -268,23 +389,32 @@ func (d *Daemon) onLocalClipboard(text string) {
 		d.toast("The copied text is larger than %d KiB. Flux did not sync it", maxSentText>>10)
 	case fits:
 		for _, l := range links {
+			d.hook("text")
+			if !d.autoAllowed(gen) {
+				break
+			}
 			_ = l.Send(proto.New(proto.TypeClipboard, map[string]any{"content": text}))
 		}
 	}
-	d.markDirty()
 }
 
 // onLocalImage sends a local image copy to every paired device that
-// accepts clipboard images. A newer copy, an unpair, a dropped link, and
-// auto_clipboard off stop the transfer.
-func (d *Daemon) onLocalImage(data []byte, mime string) {
+// accepts clipboard images. A newer copy, an unpair, a dropped link,
+// auto_clipboard off, and a pause stop the transfer. A paused copy only
+// updates lastClipAt.
+func (d *Daemon) onLocalImage(data []byte, mime string, at time.Duration) {
 	type target struct {
 		dev *Device
 		l   *lan.Link
 	}
 	d.mu.Lock()
-	d.lastLocalClip = time.Now()
-	d.lastClipAt = d.lastLocalClip
+	d.lastClipAt = time.Now()
+	if d.copyPausedLocked(at) {
+		d.mu.Unlock()
+		return
+	}
+	d.lastLocalClip = d.lastClipAt
+	gen := d.clipGen
 	// A device that connects later gets no older text in place of the
 	// image.
 	d.content.lastClip = ""
@@ -303,15 +433,22 @@ func (d *Daemon) onLocalImage(data []byte, mime string) {
 	for _, t := range targets {
 		to = append(to, t.dev.ID)
 	}
-	if err := d.addClipImage(ClipEntry{Dir: "out", DeviceName: "this pc", To: to, Time: time.Now().Unix()}, data, mime); err != nil {
+	d.hook("image")
+	// current runs under d.mu: it reads the fields and must not call autoAllowed.
+	current := func() bool { return !d.clipPaused && d.clipGen == gen }
+	if err := d.addClipImageIf(ClipEntry{Dir: "out", DeviceName: "this pc", To: to, Time: time.Now().Unix()}, data, mime, current); err != nil {
 		d.logf("save clipboard image: %v", err)
 	}
-	ctx, cancel := d.newClipSend()
+	ctx, cancel, ok := d.newClipSend(true, gen)
+	if !ok {
+		return
+	}
 	go func() {
+		defer d.hook("image-end")
 		defer cancel()
 		for _, t := range targets {
 			d.mu.Lock()
-			ok := t.dev.Paired && t.dev.link == t.l && d.cfg.AutoClipboard && d.permittedLocked(t.dev.ID, "clipboard")
+			ok := t.dev.Paired && t.dev.link == t.l && d.cfg.AutoClipboard && !d.clipPaused && d.clipGen == gen && d.permittedLocked(t.dev.ID, "clipboard")
 			d.mu.Unlock()
 			if !ok || ctx.Err() != nil {
 				continue
@@ -329,10 +466,11 @@ func (d *Daemon) onLocalImage(data []byte, mime string) {
 
 // sendConnectClipboard sends the last text that Watch reported to a device
 // that connects, with the time of the last local copy. The device keeps
-// its own clipboard when that is newer.
+// its own clipboard when that is newer. Nothing goes out while clipboard
+// sync is paused.
 func (d *Daemon) sendConnectClipboard(l *lan.Link) {
 	d.mu.Lock()
-	text, ts, auto := d.content.lastClip, d.lastLocalClip.UnixMilli(), d.cfg.AutoClipboard
+	text, ts, auto := d.content.lastClip, d.lastLocalClip.UnixMilli(), d.cfg.AutoClipboard && !d.clipPaused
 	auto = auto && d.permittedLocked(l.DeviceID(), "clipboard")
 	d.mu.Unlock()
 	if !auto || text == "" || ts <= 0 {
@@ -588,7 +726,7 @@ func (d *Daemon) sendImageTo(dev *Device, data []byte) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := d.newClipSend()
+	ctx, cancel, _ := d.newClipSend(false, 0)
 	defer cancel()
 	if err := sendClipImage(ctx, l, data, desktop.ImageType); err != nil {
 		return err

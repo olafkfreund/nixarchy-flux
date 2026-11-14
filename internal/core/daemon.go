@@ -48,8 +48,26 @@ type Daemon struct {
 	// clipDir holds the images of the clipboard history. clipSend stops
 	// the image that fluxd sends to the phones, when a newer copy replaces
 	// it.
-	clipDir        string
-	clipSend       context.CancelFunc
+	clipDir  string
+	clipSend context.CancelFunc
+	// clipPaused stops the automatic sync of local copies
+	// (clipboard.pause). resumedAt is the boot time of the last resume.
+	// clipGen grows on each pause, so automatic work admitted before a
+	// pause stops at its next check. clipSendAuto is true while clipSend
+	// is an automatic image send. All under mu.
+	clipPaused   bool
+	resumedAt    time.Duration
+	clipGen      uint64
+	clipSendAuto bool
+	// clipPauseFile keeps the pause over a restart. It is "" in a
+	// headless daemon. pauseMu orders the pause and resume calls with
+	// their marker writes; take it before mu.
+	clipPauseFile string
+	pauseMu       sync.Mutex
+	// clipHook is nil in production. A test sets it to act at a stage of
+	// an automatic send: "image", "image-end" or "text". It
+	// runs without mu.
+	clipHook       func(stage string)
 	transfers      []*Transfer
 	outbox         *outbox
 	resumeReplies  map[string]chan resumeMessage
@@ -252,7 +270,7 @@ type Options struct {
 }
 
 type clipboard interface {
-	Watch(ctx context.Context, onText func(text string), onImage func(data []byte, mime string))
+	Watch(ctx context.Context, onText func(text string, at time.Duration), onImage func(data []byte, mime string, at time.Duration))
 	Get() (string, error)
 	GetImage() ([]byte, error)
 	Set(text string) error
@@ -267,7 +285,7 @@ type memClipboard struct {
 	mime  string
 }
 
-func (m *memClipboard) Watch(ctx context.Context, _ func(string), _ func([]byte, string)) {
+func (m *memClipboard) Watch(ctx context.Context, _ func(string, time.Duration), _ func([]byte, string, time.Duration)) {
 	<-ctx.Done()
 }
 func (m *memClipboard) Get() (string, error) {
@@ -356,6 +374,7 @@ func New(ctx context.Context, logger *log.Logger, opts Options) (*Daemon, error)
 	// The link handlers and the API read these fields without the lock, so
 	// they are set before any link or request can come.
 	if !opts.Headless {
+		d.loadClipPause(filepath.Join(config.RuntimeDir(), "clipboard-paused"))
 		if n, err := desktop.NewNotifier(); err == nil {
 			d.notifier = n
 			n.OnAction(d.onNotificationAction)

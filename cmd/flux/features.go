@@ -46,6 +46,17 @@ func clipboardCommand(args []string) error {
 		return printCall("clipboard.search", nil)
 	}
 	switch args[0] {
+	case "pause", "resume", "status":
+		if len(args) != 1 {
+			return fmt.Errorf("clipboard %s takes no arguments", args[0])
+		}
+		switch args[0] {
+		case "pause":
+			return call("clipboard.pause", nil)
+		case "resume":
+			return call("clipboard.resume", nil)
+		}
+		return clipboardStatus()
 	case "clear":
 		all := len(args) > 1 && args[1] == "--all"
 		return call("clipboard.clear", map[string]any{"all": all})
@@ -64,7 +75,34 @@ func clipboardCommand(args []string) error {
 		}
 		return call("settings.set", map[string]any{"key": "clipboardLimit", "value": limit})
 	}
-	return fmt.Errorf("use: flux-cli clipboard [clear [--all]|delete ID|limit [N]]")
+	return fmt.Errorf("use: flux-cli clipboard [clear [--all]|delete ID|limit [N]|pause|resume|status]")
+}
+
+// clipboardStatus prints whether local copies go to the devices.
+func clipboardStatus() error {
+	var state struct {
+		ClipboardPaused bool `json:"clipboardPaused"`
+		Settings        struct {
+			AutoClipboard bool `json:"autoClipboard"`
+		} `json:"settings"`
+	}
+	if err := callInto("state", nil, &state); err != nil {
+		return err
+	}
+	fmt.Println(clipboardStatusWord(state.ClipboardPaused, state.Settings.AutoClipboard))
+	return nil
+}
+
+// clipboardStatusWord is "paused" while clipboard.pause holds, also with
+// automatic sync off, else "off" without automatic sync, else "syncing".
+func clipboardStatusWord(paused, auto bool) string {
+	switch {
+	case paused:
+		return "paused"
+	case !auto:
+		return "off"
+	}
+	return "syncing"
 }
 
 func snippetCommand(args []string) error {

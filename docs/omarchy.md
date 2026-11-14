@@ -7,7 +7,7 @@ This plugin runs the Flux window inside `omarchy-shell`. It has 3 kinds:
 | Kind | Entry point | Job |
 | --- | --- | --- |
 | `service` | `Service.qml` | Stays loaded. Owns the fluxd connection (`Backend.qml`) and reads the active `colors.toml`. While `motion_cues` is on, it loads the [motion cues](motion-cues.md) overlay (`MotionCues.qml`), a click-through layer-shell window on each screen with the namespace `flux-motion-cues`. |
-| `bar-widget` | `BarWidget.qml` | The Flux mark. The mark has the accent color while a paired device is connected. The tooltip lists every paired device. A left click opens or closes the window. |
+| `bar-widget` | `BarWidget.qml` | The Flux mark. The mark has the accent color while a paired device is connected. The tooltip lists every paired device. The mark dims while clipboard sync is paused, and the tooltip says so. A left click opens or closes the window. |
 | `panel` | `Panel.qml` | The Flux window, a `FloatingWindow` titled `Flux`, 1180 × 760, minimum 900 × 640. |
 
 The plugin ID is `flux`.

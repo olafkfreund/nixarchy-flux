@@ -3,20 +3,25 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"flux/internal/config"
+	"flux/internal/desktop"
+	"flux/internal/lan"
 	"flux/internal/proto"
 )
 
@@ -32,6 +37,7 @@ func clipDaemon(t *testing.T, auto bool) (*Daemon, *memClipboard) {
 		cfg:     &config.Config{AutoClipboard: auto},
 		clip:    clip,
 		clipDir: t.TempDir(),
+		ctx:     t.Context(),
 		devices: map[string]*Device{},
 		logger:  log.New(io.Discard, "", 0),
 	}, clip
@@ -352,11 +358,11 @@ func TestClipHistoryTextLimit(t *testing.T) {
 // the text that Watch reported, and no text after an image copy.
 func TestConnectClipboardText(t *testing.T) {
 	d, _ := clipDaemon(t, false)
-	d.onLocalClipboard("normal text")
+	d.onLocalClipboard("normal text", desktop.BootTime())
 	if d.content.lastClip != "normal text" {
 		t.Fatalf("last text %q", d.content.lastClip)
 	}
-	d.onLocalImage(testPNG(1), "image/png")
+	d.onLocalImage(testPNG(1), "image/png", desktop.BootTime())
 	if d.content.lastClip != "" {
 		t.Fatalf("last text after an image %q", d.content.lastClip)
 	}
@@ -366,9 +372,9 @@ func TestConnectClipboardText(t *testing.T) {
 // the history, and that a device that connects gets no text.
 func TestLargeLocalText(t *testing.T) {
 	d, _ := clipDaemon(t, true)
-	d.onLocalClipboard("small text")
+	d.onLocalClipboard("small text", desktop.BootTime())
 	large := strings.Repeat("a", maxSentText+1)
-	d.onLocalClipboard(large)
+	d.onLocalClipboard(large, desktop.BootTime())
 	if d.content.lastClip != "" {
 		t.Fatalf("last text has %d bytes", len(d.content.lastClip))
 	}
@@ -389,19 +395,19 @@ func TestLocalClipNamesItsDevices(t *testing.T) {
 	d, _ := clipDaemon(t, true)
 	d.devices[phoneID] = &Device{ID: phoneID, Name: "Pixel 8", Paired: true, link: onDesk}
 	d.devices["tablet"] = &Device{ID: "tablet", Name: "Galaxy Tab", Paired: true}
-	d.onLocalClipboard("yay -S flux-git")
+	d.onLocalClipboard("yay -S flux-git", desktop.BootTime())
 	if e := d.clipboard[0]; e.Device != "" || !slices.Equal(e.To, []string{phoneID}) {
 		t.Fatalf("entry %+v", e)
 	}
 	// The same text again keeps 1 entry and adds a device that connected.
 	d.devices["tablet"].link = onDesk
-	d.onLocalClipboard("yay -S flux-git")
+	d.onLocalClipboard("yay -S flux-git", desktop.BootTime())
 	want := []string{phoneID, "tablet"}
 	slices.Sort(want)
 	if len(d.clipboard) != 1 || !slices.Equal(d.clipboard[0].To, want) {
 		t.Fatalf("history %+v", d.clipboard)
 	}
-	d.onLocalClipboard(strings.Repeat("a", maxSentText+1))
+	d.onLocalClipboard(strings.Repeat("a", maxSentText+1), desktop.BootTime())
 	if e := d.clipboard[0]; len(e.To) != 0 {
 		t.Fatalf("a text that fluxd did not send names %q", e.To)
 	}
@@ -454,8 +460,8 @@ func TestConnectClipboardTwoDevices(t *testing.T) {
 		want  string
 	}{
 		{"shared text", func(d *Daemon) { d.receiveText(phone, "shared text") }, "shared text"},
-		{"desktop text", func(d *Daemon) { d.onLocalClipboard("desktop text") }, ""},
-		{"desktop image", func(d *Daemon) { d.onLocalImage(testPNG(2), "image/png") }, ""},
+		{"desktop text", func(d *Daemon) { d.onLocalClipboard("desktop text", desktop.BootTime()) }, ""},
+		{"desktop image", func(d *Daemon) { d.onLocalImage(testPNG(2), "image/png", desktop.BootTime()) }, ""},
 	} {
 		d, clip := clipDaemon(t, true)
 		d.ctx = t.Context()
@@ -474,7 +480,6 @@ func TestConnectClipboardTwoDevices(t *testing.T) {
 // device still applies.
 func TestManualClipboard(t *testing.T) {
 	d, clip := clipDaemon(t, false)
-	d.ctx = t.Context()
 	srv := withNotifier(t, d)
 	phone := &Device{ID: "phone", Name: "Pixel 8", Paired: true}
 	d.handleClipboard(phone, proto.New(proto.TypeClipboard, map[string]any{"content": "synced text"}))
@@ -514,7 +519,6 @@ func TestManualClipboard(t *testing.T) {
 // phone. A link that does not open shows the error.
 func TestOpenLinkNotifies(t *testing.T) {
 	d, _ := clipDaemon(t, false)
-	d.ctx = t.Context()
 	srv := withNotifier(t, d)
 	var opened []string
 	open := openWebLink
@@ -737,5 +741,575 @@ func TestClipboardLimitSetting(t *testing.T) {
 	}
 	if err := d.setSetting("clipboardLimit", "not a number"); err == nil {
 		t.Errorf("string limit should fail")
+	}
+}
+
+// phoneTexts starts reading the link and returns the contents of its
+// packets of type typ, in order.
+func phoneTexts(l *lan.Link, typ string) <-chan string {
+	out := make(chan string, 16)
+	go l.Receive(func(p *proto.Packet) {
+		var b struct {
+			Content string `json:"content"`
+		}
+		if p.Type == typ && p.Decode(&b) == nil {
+			out <- b.Content
+		}
+	})
+	return out
+}
+
+// next returns the next text, or fails after 5 seconds.
+func next(t *testing.T, ch <-chan string) string {
+	t.Helper()
+	select {
+	case s := <-ch:
+		return s
+	case <-time.After(5 * time.Second):
+		t.Fatal("no packet within 5 seconds")
+		return ""
+	}
+}
+
+// wait fails the test when ch does not close or send within 5 seconds.
+func wait(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out: %s", what)
+	}
+}
+
+// afterGrace is the boot time of a copy made just after the grace of the
+// last resume.
+func afterGrace(d *Daemon) time.Duration {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.resumedAt + resumeGrace + time.Millisecond
+}
+
+// A paused text copy goes nowhere: no send, no entry, no last text. It
+// still updates lastClipAt. The next copy after the resume syncs.
+func TestPausedText(t *testing.T) {
+	onDesk, onPhone, _, phoneID := linkPair(t, t.Context())
+	got := phoneTexts(onPhone, proto.TypeClipboard)
+	d, _ := clipDaemon(t, true)
+	d.devices[phoneID] = &Device{ID: phoneID, Name: "Pixel 8", Paired: true, link: onDesk}
+	d.onLocalClipboard("before", desktop.BootTime())
+	if err := d.PauseClipboard(); err != nil {
+		t.Fatal(err)
+	}
+	if d.content.lastClip != "" {
+		t.Fatalf("the pause kept the last text %q", d.content.lastClip)
+	}
+	local, at := d.lastLocalClip, d.lastClipAt
+	d.onLocalClipboard("secret", desktop.BootTime())
+	if len(d.clipboard) != 1 || d.clipboard[0].Text != "before" || d.content.lastClip != "" || !d.lastLocalClip.Equal(local) || !d.lastClipAt.After(at) {
+		t.Fatalf("history %+v, last text %q", d.clipboard, d.content.lastClip)
+	}
+	if err := d.ResumeClipboard(); err != nil {
+		t.Fatal(err)
+	}
+	d.onLocalClipboard("after", afterGrace(d))
+	for _, want := range []string{"before", "after"} {
+		if s := next(t, got); s != want {
+			t.Fatalf("the phone got %q, want %q", s, want)
+		}
+	}
+}
+
+// A paused image copy leaves no entry, no file, and starts no send.
+func TestPausedImage(t *testing.T) {
+	d, _ := clipDaemon(t, true)
+	d.devices["phone"] = &Device{ID: "phone", Paired: true}
+	d.onLocalClipboard("before", desktop.BootTime())
+	if err := d.PauseClipboard(); err != nil {
+		t.Fatal(err)
+	}
+	local, at := d.lastLocalClip, d.lastClipAt
+	d.onLocalImage(testPNG(1), "image/png", desktop.BootTime())
+	if len(d.clipboard) != 1 || clipFiles(t, d.clipDir) != 0 || d.clipSend != nil || !d.lastLocalClip.Equal(local) || !d.lastClipAt.After(at) {
+		t.Fatalf("history %+v, %d files", d.clipboard, clipFiles(t, d.clipDir))
+	}
+}
+
+// A record that arrives after the resume but was made before it, or in
+// the grace after it, is a paused copy, over any number of cycles.
+func TestLateRecordsAfterResume(t *testing.T) {
+	d, _ := clipDaemon(t, true)
+	before := desktop.BootTime()
+	_ = d.PauseClipboard()
+	paused := desktop.BootTime()
+	_ = d.ResumeClipboard()
+	for _, at := range []time.Duration{before, paused, d.resumedAt, d.resumedAt + resumeGrace} {
+		d.onLocalClipboard(fmt.Sprint("late ", at), at)
+		d.onLocalImage(testPNG(1), "image/png", at)
+	}
+	grace1 := afterGrace(d)
+	time.Sleep(2 * time.Millisecond)
+	_ = d.PauseClipboard()
+	_ = d.ResumeClipboard()
+	// grace1 is after cycle 1's grace but inside cycle 2's.
+	for _, at := range []time.Duration{paused, grace1} {
+		d.onLocalClipboard("first cycle", at)
+	}
+	if len(d.clipboard) != 0 || clipFiles(t, d.clipDir) != 0 || d.content.lastClip != "" {
+		t.Fatalf("history %+v", d.clipboard)
+	}
+	d.onLocalClipboard("new", afterGrace(d))
+	if len(d.clipboard) != 1 || d.clipboard[0].Text != "new" || d.content.lastClip != "new" {
+		t.Fatalf("history %+v, last text %q", d.clipboard, d.content.lastClip)
+	}
+}
+
+// The pause clears the last text: a connect while paused and after the
+// resume sends nothing until a new copy.
+func TestConnectAfterPause(t *testing.T) {
+	onDesk, onPhone, _, _ := linkPair(t, t.Context())
+	got := phoneTexts(onPhone, proto.TypeClipboardConnect)
+	d, _ := clipDaemon(t, true)
+	d.onLocalClipboard("before", desktop.BootTime())
+	_ = d.PauseClipboard()
+	// Only the pause check may stop this send.
+	d.mu.Lock()
+	d.content.lastClip, d.lastLocalClip = "stale", time.Now()
+	d.mu.Unlock()
+	d.sendConnectClipboard(onDesk)
+	d.mu.Lock()
+	d.content.lastClip = ""
+	d.mu.Unlock()
+	_ = d.ResumeClipboard()
+	d.sendConnectClipboard(onDesk)
+	d.onLocalClipboard("after", afterGrace(d))
+	d.sendConnectClipboard(onDesk)
+	if s := next(t, got); s != "after" {
+		t.Fatalf("the phone got %q on connect", s)
+	}
+}
+
+// A pause after an image's admission leaves no entry and no file and
+// starts no send, also with a resume right after it.
+func TestPauseAfterImageAdmission(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		d, _ := clipDaemon(t, true)
+		d.clipHook = func(stage string) {
+			if stage == "image" {
+				_ = d.PauseClipboard()
+				if resume {
+					_ = d.ResumeClipboard()
+				}
+			}
+		}
+		d.onLocalImage(testPNG(2), "image/png", desktop.BootTime())
+		if len(d.clipboard) != 0 || clipFiles(t, d.clipDir) != 0 || d.clipSend != nil {
+			t.Fatalf("resume %v: history %+v", resume, d.clipboard)
+		}
+	}
+}
+
+// A pause between 2 links of a text stops before the second.
+func TestPauseBetweenTextLinks(t *testing.T) {
+	desk1, phone1, _, id1 := linkPair(t, t.Context())
+	desk2, phone2, _, id2 := linkPair(t, t.Context())
+	got1, got2 := phoneTexts(phone1, proto.TypeClipboard), phoneTexts(phone2, proto.TypeClipboard)
+	d, _ := clipDaemon(t, true)
+	d.devices[id1] = &Device{ID: id1, Paired: true, link: desk1}
+	d.devices[id2] = &Device{ID: id2, Paired: true, link: desk2}
+	n := 0
+	d.clipHook = func(stage string) {
+		if stage == "text" {
+			if n++; n == 2 {
+				// A pause and a resume: only the generation shows the pause.
+				_ = d.PauseClipboard()
+				_ = d.ResumeClipboard()
+			}
+		}
+	}
+	d.onLocalClipboard("one link", desktop.BootTime())
+	d.clipHook = nil
+	d.onLocalClipboard("both", afterGrace(d))
+	first := []string{next(t, got1), next(t, got2)}
+	slices.Sort(first)
+	if !slices.Equal(first, []string{"both", "one link"}) {
+		t.Fatalf("the first texts %q", first)
+	}
+}
+
+// A pause while the phone has the offer and the transfer runs cancels the
+// automatic image. The phone never fetches the payload, so only the pause
+// ends the send well before the 20 seconds of the payload wait.
+func TestPauseDuringImageSend(t *testing.T) {
+	onDesk, onPhone, _, phoneID := linkPair(t, t.Context())
+	d, _ := clipDaemon(t, true)
+	d.devices[phoneID] = &Device{ID: phoneID, Name: "phone", Paired: true, link: onDesk, Incoming: []string{proto.TypeFluxClipboardImage}}
+	offered, ended := make(chan struct{}), make(chan struct{})
+	go onPhone.Receive(func(p *proto.Packet) {
+		if p.Type == proto.TypeFluxClipboardImage {
+			close(offered)
+		}
+	})
+	d.clipHook = func(stage string) {
+		if stage == "image-end" {
+			close(ended)
+		}
+	}
+	d.onLocalImage(testPNG(3), "image/png", desktop.BootTime())
+	wait(t, offered, "the phone gets the offer")
+	select {
+	case <-ended:
+		t.Fatal("the send ended before the pause")
+	default:
+	}
+	if err := d.PauseClipboard(); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, ended, "the pause ends the send")
+	if d.clipSend != nil {
+		t.Fatal("the send is still registered")
+	}
+}
+
+// An old text callback held after its admission can't cancel a newer
+// automatic image. The image is registered directly, so the phone's
+// handling of the late text can't cancel its fetch and blur the check.
+func TestOldTextKeepsNewerImage(t *testing.T) {
+	onDesk, onPhone, _, phoneID := linkPair(t, t.Context())
+	got := phoneTexts(onPhone, proto.TypeClipboard)
+	d, _ := clipDaemon(t, true)
+	d.devices[phoneID] = &Device{ID: phoneID, Paired: true, link: onDesk}
+	held, release := make(chan struct{}), make(chan struct{})
+	d.clipHook = func(stage string) {
+		if stage == "text" {
+			close(held)
+			<-release
+		}
+	}
+	done := make(chan struct{})
+	go func() { d.onLocalClipboard("old text", desktop.BootTime()); close(done) }()
+	wait(t, held, "the old text reaches its check")
+	d.mu.Lock()
+	gen := d.clipGen
+	d.mu.Unlock()
+	ictx, icancel, ok := d.newClipSend(true, gen)
+	defer icancel()
+	close(release)
+	wait(t, done, "the old text ends")
+	if !ok || ictx.Err() != nil {
+		t.Fatal("the old text cancelled the newer image")
+	}
+	if s := next(t, got); s != "old text" {
+		t.Fatalf("the phone got %q", s)
+	}
+}
+
+// A failed image save leaves no file and no entry. The size limit makes the
+// write fail after the file exists, with part of the data in it.
+func TestFailedImageSave(t *testing.T) {
+	signal.Ignore(syscall.SIGXFSZ)
+	t.Cleanup(func() { signal.Reset(syscall.SIGXFSZ) })
+	var old syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &old); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &old) })
+	d, _ := clipDaemon(t, true)
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &syscall.Rlimit{Cur: 1024, Max: old.Max}); err != nil {
+		t.Skip("no file size limit:", err)
+	}
+	err := d.addClipImage(ClipEntry{Dir: "out"}, append(testPNG(5), make([]byte, 64<<10)...), "image/png")
+	_ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &old)
+	if err == nil {
+		t.Fatal("the save worked past the size limit")
+	}
+	if len(d.clipboard) != 0 || clipFiles(t, d.clipDir) != 0 {
+		t.Fatalf("history %+v, %d files", d.clipboard, clipFiles(t, d.clipDir))
+	}
+}
+
+// A pause before the save writes no file at all.
+func TestImageSaveNotWrittenWhenPaused(t *testing.T) {
+	d, _ := clipDaemon(t, true)
+	if err := d.addClipImageIf(ClipEntry{Dir: "out"}, testPNG(8), "image/png", func() bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.clipboard) != 0 || clipFiles(t, d.clipDir) != 0 {
+		t.Fatalf("history %+v", d.clipboard)
+	}
+}
+
+// Manual sends work while paused and enter the history; they never set
+// the last text.
+func TestManualSendWhilePaused(t *testing.T) {
+	ctx := t.Context()
+	onDesk, onPhone, deskID, phoneID := linkPair(t, ctx)
+	a, clipA := clipDaemon(t, true)
+	b, clipB := clipDaemon(t, true)
+	phoneDev := &Device{ID: phoneID, Name: "phone", Paired: true, link: onDesk, Incoming: []string{proto.TypeFluxClipboardImage}}
+	deskDev := &Device{ID: deskID, Name: "desk", Paired: true, link: onPhone, Incoming: []string{proto.TypeFluxClipboardImage}}
+	a.devices[phoneID], b.devices[deskID] = phoneDev, deskDev
+	go onDesk.Receive(func(p *proto.Packet) { a.handlePacket(phoneDev, onDesk, p) })
+	go onPhone.Receive(func(p *proto.Packet) { b.handlePacket(deskDev, onPhone, p) })
+	_ = a.PauseClipboard()
+	if err := a.SendClipboard(phoneDev, "manual text"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the manual text", func() bool {
+		clipB.mu.Lock()
+		defer clipB.mu.Unlock()
+		return clipB.text == "manual text"
+	})
+	img := append(testPNG(6), bytes.Repeat([]byte{0xef}, 100_000)...)
+	_ = clipA.SetImage(img, "image/png")
+	if err := a.SendClipboard(phoneDev, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitImage(t, clipB); !bytes.Equal(got, img) {
+		t.Fatalf("the phone got %d bytes", len(got))
+	}
+	if len(a.clipboard) != 2 || a.content.lastClip != "" {
+		t.Fatalf("history %+v, last text %q", a.clipboard, a.content.lastClip)
+	}
+}
+
+// A pause cancels only an automatic image. An automatic image replaces
+// a manual one, and a stale generation registers nothing.
+func TestClipSendKinds(t *testing.T) {
+	d, _ := clipDaemon(t, true)
+	mctx, mcancel, _ := d.newClipSend(false, 0)
+	defer mcancel()
+	_ = d.PauseClipboard()
+	if mctx.Err() != nil {
+		t.Fatal("the pause cancelled a manual image")
+	}
+	_ = d.ResumeClipboard()
+	if _, _, ok := d.newClipSend(true, d.clipGen-1); ok || mctx.Err() != nil {
+		t.Fatal("a stale automatic send registered or cancelled the manual one")
+	}
+	actx, acancel, ok := d.newClipSend(true, d.clipGen)
+	defer acancel()
+	if !ok || mctx.Err() == nil {
+		t.Fatal("an automatic image did not replace the manual one")
+	}
+	_ = d.PauseClipboard()
+	if actx.Err() == nil {
+		t.Fatal("the pause did not cancel the automatic image")
+	}
+}
+
+// Settings and SIGHUP leave the pause as it is.
+func TestPauseSurvivesSettings(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	d, _ := clipDaemon(t, true)
+	_ = d.PauseClipboard()
+	for _, on := range []bool{false, true} {
+		if err := d.setSetting("autoClipboard", on); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if !d.clipPaused {
+		t.Fatal("a setting or a reload ended the pause")
+	}
+}
+
+// A resume while syncing opens no new grace.
+func TestResumeWhileSyncing(t *testing.T) {
+	d, _ := clipDaemon(t, true)
+	_ = d.PauseClipboard()
+	_ = d.ResumeClipboard()
+	first := d.resumedAt
+	time.Sleep(2 * time.Millisecond)
+	_ = d.ResumeClipboard()
+	if d.resumedAt != first {
+		t.Fatalf("resumedAt moved from %v to %v", first, d.resumedAt)
+	}
+}
+
+// The marker keeps the pause over a restart, and a failed write or
+// removal gives not_saved with the pause in memory as asked.
+func TestClipPauseMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "flux", "clipboard-paused")
+	d, _ := clipDaemon(t, true)
+	d.loadClipPause(path)
+	if d.clipPaused {
+		t.Fatal("paused without a marker")
+	}
+	if err := d.PauseClipboard(); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("marker %v %v", fi, err)
+	}
+	e, _ := clipDaemon(t, true)
+	e.loadClipPause(path)
+	if !e.clipPaused {
+		t.Fatal("a restart resumed")
+	}
+	if err := d.ResumeClipboard(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ResumeClipboard(); err != nil {
+		t.Fatal("a second resume:", err)
+	}
+	// A marker that can't be read fails closed.
+	f, _ := clipDaemon(t, true)
+	plain := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(plain, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.loadClipPause(filepath.Join(plain, "marker")) // ENOTDIR
+	if !f.clipPaused {
+		t.Fatal("an unreadable marker did not pause")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the marker stays: %v", err)
+	}
+
+	ro := t.TempDir()
+	d.clipPauseFile = filepath.Join(ro, "clipboard-paused")
+	if err := os.Chmod(ro, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(ro, 0o700) })
+	if err := d.PauseClipboard(); errCode(err) != "not_saved" || !d.clipPaused {
+		t.Fatalf("pause in a read-only folder: %v, paused %v", err, d.clipPaused)
+	}
+	_ = os.Chmod(ro, 0o700)
+	_ = d.ResumeClipboard()
+	_ = d.PauseClipboard()
+	_ = os.Chmod(ro, 0o500)
+	if err := d.ResumeClipboard(); errCode(err) != "not_saved" || d.clipPaused {
+		t.Fatalf("resume in a read-only folder: %v, paused %v", err, d.clipPaused)
+	}
+}
+
+// Concurrent calls end with the marker matching the pause.
+func TestClipPauseRace(t *testing.T) {
+	d, _ := clipDaemon(t, true)
+	d.clipPauseFile = filepath.Join(t.TempDir(), "clipboard-paused")
+	var wg sync.WaitGroup
+	for i := range 100 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if i%2 == 0 {
+				_ = d.PauseClipboard()
+			} else {
+				_ = d.ResumeClipboard()
+			}
+		}()
+	}
+	wg.Wait()
+	_, err := os.Stat(d.clipPauseFile)
+	if (err == nil) != d.clipPaused {
+		t.Fatalf("marker %v, paused %v", err, d.clipPaused)
+	}
+}
+
+// A daemon without a marker path (headless) pauses in memory only.
+func TestClipPauseHeadless(t *testing.T) {
+	d, _ := clipDaemon(t, true)
+	if d.clipPauseFile != "" {
+		t.Fatal("a marker path")
+	}
+	if err := d.PauseClipboard(); err != nil || !d.clipPaused {
+		t.Fatal(err)
+	}
+	if err := d.ResumeClipboard(); err != nil || d.clipPaused {
+		t.Fatal(err)
+	}
+}
+
+// auto_clipboard off, by a setting or by a reload, cancels an automatic
+// image send and leaves a manual one.
+func TestSettingsCancelOnlyAutoImage(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	off := map[string]func(d *Daemon) error{
+		"setting": func(d *Daemon) error { return d.setSetting("autoClipboard", false) },
+		"reload":  func(d *Daemon) error { return d.Reload() },
+	}
+	for _, via := range []string{"setting", "reload"} {
+		d, _ := clipDaemon(t, true)
+		if via == "reload" {
+			// config.toml holds auto_clipboard off from the first round.
+			d.cfg.AutoClipboard = true
+		}
+		actx, acancel, _ := d.newClipSend(true, d.clipGen)
+		defer acancel()
+		if err := off[via](d); err != nil {
+			t.Fatal(err)
+		}
+		if actx.Err() == nil {
+			t.Fatalf("%s: the automatic image goes on", via)
+		}
+		d.cfg.AutoClipboard = true
+		mctx, mcancel, _ := d.newClipSend(false, 0)
+		defer mcancel()
+		if err := off[via](d); err != nil {
+			t.Fatal(err)
+		}
+		if mctx.Err() != nil {
+			t.Fatalf("%s: the manual image was cancelled", via)
+		}
+	}
+}
+
+// After a paused local copy, an old clipboard.connect from a phone is stale,
+// and a fresh clipboard packet from the phone still lands.
+func TestPausedCopyKeepsStaleRule(t *testing.T) {
+	d, clip := clipDaemon(t, true)
+	dev := &Device{ID: "phone", Name: "Pixel 8", Paired: true}
+	d.devices[dev.ID] = dev
+	_ = d.PauseClipboard()
+	old := time.Now().Add(-time.Second).UnixMilli()
+	d.onLocalClipboard("private", desktop.BootTime())
+	d.handleClipboard(dev, proto.New(proto.TypeClipboardConnect, map[string]any{"content": "old phone text", "timestamp": old}))
+	if len(d.clipboard) != 0 {
+		t.Fatalf("a stale connect clip entered the history: %+v", d.clipboard)
+	}
+	d.handleClipboard(dev, proto.New(proto.TypeClipboard, map[string]any{"content": "fresh"}))
+	waitFor(t, "the fresh phone text", func() bool {
+		clip.mu.Lock()
+		defer clip.mu.Unlock()
+		return clip.text == "fresh"
+	})
+	if len(d.clipboard) != 1 || d.clipboard[0].Text != "fresh" {
+		t.Fatalf("history %+v", d.clipboard)
+	}
+}
+
+// The state shows the pause outside the settings.
+func TestSnapshotClipboardPaused(t *testing.T) {
+	d := testDaemon()
+	for _, want := range []bool{true, false} {
+		if want {
+			_ = d.PauseClipboard()
+		} else {
+			_ = d.ResumeClipboard()
+		}
+		var s struct {
+			Paused   *bool          `json:"clipboardPaused"`
+			Settings map[string]any `json:"settings"`
+		}
+		if err := json.Unmarshal(d.Snapshot(), &s); err != nil {
+			t.Fatal(err)
+		}
+		if s.Paused == nil || *s.Paused != want || s.Settings["clipboardPaused"] != nil {
+			t.Fatalf("state %+v", s)
+		}
+	}
+}
+
+// The IPC methods take no parameters and act on the computer.
+func TestCallClipboardPause(t *testing.T) {
+	d := testDaemon()
+	if _, err := d.Call(context.Background(), "clipboard.pause", nil); err != nil || !d.clipPaused {
+		t.Fatal(err)
+	}
+	if _, err := d.Call(context.Background(), "clipboard.resume", nil); err != nil || d.clipPaused {
+		t.Fatal(err)
 	}
 }
