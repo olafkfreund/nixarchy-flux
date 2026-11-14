@@ -252,7 +252,7 @@ type Options struct {
 }
 
 type clipboard interface {
-	Watch(ctx context.Context, onText func(text string), onImage func(data []byte, mime string))
+	Watch(ctx context.Context, onText func(text string, at time.Duration), onImage func(data []byte, mime string, at time.Duration))
 	Get() (string, error)
 	GetImage() ([]byte, error)
 	Set(text string) error
@@ -267,7 +267,7 @@ type memClipboard struct {
 	mime  string
 }
 
-func (m *memClipboard) Watch(ctx context.Context, _ func(string), _ func([]byte, string)) {
+func (m *memClipboard) Watch(ctx context.Context, _ func(string, time.Duration), _ func([]byte, string, time.Duration)) {
 	<-ctx.Done()
 }
 func (m *memClipboard) Get() (string, error) {

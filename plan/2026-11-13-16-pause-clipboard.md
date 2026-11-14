@@ -1464,3 +1464,4 @@ downloads and D-Bus).
 
 | # | Step | What changed and why |
 | --- | --- | --- |
+| P1 | 1 | Also updates the existing callers in `internal/desktop/desktop_test.go` the step missed (the `record` helper, the callbacks in four record tests, `TestClipboardWatch`, `TestWatchScriptCapsSize`), so the package compiles; adds `TestClipboardRecordTime`. Found by the Codex and agy plan reviews. |

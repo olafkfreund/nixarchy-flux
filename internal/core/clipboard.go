@@ -236,7 +236,7 @@ func (d *Daemon) stopClipSend() {
 
 // onLocalClipboard sends a local clipboard change to every paired device.
 // A text above maxSentText goes only to the clipboard history.
-func (d *Daemon) onLocalClipboard(text string) {
+func (d *Daemon) onLocalClipboard(text string, at time.Duration) {
 	fits := len(text) <= maxSentText
 	d.mu.Lock()
 	d.lastLocalClip = time.Now()
@@ -277,7 +277,7 @@ func (d *Daemon) onLocalClipboard(text string) {
 // onLocalImage sends a local image copy to every paired device that
 // accepts clipboard images. A newer copy, an unpair, a dropped link, and
 // auto_clipboard off stop the transfer.
-func (d *Daemon) onLocalImage(data []byte, mime string) {
+func (d *Daemon) onLocalImage(data []byte, mime string, at time.Duration) {
 	type target struct {
 		dev *Device
 		l   *lan.Link

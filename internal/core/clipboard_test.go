@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"flux/internal/config"
+	"flux/internal/desktop"
 	"flux/internal/proto"
 )
 
@@ -352,11 +353,11 @@ func TestClipHistoryTextLimit(t *testing.T) {
 // the text that Watch reported, and no text after an image copy.
 func TestConnectClipboardText(t *testing.T) {
 	d, _ := clipDaemon(t, false)
-	d.onLocalClipboard("normal text")
+	d.onLocalClipboard("normal text", desktop.BootTime())
 	if d.content.lastClip != "normal text" {
 		t.Fatalf("last text %q", d.content.lastClip)
 	}
-	d.onLocalImage(testPNG(1), "image/png")
+	d.onLocalImage(testPNG(1), "image/png", desktop.BootTime())
 	if d.content.lastClip != "" {
 		t.Fatalf("last text after an image %q", d.content.lastClip)
 	}
@@ -366,9 +367,9 @@ func TestConnectClipboardText(t *testing.T) {
 // the history, and that a device that connects gets no text.
 func TestLargeLocalText(t *testing.T) {
 	d, _ := clipDaemon(t, true)
-	d.onLocalClipboard("small text")
+	d.onLocalClipboard("small text", desktop.BootTime())
 	large := strings.Repeat("a", maxSentText+1)
-	d.onLocalClipboard(large)
+	d.onLocalClipboard(large, desktop.BootTime())
 	if d.content.lastClip != "" {
 		t.Fatalf("last text has %d bytes", len(d.content.lastClip))
 	}
@@ -389,19 +390,19 @@ func TestLocalClipNamesItsDevices(t *testing.T) {
 	d, _ := clipDaemon(t, true)
 	d.devices[phoneID] = &Device{ID: phoneID, Name: "Pixel 8", Paired: true, link: onDesk}
 	d.devices["tablet"] = &Device{ID: "tablet", Name: "Galaxy Tab", Paired: true}
-	d.onLocalClipboard("yay -S flux-git")
+	d.onLocalClipboard("yay -S flux-git", desktop.BootTime())
 	if e := d.clipboard[0]; e.Device != "" || !slices.Equal(e.To, []string{phoneID}) {
 		t.Fatalf("entry %+v", e)
 	}
 	// The same text again keeps 1 entry and adds a device that connected.
 	d.devices["tablet"].link = onDesk
-	d.onLocalClipboard("yay -S flux-git")
+	d.onLocalClipboard("yay -S flux-git", desktop.BootTime())
 	want := []string{phoneID, "tablet"}
 	slices.Sort(want)
 	if len(d.clipboard) != 1 || !slices.Equal(d.clipboard[0].To, want) {
 		t.Fatalf("history %+v", d.clipboard)
 	}
-	d.onLocalClipboard(strings.Repeat("a", maxSentText+1))
+	d.onLocalClipboard(strings.Repeat("a", maxSentText+1), desktop.BootTime())
 	if e := d.clipboard[0]; len(e.To) != 0 {
 		t.Fatalf("a text that fluxd did not send names %q", e.To)
 	}
@@ -454,8 +455,8 @@ func TestConnectClipboardTwoDevices(t *testing.T) {
 		want  string
 	}{
 		{"shared text", func(d *Daemon) { d.receiveText(phone, "shared text") }, "shared text"},
-		{"desktop text", func(d *Daemon) { d.onLocalClipboard("desktop text") }, ""},
-		{"desktop image", func(d *Daemon) { d.onLocalImage(testPNG(2), "image/png") }, ""},
+		{"desktop text", func(d *Daemon) { d.onLocalClipboard("desktop text", desktop.BootTime()) }, ""},
+		{"desktop image", func(d *Daemon) { d.onLocalImage(testPNG(2), "image/png", desktop.BootTime()) }, ""},
 	} {
 		d, clip := clipDaemon(t, true)
 		d.ctx = t.Context()

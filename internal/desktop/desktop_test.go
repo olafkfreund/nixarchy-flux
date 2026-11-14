@@ -107,16 +107,16 @@ func fakeWlCopy(t *testing.T) {
 
 // record returns the lines that watchScript prints for data with the
 // MIME types.
-func record(state string, data []byte, types string) [3]string {
-	return [3]string{state, base64.StdEncoding.EncodeToString(data), types}
+func record(state string, data []byte, types string) [4]string {
+	return [4]string{"100.00", state, base64.StdEncoding.EncodeToString(data), types}
 }
 
 func TestClipboardRecordText(t *testing.T) {
 	fakeWlCopy(t)
 	c := NewClipboard()
 	var got []string
-	onText := func(s string) { got = append(got, s) }
-	onImage := func([]byte, string) { t.Fatal("a text selection reported an image") }
+	onText := func(s string, _ time.Duration) { got = append(got, s) }
+	onImage := func([]byte, string, time.Duration) { t.Fatal("a text selection reported an image") }
 	plain := "text/plain;charset=utf-8 UTF8_STRING"
 
 	c.record("text", record("data", []byte("start"), plain), true, onText, onImage)
@@ -142,8 +142,8 @@ func TestClipboardSetImageText(t *testing.T) {
 	fakeWlCopy(t)
 	c := NewClipboard()
 	var got []string
-	onText := func(s string) { got = append(got, s) }
-	onImage := func([]byte, string) { t.Fatal("a file URI reported an image") }
+	onText := func(s string, _ time.Duration) { got = append(got, s) }
+	onImage := func([]byte, string, time.Duration) { t.Fatal("a file URI reported an image") }
 	// wl-copy offers a file URI also as plain text, so the text watcher
 	// reads it. The copy must not go to the phone.
 	uri := "file:///home/me/a%20b.pdf\r\n"
@@ -161,8 +161,8 @@ func TestClipboardRecordImage(t *testing.T) {
 	fakeWlCopy(t)
 	c := NewClipboard()
 	var got [][]byte
-	onText := func(string) { t.Fatal("an image selection reported text") }
-	onImage := func(b []byte, mime string) {
+	onText := func(string, time.Duration) { t.Fatal("an image selection reported text") }
+	onImage := func(b []byte, mime string, _ time.Duration) {
 		if mime != ImageType {
 			t.Errorf("mime %s", mime)
 		}
@@ -189,11 +189,28 @@ func TestClipboardRecordImage(t *testing.T) {
 
 	// Text that equals the text before the image is a new change.
 	var texts []string
-	c.record("text", record("data", []byte("same"), "text/plain"), false, func(s string) { texts = append(texts, s) }, onImage)
+	c.record("text", record("data", []byte("same"), "text/plain"), false, func(s string, _ time.Duration) { texts = append(texts, s) }, onImage)
 	c.record(ImageType, record("data", a, "image/png"), false, onText, onImage)
-	c.record("text", record("data", []byte("same"), "text/plain"), false, func(s string) { texts = append(texts, s) }, onImage)
+	c.record("text", record("data", []byte("same"), "text/plain"), false, func(s string, _ time.Duration) { texts = append(texts, s) }, onImage)
 	if len(texts) != 2 {
 		t.Fatalf("reported %q, want the text twice", texts)
+	}
+}
+
+// A record whose time line doesn't parse is dropped.
+func TestClipboardRecordTime(t *testing.T) {
+	c := NewClipboard()
+	var texts []string
+	var ats []time.Duration
+	onText := func(s string, at time.Duration) { texts, ats = append(texts, s), append(ats, at) }
+	onImage := func([]byte, string, time.Duration) { t.Fatal("an image") }
+	enc := base64.StdEncoding.EncodeToString
+	for _, bad := range []string{"", "x", "-1.00", "1e3"} {
+		c.record("text", [4]string{bad, "data", enc([]byte("bad " + bad)), "text/plain"}, false, onText, onImage)
+	}
+	c.record("text", [4]string{"12345.67", "data", enc([]byte("good")), "text/plain"}, false, onText, onImage)
+	if !slices.Equal(texts, []string{"good"}) || ats[0] != 12345*time.Second+670*time.Millisecond {
+		t.Fatalf("texts %q at %v", texts, ats)
 	}
 }
 
@@ -287,22 +304,29 @@ exec sleep 30
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	texts := make(chan string, 4)
-	images := make(chan []byte, 4)
+	from := BootTime()
+	type got struct {
+		text  string
+		image []byte
+		at    time.Duration
+	}
+	recs := make(chan got, 4)
 	done := make(chan struct{})
 	go func() {
-		NewClipboard().Watch(ctx, func(s string) { texts <- s }, func(b []byte, _ string) { images <- b })
+		NewClipboard().Watch(ctx, func(s string, at time.Duration) { recs <- got{text: s, at: at} }, func(b []byte, _ string, at time.Duration) { recs <- got{image: b, at: at} })
 		close(done)
 	}()
 	for range 2 {
 		select {
-		case s := <-texts:
-			if s != "line 1\nline 2" {
-				t.Errorf("text %q", s)
+		case r := <-recs:
+			if r.image == nil && r.text != "line 1\nline 2" {
+				t.Errorf("text %q", r.text)
 			}
-		case img := <-images:
-			if !bytes.Equal(img, b) {
-				t.Errorf("image %q", img)
+			if r.image != nil && !bytes.Equal(r.image, b) {
+				t.Errorf("image %q", r.image)
+			}
+			if r.at < from-10*time.Millisecond || r.at > BootTime() {
+				t.Errorf("time %v, from %v", r.at, from)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("Watch reported no change")
@@ -310,7 +334,7 @@ exec sleep 30
 	}
 	cancel()
 	<-done
-	if len(texts)+len(images) != 0 {
+	if len(recs) != 0 {
 		t.Errorf("Watch reported the current content")
 	}
 }
@@ -480,10 +504,10 @@ func TestWatchScriptCapsSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(string(out), "\n")
-	if len(lines) != 4 || lines[0] != "data" || strings.TrimSpace(lines[2]) != "text/plain" {
+	if len(lines) != 5 || lines[1] != "data" || strings.TrimSpace(lines[3]) != "text/plain" {
 		t.Fatalf("output %q", out)
 	}
-	raw, err := base64.StdEncoding.DecodeString(lines[1])
+	raw, err := base64.StdEncoding.DecodeString(lines[2])
 	if err != nil || string(raw) != strings.Repeat("a", 11) {
 		t.Fatalf("content %q, %v, want 11 bytes", raw, err)
 	}
@@ -495,8 +519,8 @@ func TestClipboardRecordLimit(t *testing.T) {
 	fakeWlCopy(t)
 	c := NewClipboard()
 	var got []int
-	onText := func(s string) { got = append(got, len(s)) }
-	onImage := func([]byte, string) { t.Fatal("a text selection reported an image") }
+	onText := func(s string, _ time.Duration) { got = append(got, len(s)) }
+	onImage := func([]byte, string, time.Duration) { t.Fatal("a text selection reported an image") }
 	sizes := []int{MaxClipboardText - 1, MaxClipboardText, MaxClipboardText + 1}
 	for i, n := range sizes {
 		data := bytes.Repeat([]byte{'a' + byte(i)}, n)

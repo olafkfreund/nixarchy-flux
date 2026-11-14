@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"flux/internal/desktop"
 	"flux/internal/lan"
 	"flux/internal/proto"
 )
@@ -86,7 +87,7 @@ func TestClipImageOverLink(t *testing.T) {
 	go onPhone.Receive(func(p *proto.Packet) { b.handlePacket(deskDev, onPhone, p) })
 
 	img := append(testPNG(7), bytes.Repeat([]byte{0xab}, 200_000)...)
-	a.onLocalImage(img, "image/png")
+	a.onLocalImage(img, "image/png", desktop.BootTime())
 	if got := waitImage(t, clipB); !bytes.Equal(got, img) {
 		t.Fatalf("the phone got %d bytes, want %d", len(got), len(img))
 	}

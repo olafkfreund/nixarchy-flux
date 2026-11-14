@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // MaxClipboardText is the largest clipboard text that Flux takes from a
@@ -35,12 +37,14 @@ const ImageType = "image/png"
 // pngMagic starts every PNG file.
 var pngMagic = []byte("\x89PNG\r\n\x1a\n")
 
-// watchScript runs once for each selection change. It prints 3 lines: the
-// CLIPBOARD_STATE value, the content as base64, and the MIME types of the
-// selection. The base64 keeps text with newlines in one line. The script
-// reads at most $1 bytes of the content. watchOnce sets $1 to 1 byte more
-// than the limit, so record finds a large copy without a read of all of it.
-const watchScript = `printf '%s\n' "$CLIPBOARD_STATE"; head -c "$1" | base64 -w0; printf '\n'; wl-paste --list-types | tr '\n' ' '; printf '\n'`
+// watchScript runs once for each selection change. It prints 4 lines:
+// the boot clock when the script starts, in seconds from /proc/uptime,
+// the CLIPBOARD_STATE value, the content as base64, and the MIME types
+// of the selection. The base64 keeps text with newlines in one line.
+// The script reads at most $1 bytes of the content. watchOnce sets $1
+// to 1 byte more than the limit, so record finds a large copy without
+// a read of all of it.
+const watchScript = `read -r up _ </proc/uptime; printf '%s\n' "$up"; printf '%s\n' "$CLIPBOARD_STATE"; head -c "$1" | base64 -w0; printf '\n'; wl-paste --list-types | tr '\n' ' '; printf '\n'`
 
 // initialWindow is the time after the start of wl-paste in which its first
 // selection is the current content and not a change.
@@ -79,7 +83,9 @@ func NewClipboard() *Clipboard { return &Clipboard{} }
 // sensitive, such as a password. wl-paste reports the current content
 // when it starts, so Watch records that content and does not report it.
 // Watch starts wl-paste again 2 seconds after it exits.
-func (c *Clipboard) Watch(ctx context.Context, onText func(text string), onImage func(data []byte, mime string)) {
+// Each callback gets at, the boot time when the watcher script for the copy
+// started (BootTime).
+func (c *Clipboard) Watch(ctx context.Context, onText func(text string, at time.Duration), onImage func(data []byte, mime string, at time.Duration)) {
 	var wg sync.WaitGroup
 	for _, typ := range []string{"text", ImageType} {
 		wg.Add(1)
@@ -100,7 +106,7 @@ func (c *Clipboard) Watch(ctx context.Context, onText func(text string), onImage
 
 // watchOnce runs 1 `wl-paste --watch` process for the type typ, which is
 // "text" or ImageType.
-func (c *Clipboard) watchOnce(ctx context.Context, typ string, onText func(string), onImage func([]byte, string)) {
+func (c *Clipboard) watchOnce(ctx context.Context, typ string, onText func(string, time.Duration), onImage func([]byte, string, time.Duration)) {
 	read := strconv.Itoa(clipboardLimit(typ) + 1)
 	cmd := exec.CommandContext(ctx, "wl-paste", "--type", typ, "--watch", "sh", "-c", watchScript, "sh", read)
 	out, err := cmd.StdoutPipe()
@@ -116,7 +122,7 @@ func (c *Clipboard) watchOnce(ctx context.Context, typ string, onText func(strin
 
 	r := bufio.NewReaderSize(out, 64<<10)
 	for {
-		var lines [3]string
+		var lines [4]string
 		for i := range lines {
 			line, err := r.ReadString('\n')
 			if err != nil {
@@ -132,8 +138,13 @@ func (c *Clipboard) watchOnce(ctx context.Context, typ string, onText func(strin
 
 // record handles 1 record of watchScript from the wl-paste process for the
 // type typ. initial marks the current content at the start of wl-paste.
-func (c *Clipboard) record(typ string, lines [3]string, initial bool, onText func(string), onImage func([]byte, string)) {
-	state, encoded, types := lines[0], lines[1], strings.Fields(lines[2])
+// A record whose time line doesn't parse is dropped.
+func (c *Clipboard) record(typ string, lines [4]string, initial bool, onText func(string, time.Duration), onImage func([]byte, string, time.Duration)) {
+	at, err := time.ParseDuration(lines[0] + "s")
+	if err != nil || at < 0 {
+		return
+	}
+	state, encoded, types := lines[1], lines[2], strings.Fields(lines[3])
 	if state == "sensitive" || state == "nil" || state == "clear" {
 		return
 	}
@@ -147,13 +158,23 @@ func (c *Clipboard) record(typ string, lines [3]string, initial bool, onText fun
 	}
 	if typ == ImageType {
 		if isImage(types) && bytes.HasPrefix(raw, pngMagic) && c.observe(contentKey(ImageType, raw), initial) {
-			onImage(raw, ImageType)
+			onImage(raw, ImageType, at)
 		}
 		return
 	}
 	if !isImage(types) && isText(raw) && c.observe(contentKey("text", raw), initial) {
-		onText(string(raw))
+		onText(string(raw), at)
 	}
+}
+
+// BootTime returns the time since boot on CLOCK_BOOTTIME, the clock of
+// /proc/uptime. It never jumps back and counts suspend.
+func BootTime() time.Duration {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
+		return 0
+	}
+	return time.Duration(ts.Nano())
 }
 
 // clipboardLimit returns the largest content of the type typ that Flux
