@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 68
 spec: spec/2026-11-15-68-fingerprint-first.md
 coders:
