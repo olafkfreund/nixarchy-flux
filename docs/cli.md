@@ -271,38 +271,153 @@ See [Connect through Tailscale](tailscale.md) and [Connect through ZeroTier](zer
 flux-cli ring
 flux-cli ping "Connection check"
 flux-cli send "$HOME/Downloads/report.txt" "$HOME/Pictures/photo.png"
+flux-cli text "Meet at 18:00"
 flux-cli clip
 flux-cli clip "Text from the desktop"
 flux-cli url https://omarchy.org
-flux-cli notifications
-flux-cli notifications clear
 flux-cli notify "Backup done" "412 files, 2.1 GB"
 ```
 
 `flux-cli ring` rings only a phone or a tablet.
 `flux-cli url` sends only an `http` or `https` URL with a host. The device shows the link in a notification and opens it after a tap.
-`flux-cli send` queues files or folder archives and returns the transfer count.
-Inspect `transfers` in `flux-cli status --json` for completion.
-See [workflow controls](workflows.md) for the outbox, saved snippets, notification rules, device settings, and automation commands.
+`flux-cli send` queues files or folder archives and prints the transfer count.
 `flux-cli clip` without text sends the desktop clipboard.
 When the clipboard holds an image, the command sends the image and returns when the transfer ends.
 See [clipboard images](features.md#clipboard-images).
+
+### Share text
+
+`flux-cli text` sends plain text to the device as a shared text entry:
+
+```sh
+flux-cli text "Meet at 18:00"
+flux-cli --device "Pixel 8" text "Room 4B"
+```
+
+### Transfers
+
+`flux-cli transfers` lists recent and queued file transfers, or acts on one transfer by ID:
+
+```sh
+flux-cli transfers
+flux-cli transfers retry TRANSFER_ID
+flux-cli transfers cancel TRANSFER_ID
+flux-cli transfers open TRANSFER_ID
+flux-cli transfers copy TRANSFER_ID
+```
+
+`open` opens the local file of a finished transfer in the default desktop app.
+`copy` puts the local file of a finished transfer on the desktop clipboard (as image data for small images, else as a file URI).
+See [workflow controls](workflows.md#desktop-outbox).
+
+### Clipboard and snippets
+
+```sh
+flux-cli clipboard
+flux-cli clipboard status
+flux-cli clipboard pause
+flux-cli clipboard resume
+flux-cli clipboard clear
+flux-cli clipboard clear --all
+flux-cli clipboard delete CLIP_ID
+flux-cli clipboard limit
+flux-cli clipboard limit 100
+flux-cli snippets
+flux-cli snippets search "report"
+flux-cli snippets save CLIP_ID 24h
+flux-cli snippets copy CLIP_ID
+flux-cli snippets remove CLIP_ID
+```
+
+`flux-cli clipboard` lists the clipboard history as JSON.
 `flux-cli clipboard clear` removes unpinned clipboard history. Add `--all` to also remove saved snippets.
 `flux-cli clipboard delete ID` deletes a history entry or saved snippet.
 `flux-cli clipboard limit [N]` shows or sets the number of clipboard history entries to keep (1 to 500, default 50).
 `flux-cli clipboard pause` and `resume` stop and restart the automatic sync of copies to your devices; `status` prints `paused`, `syncing`, or `off`. See [pause clipboard sync](features.md#pause-clipboard-sync).
-`flux-cli notifications clear` dismisses the phone notifications on the phone and on the desktop. Ongoing notifications stay.
+`flux-cli snippets` searches, saves (with an optional duration such as `24h`), copies, or unpins saved clipboard entries. See [saved clipboard snippets](workflows.md#saved-clipboard-snippets).
 
-To send an SMS, set the recipient and message first:
+### Text messages
+
+Turn on **Text messages** on the phone first. See [text messages](features.md#text-messages).
 
 ```sh
+flux-cli sms threads
+flux-cli sms thread 12
+flux-cli sms refresh
 RECIPIENT='+15550100123'
 MESSAGE='On my way'
 flux-cli sms "$RECIPIENT" "$MESSAGE"
 ```
 
-Turn on **Text messages** on the phone first. See [text messages](features.md#text-messages).
-The command sends the message to 1 recipient.
+`flux-cli sms threads` prints `THREAD  NAME  LAST` for each conversation, newest first.
+`flux-cli sms thread N` fetches the messages of conversation `N` (`N` > 0) and prints `YYYY-MM-DD HH:MM  NAME  BODY` in local time, oldest first, with `me` as the sender of outgoing messages.
+`flux-cli sms refresh` asks the phone to send its conversation list again.
+Any other first argument sends a text message (`flux-cli sms NUMBER TEXT...`) to 1 recipient.
+
+### Do Not Disturb
+
+```sh
+flux-cli dnd
+flux-cli dnd on
+flux-cli dnd off
+```
+
+`flux-cli dnd` prints `Do Not Disturb is on on NAME`, `off`, or `unknown` when the phone is offline or has not reported its state.
+`flux-cli dnd on` and `flux-cli dnd off` set Do Not Disturb on the selected phone.
+
+### Notifications and rules
+
+```sh
+flux-cli notifications
+flux-cli --json notifications
+flux-cli notifications dismiss NOTIF_ID
+flux-cli notifications reply NOTIF_ID On my way
+flux-cli notifications action NOTIF_ID "Mark as read"
+flux-cli notifications clear
+flux-cli notification-rules
+flux-cli --device "Pixel 8" notification-rules add Messages mute 1h
+flux-cli notification-rules quiet 22:00 07:00
+flux-cli notification-rules remove RULE_ID
+```
+
+`flux-cli notifications` prints one line per phone notification.
+Get the notification `id`, `replyId`, `actions`, and `dismissable` fields from `flux-cli --json notifications` (or `flux-cli status --json`).
+`flux-cli notifications dismiss ID` dismisses one notification on the phone and on the desktop.
+`flux-cli notifications reply ID TEXT...` sends an inline reply to a notification that has a `replyId`.
+`flux-cli notifications action ID ACTION` triggers a named button from the notification's `actions` list.
+`flux-cli notifications clear` dismisses all dismissable notifications of the phone; ongoing notifications stay.
+`flux-cli notification-rules` lists, adds, or removes desktop notification rules and quiet hours. See [notification rules](workflows.md#notification-rules).
+
+## Settings
+
+```sh
+flux-cli settings
+flux-cli settings checkUpdates
+flux-cli settings checkUpdates false
+flux-cli settings clipboardLimit 100
+flux-cli settings name "Workstation"
+```
+
+`flux-cli settings` prints `key = value` for every global setting in sorted order (including `name` from `self.name`, and leaving out `deviceRules`, `notificationRules`, and `automationRules`).
+`flux-cli settings KEY` prints the value of one setting.
+`flux-cli settings KEY VALUE` updates one setting and saves `config.toml`:
+
+| Type | Keys | Values |
+| --- | --- | --- |
+| Boolean | `autoClipboard`, `notifications`, `shareHome`, `pauseMediaOnCall`, `syncDnd`, `checkUpdates`, `herdr`, `herdrControl`, `herdrTerminals`, `remoteInput`, `remoteDesktop`, `motionCues`, `motionAuto` | `true`, `false`, `on`, or `off` |
+| Integer | `clipboardLimit`, `motionIdle` | `1` to `500` for `clipboardLimit`; `30` to `3600` for `motionIdle` |
+| Number | `motionSensitivity` | A finite number (`0.5`, `1`, or `1.6`) |
+| String | `name`, `downloadDir`, `motionSize` | Text (`small`, `medium`, or `large` for `motionSize`) |
+
+### Per-device access
+
+```sh
+flux-cli --device "Pixel 8" device-settings
+flux-cli --device "Pixel 8" device-settings clipboard false
+flux-cli --device "Pixel 8" device-settings clipboard inherit
+```
+
+`flux-cli device-settings` shows or sets per-device access overrides (`clipboard`, `notifications`, `shareHome`, `remoteInput`, `remoteDesktop`, `herdr`, `herdrControl`, `herdrTerminals`). See [per-device access](workflows.md#per-device-access).
 
 ## Notify when a command ends
 
@@ -349,6 +464,18 @@ flux-cli commands add Backup "rsync -a ~/Documents nas:/backup"
 When you give more than 1 argument, `flux-cli` quotes each argument for `sh`.
 So `flux-cli commands add Open xdg-open "My File.pdf"` stores `xdg-open 'My File.pdf'`.
 
+### Automation
+
+```sh
+flux-cli automation
+flux-cli automation add file.received COMMAND_ID
+flux-cli --device "Pixel 8" automation add battery.low COMMAND_ID 20
+flux-cli --device "Pixel 8" automation add device.disconnected COMMAND_ID 60
+flux-cli automation remove RULE_ID
+```
+
+`flux-cli automation` lists or changes rules that run a desktop command when a device or agent event happens. See [local automation](workflows.md#local-automation).
+
 ## Streams and approval
 
 ```sh
@@ -370,6 +497,11 @@ flux-cli desktop stop
 flux-cli browse
 flux-cli browse stop
 flux-cli approve
+sudo flux-cli approve setup
+sudo flux-cli approve enroll
+sudo flux-cli approve enable
+sudo flux-cli approve disable
+sudo flux-cli approve remove
 flux-cli ssh
 flux-cli ssh key
 flux-cli ssh socket
@@ -466,3 +598,112 @@ The command prints one JSON event per line until you stop it.
 When `fluxd` stops, the command prints `fluxd closed the connection` and returns 1.
 Use `flux-cli status --json` for a single snapshot.
 See [IPC](ipc.md) for the event envelope and socket protocol.
+
+## JSON output
+
+Add `--json` for one JSON value on stdout:
+
+```sh
+flux-cli --json status
+flux-cli status --json
+flux-cli --json --device "Pixel 8" notifications
+flux-cli --device "Pixel 8" sms threads --json
+flux-cli --json clip "Text from the desktop"
+```
+
+### Where `--json` goes
+
+- Put `--json` before the command, or in the flag region right after the command (where `--device NAME`, `-d NAME`, and `--device=NAME` go).
+- A trailing `--json` (the last argument) also selects JSON output when the form takes no free text.
+- For a form that takes free text, `--json` counts only before the command. Right after the command name (`flux-cli text --json hi`), it is refused with `bad_args` before anything is sent. After the text, it stays part of the text. Those forms are:
+  - `ping`, `clip`, `text`, `notify`, `send`
+  - `sms NUMBER TEXT...`
+  - `commands add`
+  - `notifications reply`
+  - `snippets search`
+  - `settings KEY VALUE`
+- Nothing after `--` is read as a flag.
+
+JSON output passes the raw socket bytes or state projection through `safeJSON`, so control characters are escaped while newlines (`\n`) and all fields stay intact.
+
+### Output of each form
+
+| Form | JSON output |
+| --- | --- |
+| `status`, `devices` | The raw `state` snapshot |
+| `ssh [key\|socket]` | `{"socket":…,"error":…,"keys":[…]}`, the same object for all three forms |
+| `discover`, `ring`, `ping`, `clip`, `text`, `url`, `run`, `notify TITLE [BODY]`, `sms NUMBER TEXT...` | The method's result (`{}` when empty) |
+| `addresses` | `{deviceID:[addresses]}` from the state |
+| `addresses add\|remove HOST` | The method's result (`{"device":…,"address":…,"addresses":[…]}`) |
+| `send PATH...` | The `share.files` result (`{"transfers":[…]}`) |
+| `transfers` | The state's `transfers`, raw |
+| `transfers retry\|cancel\|open\|copy ID` | The method's result |
+| `clipboard` | The `clipboard.search` result |
+| `clipboard status` | `{"paused":…,"autoClipboard":…}` from the raw state |
+| `clipboard pause\|resume\|clear\|delete` | The method's result |
+| `clipboard limit` | `{"clipboardLimit":N}` |
+| `clipboard limit N` | The `settings.set` result |
+| `snippets`, `snippets search TEXT` | The `clipboard.search` result |
+| `snippets save ID [DURATION]` | The `clipboard.pin` result |
+| `snippets remove\|copy ID` | The method's result |
+| `sms threads` | `{deviceID:[conversations]}` from the state |
+| `sms thread N` | The `sms.thread` result (`{"messages":[…]}`) |
+| `sms refresh` | The `sms.refresh` result |
+| `dnd` | `{deviceID: dnd or null}` from the state (`null` when the device is offline or has no `dnd` report) |
+| `dnd on\|off` | The `dnd.set` result (`{"sent":true}`) |
+| `settings` | The state's `settings` object (with `deviceRules`, `notificationRules`, and `automationRules`), plus `name` from `self.name` |
+| `settings KEY` | `{"key":K,"value":V}` (`name` comes from `self.name`) |
+| `settings KEY VALUE` | The `settings.set` result |
+| `notifications` | `{deviceID:[notifications]}` from the state |
+| `notifications clear` | The `notification.dismissAll` result (`{"dismissed":N}`) |
+| `notifications dismiss\|reply\|action` | The method's result |
+| `notification-rules`, `automation` | The raw `notificationRules` or `automationRules` array from `settings` |
+| `notification-rules add\|quiet\|remove`, `automation add\|remove` | The method's result |
+| `device-settings` | The `device.settings` result (`{device}`) |
+| `device-settings KEY true\|false\|inherit` | The `device.settings.set` result |
+| `commands` | The state's `commands`, raw |
+| `commands add\|remove` | The method's result (`add` has the new `id`) |
+| `webcam`, `mic`, `speaker`, `screen`, `desktop`, `browse`, `motion` (status forms) | The state key of the same name, raw |
+| `input` (status) | `{"remoteInput":…}` |
+| `webcam\|mic\|speaker start`, `webcam\|mic\|speaker\|screen\|desktop\|browse\|motion stop`, `webcam set\|reset`, `motion start` | The result of the action method |
+| `input on\|off`, `desktop on\|off`, `motion on\|off\|auto\|sensitivity\|size\|idle` | The `settings.set` result |
+
+Device-scoped reads (`addresses`, `notifications`, `sms threads`, and `dnd`) return an object keyed by paired device ID (`{}` when no device is paired).
+With `--device`, `flux-cli` matches an exact ID first, else a paired device name without case.
+No match returns `not_found`; more than 1 match returns `ambiguous`.
+
+### Errors
+
+With `--json`, a failure writes one JSON object to stdout, writes the message to stderr, and exits with status 1 (including for an unknown command; without `--json`, an unknown command exits with 2):
+
+```json
+{"error":{"code":"offline","message":"Pixel 8 is offline"}}
+```
+
+| Code | Meaning |
+| --- | --- |
+| Socket error codes | The code from `fluxd`, such as `offline`, `not_paired`, `ambiguous`, `not_found`, `no_device`, `not_supported`, `already_active`, `too_soon`, `bad_params`, `bad_setting`, `too_large`, `timeout`, `not_ready`, `launch_failed`, `not_saved`, or `unknown_method`. See [IPC errors](ipc.md#errors). |
+| `daemon_off` | `fluxd` is turned off (`flux-cli on` starts it). |
+| `daemon_down` | `fluxd` is not running or does not answer on its socket. |
+| `daemon_unreachable` | `flux-cli` cannot connect to the socket path (for example wrong owner or mode). |
+| `bad_args` | A required argument is missing, or an argument to a new command is invalid. |
+| `unknown_command` | The command name is not known. |
+| `no_json` | The command refuses `--json`. |
+| `not_found` | `--device` matched no paired device on a device-scoped read, or `fluxd` returned `not_found`. |
+| `error` | Any other CLI error, including usage errors from earlier commands. |
+
+### Refusals
+
+With `--json`, these commands return `no_json` before any socket call or child process:
+
+- `open`, `pair`, `accept`, `reject`, `unpair`
+- `setup`, `doctor`, `update`, `approve`, `browser`
+- `on`, `off`, `version` (`--version`), `help` (`-h`, `--help`)
+- `notify --run` (`notify Title --run` sends `--run` as the notification body and is not refused)
+
+`watch` already prints JSON lines and ignores `--json`.
+
+### Partial success
+
+Some errors come after the action took effect, such as a setting change followed by a failing state read, or `launch_failed` from `transfer.open`.
+Read the state again before you retry.

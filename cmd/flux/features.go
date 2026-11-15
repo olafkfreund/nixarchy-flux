@@ -12,10 +12,22 @@ import (
 
 func transferCommand(args []string) error {
 	if len(args) == 2 && (args[0] == "retry" || args[0] == "cancel") {
-		return call("transfer."+args[0], map[string]any{"id": args[1]})
+		return act("transfer."+args[0], map[string]any{"id": args[1]})
+	}
+	if len(args) == 1 && (args[0] == "open" || args[0] == "copy") {
+		return usageErr("Usage: flux-cli transfers %s ID", args[0])
+	}
+	if len(args) == 2 && (args[0] == "open" || args[0] == "copy") {
+		if args[1] == "" {
+			return usageErr("Usage: flux-cli transfers %s ID", args[0])
+		}
+		return act("transfer."+args[0], map[string]any{"id": args[1]})
 	}
 	if len(args) != 0 {
-		return fmt.Errorf("use: flux-cli transfers [retry ID|cancel ID]")
+		return fmt.Errorf("use: flux-cli transfers [retry ID|cancel ID|open ID|copy ID]")
+	}
+	if jsonMode {
+		return emitStateKey("transfers")
 	}
 	var state struct {
 		Transfers []struct {
@@ -37,7 +49,34 @@ func printCall(method string, params any) error {
 	if err := callInto(method, params, &result); err != nil {
 		return err
 	}
+	if jsonMode {
+		if len(result) == 0 || string(result) == "null" {
+			result = json.RawMessage(`{}`)
+		}
+		emitJSON(result)
+		return nil
+	}
 	fmt.Println(string(result))
+	return nil
+}
+
+func emitSettingObject(key, fill string) error {
+	state, err := stateRaw()
+	if err != nil {
+		return err
+	}
+	var settings map[string]json.RawMessage
+	if len(state["settings"]) > 0 {
+		if err := json.Unmarshal(state["settings"], &settings); err != nil {
+			return err
+		}
+	}
+	v := settings[key]
+	if len(v) == 0 {
+		v = json.RawMessage(fill)
+	}
+	b, _ := json.Marshal(map[string]json.RawMessage{key: v})
+	emitJSON(b)
 	return nil
 }
 
@@ -52,34 +91,63 @@ func clipboardCommand(args []string) error {
 		}
 		switch args[0] {
 		case "pause":
-			return call("clipboard.pause", nil)
+			return act("clipboard.pause", nil)
 		case "resume":
-			return call("clipboard.resume", nil)
+			return act("clipboard.resume", nil)
 		}
 		return clipboardStatus()
 	case "clear":
 		all := len(args) > 1 && args[1] == "--all"
-		return call("clipboard.clear", map[string]any{"all": all})
+		return act("clipboard.clear", map[string]any{"all": all})
 	case "delete", "remove":
 		if len(args) < 2 {
 			return fmt.Errorf("give a clipboard entry ID")
 		}
-		return call("clipboard.delete", map[string]any{"id": args[1]})
+		return act("clipboard.delete", map[string]any{"id": args[1]})
 	case "limit":
 		if len(args) == 1 {
+			if jsonMode {
+				return emitSettingObject("clipboardLimit", "null")
+			}
 			return printSetting("clipboardLimit")
 		}
 		limit, err := strconv.Atoi(args[1])
 		if err != nil || limit < 1 || limit > config.MaxClipboardLimit {
 			return fmt.Errorf("give a limit between 1 and %d", config.MaxClipboardLimit)
 		}
-		return call("settings.set", map[string]any{"key": "clipboardLimit", "value": limit})
+		return act("settings.set", map[string]any{"key": "clipboardLimit", "value": limit})
 	}
 	return fmt.Errorf("use: flux-cli clipboard [clear [--all]|delete ID|limit [N]|pause|resume|status]")
 }
 
 // clipboardStatus prints whether local copies go to the devices.
 func clipboardStatus() error {
+	if jsonMode {
+		state, err := stateRaw()
+		if err != nil {
+			return err
+		}
+		var settings map[string]json.RawMessage
+		if len(state["settings"]) > 0 {
+			if err := json.Unmarshal(state["settings"], &settings); err != nil {
+				return err
+			}
+		}
+		paused := state["clipboardPaused"]
+		if len(paused) == 0 {
+			paused = json.RawMessage("false")
+		}
+		auto := settings["autoClipboard"]
+		if len(auto) == 0 {
+			auto = json.RawMessage("false")
+		}
+		b, _ := json.Marshal(struct {
+			Paused        json.RawMessage `json:"paused"`
+			AutoClipboard json.RawMessage `json:"autoClipboard"`
+		}{paused, auto})
+		emitJSON(b)
+		return nil
+	}
 	var state struct {
 		ClipboardPaused bool `json:"clipboardPaused"`
 		Settings        struct {
@@ -127,9 +195,9 @@ func snippetCommand(args []string) error {
 		}
 		return printCall("clipboard.pin", p)
 	case "remove":
-		return call("clipboard.unpin", p)
+		return act("clipboard.unpin", p)
 	case "copy":
-		return call("clipboard.copy", p)
+		return act("clipboard.copy", p)
 	}
 	return fmt.Errorf("use snippets search, save, remove, or copy")
 }
@@ -143,6 +211,10 @@ func printSetting(key string) error {
 	if len(value) == 0 {
 		value = json.RawMessage("[]")
 	}
+	if jsonMode {
+		emitJSON(value)
+		return nil
+	}
 	fmt.Println(string(value))
 	return nil
 }
@@ -152,7 +224,7 @@ func automationCommand(device string, args []string) error {
 		return printSetting("automationRules")
 	}
 	if len(args) == 2 && args[0] == "remove" {
-		return call("automation.remove", map[string]any{"id": args[1]})
+		return act("automation.remove", map[string]any{"id": args[1]})
 	}
 	if len(args) < 3 || len(args) > 4 || args[0] != "add" {
 		return fmt.Errorf("use: flux-cli automation add EVENT COMMAND_ID [NUMBER]")
@@ -207,7 +279,7 @@ func deviceSettingsCommand(device string, args []string) error {
 		}
 		value = b
 	}
-	return call("device.settings.set", map[string]any{"device": device, "key": args[0], "value": value})
+	return act("device.settings.set", map[string]any{"device": device, "key": args[0], "value": value})
 }
 
 func notificationRulesCommand(device string, args []string) error {
@@ -215,7 +287,7 @@ func notificationRulesCommand(device string, args []string) error {
 		return printSetting("notificationRules")
 	}
 	if args[0] == "remove" && len(args) == 2 {
-		return call("notification.rule.remove", map[string]any{"id": args[1]})
+		return act("notification.rule.remove", map[string]any{"id": args[1]})
 	}
 	rule := map[string]any{"device": device}
 	if device != "" {

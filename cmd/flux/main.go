@@ -57,14 +57,23 @@ Commands:
   ring                   Ring the phone
   ping [MESSAGE]         Send a ping
   send PATH...           Queue files or folders. Folders use ZIP archives
-  transfers [retry ID|cancel ID]  Show or control the outbox
+  transfers [retry|cancel|open|copy ID]  Show the transfers, or retry, cancel, open or copy one
   clip [TEXT]            Send the clipboard, or TEXT
   clipboard [clear [--all]|delete ID|limit [N]]  Manage clipboard history and limit
   clipboard pause|resume|status  Stop or restart sending copies to devices, or show it
   snippets [search TEXT|save ID [DURATION]|remove ID|copy ID]  Manage saved clipboard entries
   url URL                Open a URL on the phone
   sms NUMBER TEXT...     Send a text message through the phone
+  sms threads            List the message threads
+  sms thread N           Show the messages of thread N
+  sms refresh            Ask the phone for the message threads again
+  text TEXT...           Send text to the phone
+  dnd [on|off]           Show Do Not Disturb on the phone, or set it
+  settings [KEY [VALUE]] Show the Flux settings, one setting, or set one
   notifications          List the phone notifications
+  notifications dismiss ID        Dismiss one phone notification
+  notifications reply ID TEXT...  Reply to a phone notification
+  notifications action ID ACTION  Run an action of a phone notification
   notifications clear    Dismiss the phone notifications, on the phone and here.
                          Ongoing notifications, such as a media player, stay
   notification-rules     List rules. Actions: add APP MODE [DURATION], quiet START END, remove ID
@@ -126,24 +135,29 @@ Commands:
   update --phone         Send the latest Flux for Android to the phone
   version                Print the versions of flux-cli and the running fluxd
 
+Add --json for one JSON value on stdout. See docs/cli.md.
+
 Without --device, flux-cli uses the only connected paired device. Put
 --device NAME before the command or right after it.
 `
 
 func main() {
-	args, device := splitDevice(os.Args[1:])
+	args, device := splitDevice(splitJSON(os.Args[1:]))
 	cmd := "open"
 	if len(args) > 0 {
 		cmd, args = args[0], args[1:]
+	}
+	if jsonMode && refusesJSON(cmd, args) {
+		jsonError(&ipc.Error{Code: "no_json", Message: "JSON output is not available for " + cmd}, 1)
 	}
 	var err error
 	switch cmd {
 	case "open":
 		err = openWindow(first(args))
 	case "status", "devices":
-		err = status(len(args) > 0 && args[0] == "--json")
+		err = status(jsonMode)
 	case "discover":
-		err = call("discover", nil)
+		err = act("discover", nil)
 	case "pair":
 		if addr, ok := addressArg(args); ok {
 			err = pairAddress(addr)
@@ -161,32 +175,45 @@ func main() {
 	case "addresses":
 		err = addresses(device, args)
 	case "ring":
-		err = call("ring", map[string]any{"device": device})
+		err = act("ring", map[string]any{"device": device})
 	case "ping":
-		err = call("ping", map[string]any{"device": device, "message": strings.Join(args, " ")})
+		err = act("ping", map[string]any{"device": device, "message": strings.Join(args, " ")})
 	case "send":
 		err = send(device, args)
 	case "transfers":
 		err = transferCommand(args)
 	case "clip":
-		err = call("clipboard.send", map[string]any{"device": device, "text": strings.Join(args, " ")})
+		err = act("clipboard.send", map[string]any{"device": device, "text": strings.Join(args, " ")})
 	case "clipboard":
 		err = clipboardCommand(args)
 	case "snippets":
 		err = snippetCommand(args)
 	case "url":
-		err = call("share.url", map[string]any{"device": device, "url": need(args, "URL")})
+		err = act("share.url", map[string]any{"device": device, "url": need(args, "URL")})
 	case "sms":
+		if k := first(args); k == "threads" || k == "thread" || k == "refresh" {
+			err = smsCommand(device, args)
+			break
+		}
 		if len(args) < 2 {
 			fail("Usage: flux-cli sms NUMBER TEXT...")
 		}
-		err = call("sms.send", map[string]any{"device": device, "addresses": []string{args[0]}, "body": strings.Join(args[1:], " ")})
+		err = act("sms.send", map[string]any{"device": device, "addresses": []string{args[0]}, "body": strings.Join(args[1:], " ")})
 	case "notifications":
-		if first(args) == "clear" {
+		switch first(args) {
+		case "clear":
 			err = clearNotifications(device)
-		} else {
+		case "dismiss", "reply", "action":
+			err = notificationActions(device, args)
+		default:
 			err = notifications(device)
 		}
+	case "dnd":
+		err = dndCommand(device, args)
+	case "text":
+		err = textCommand(device, args)
+	case "settings":
+		err = settingsCommand(args)
 	case "notification-rules":
 		err = notificationRulesCommand(device, args)
 	case "device-settings":
@@ -198,7 +225,7 @@ func main() {
 	case "commands":
 		err = commands(args)
 	case "run":
-		err = call("commands.run", map[string]any{"id": need(args, "ID")})
+		err = act("commands.run", map[string]any{"id": need(args, "ID")})
 	case "webcam":
 		err = webcam(args, device)
 	case "mic":
@@ -238,10 +265,16 @@ func main() {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
+		if jsonMode {
+			jsonError(&ipc.Error{Code: "unknown_command", Message: fmt.Sprintf("flux-cli: unknown command %q", cmd)}, 1)
+		}
 		fmt.Fprintf(os.Stderr, "flux-cli: unknown command %q\n\n%s", cmd, usage)
 		os.Exit(2)
 	}
 	if err != nil {
+		if jsonMode {
+			jsonError(err, 1)
+		}
 		fail("flux-cli: %v", err)
 	}
 }
@@ -291,6 +324,9 @@ func need(args []string, name string) string {
 }
 
 func fail(format string, args ...any) {
+	if jsonMode {
+		jsonError(&ipc.Error{Code: "bad_args", Message: fmt.Sprintf(format, args...)}, 1)
+	}
 	// An error can have more than 1 line. safe cleans each line.
 	lines := strings.Split(fmt.Sprintf(format, args...), "\n")
 	for i := range lines {
@@ -300,6 +336,14 @@ func fail(format string, args ...any) {
 	os.Exit(1)
 }
 
+var errDaemonOff = errors.New("fluxd is off. To turn it on, run: flux-cli on")
+var errDaemonDown = errors.New("fluxd does not run. To start it, run: flux-cli on. To find the cause, run: flux-cli doctor")
+var errDaemonUnreachable = errors.New("daemon_unreachable")
+
+type unreachableError struct{ error }
+
+func (e unreachableError) Is(target error) bool { return target == errDaemonUnreachable }
+
 func dial() (*ipc.Client, error) {
 	path := config.SocketPath()
 	c, err := ipc.Dial(path)
@@ -307,11 +351,11 @@ func dial() (*ipc.Client, error) {
 	case err == nil:
 		return c, nil
 	case config.IsOff():
-		return nil, errors.New("fluxd is off. To turn it on, run: flux-cli on")
+		return nil, errDaemonOff
 	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED):
-		return nil, errors.New("fluxd does not run. To start it, run: flux-cli on. To find the cause, run: flux-cli doctor")
+		return nil, errDaemonDown
 	default:
-		return nil, fmt.Errorf("cannot connect to fluxd on %s: %w", path, err)
+		return nil, unreachableError{fmt.Errorf("cannot connect to fluxd on %s: %w", path, err)}
 	}
 }
 
@@ -321,15 +365,16 @@ func call(method string, params any) error { return callInto(method, params, nil
 // replaces the control characters in the strings of the result and of an
 // error, so that the callers can print them.
 func callInto(method string, params, result any) error {
-	c, err := dial()
+	raw, err := callRaw(method, params)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
-	if err := c.Call(method, params, result); err != nil {
-		return cleanErr(err)
+	if result != nil && len(raw) > 0 {
+		if err := json.Unmarshal(raw, result); err != nil {
+			return err
+		}
+		cleanAll(result)
 	}
-	cleanAll(result)
 	return nil
 }
 
@@ -802,6 +847,15 @@ func unpair(device string) error {
 	return nil
 }
 
+func emitStateKey(key string) error {
+	state, err := stateRaw()
+	if err != nil {
+		return err
+	}
+	emitJSON(state[key])
+	return nil
+}
+
 // addresses lists, adds, or removes the extra addresses of a paired
 // device. fluxd dials them while the device is offline, for example
 // through Tailscale.
@@ -812,12 +866,16 @@ func addresses(device string, args []string) error {
 		if args[0] != "add" {
 			method, verb = "addresses.remove", "Removed"
 		}
+		params := map[string]any{"device": device, "address": need(args[1:], "HOST")}
+		if jsonMode {
+			return act(method, params)
+		}
 		var res struct {
 			Device    string   `json:"device"`
 			Address   string   `json:"address"`
 			Addresses []string `json:"addresses"`
 		}
-		if err := callInto(method, map[string]any{"device": device, "address": need(args[1:], "HOST")}, &res); err != nil {
+		if err := callInto(method, params, &res); err != nil {
 			return err
 		}
 		fmt.Printf("%s %s. Addresses of %s: %s\n", verb, res.Address, res.Device, joinOrNone(res.Addresses))
@@ -825,6 +883,14 @@ func addresses(device string, args []string) error {
 	case "", "list":
 	default:
 		return fmt.Errorf("unknown addresses action %q. Use add, remove, or list", args[0])
+	}
+	if jsonMode {
+		devs, err := devicesRaw(device)
+		if err != nil {
+			return err
+		}
+		emitJSON(deviceField(devs, "addresses", "[]"))
+		return nil
 	}
 	var s State
 	if err := callInto("state", nil, &s); err != nil {
@@ -871,10 +937,14 @@ func send(device string, files []string) error {
 		}
 		paths = append(paths, abs)
 	}
+	params := map[string]any{"device": device, "paths": paths}
+	if jsonMode {
+		return act("share.files", params)
+	}
 	var res struct {
 		Transfers []string `json:"transfers"`
 	}
-	if err := callInto("share.files", map[string]any{"device": device, "paths": paths}, &res); err != nil {
+	if err := callInto("share.files", params, &res); err != nil {
 		return err
 	}
 	fmt.Printf("Queued %d transfers\n", len(res.Transfers))
@@ -882,6 +952,14 @@ func send(device string, files []string) error {
 }
 
 func notifications(device string) error {
+	if jsonMode {
+		devs, err := devicesRaw(device)
+		if err != nil {
+			return err
+		}
+		emitJSON(deviceField(devs, "notifications", "[]"))
+		return nil
+	}
 	var s State
 	if err := callInto("state", nil, &s); err != nil {
 		return err
@@ -901,6 +979,9 @@ func notifications(device string) error {
 }
 
 func clearNotifications(device string) error {
+	if jsonMode {
+		return act("notification.dismissAll", map[string]any{"device": device})
+	}
 	var res struct {
 		Dismissed int `json:"dismissed"`
 	}
@@ -921,19 +1002,26 @@ func commands(args []string) error {
 		if len(args) < 3 {
 			fail("Usage: flux-cli commands add NAME COMMAND...")
 		}
+		params := map[string]any{"name": args[1], "command": commandLine(args[2:])}
+		if jsonMode {
+			return act("commands.add", params)
+		}
 		var res struct {
 			ID string `json:"id"`
 		}
-		if err := callInto("commands.add", map[string]any{"name": args[1], "command": commandLine(args[2:])}, &res); err != nil {
+		if err := callInto("commands.add", params, &res); err != nil {
 			return err
 		}
 		fmt.Printf("Added %s with ID %s\n", args[1], res.ID)
 		return nil
 	case "remove", "rm":
-		return call("commands.remove", map[string]any{"id": need(args[1:], "ID")})
+		return act("commands.remove", map[string]any{"id": need(args[1:], "ID")})
 	case "", "list":
 	default:
 		return fmt.Errorf("unknown commands action %q. Use add, remove, or list", args[0])
+	}
+	if jsonMode {
+		return emitStateKey("commands")
 	}
 	var s State
 	if err := callInto("state", nil, &s); err != nil {
@@ -980,15 +1068,18 @@ func webcam(args []string, device string) error {
 	case "start":
 		return streamStart("webcam", args, device, os.Stdout)
 	case "stop":
-		return call("webcam.stop", nil)
+		return act("webcam.stop", nil)
 	case "reset":
-		return call("webcam.config", map[string]any{"reset": true})
+		return act("webcam.config", map[string]any{"reset": true})
 	case "set":
 		cfg, err := webcamSettings(args[1:])
 		if err != nil {
 			return err
 		}
-		return call("webcam.config", map[string]any{"config": cfg})
+		return act("webcam.config", map[string]any{"config": cfg})
+	}
+	if jsonMode {
+		return emitStateKey("webcam")
 	}
 	var s struct {
 		Webcam *struct {

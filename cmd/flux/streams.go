@@ -20,6 +20,9 @@ func streamStart(kind string, args []string, device string, out io.Writer) error
 	if named != "" {
 		device = named
 	}
+	if jsonMode {
+		return act(kind+".start", map[string]any{"device": device})
+	}
 	var res struct {
 		Device string `json:"device"`
 		Name   string `json:"name"`
@@ -56,10 +59,13 @@ func speaker(args []string, device string, out io.Writer) error {
 	case "start":
 		return streamStart("speaker", args, device, out)
 	case "stop":
-		return call("speaker.stop", nil)
+		return act("speaker.stop", nil)
 	case "":
 	default:
 		return fmt.Errorf("unknown argument %q. Usage: flux-cli speaker [start|stop]", first(args))
+	}
+	if jsonMode {
+		return emitStateKey("speaker")
 	}
 	var s struct {
 		Speaker *speakerState `json:"speaker"`
@@ -99,7 +105,10 @@ func mic(args []string, device string) error {
 	case "start":
 		return streamStart("mic", args, device, os.Stdout)
 	case "stop":
-		return call("mic.stop", nil)
+		return act("mic.stop", nil)
+	}
+	if jsonMode {
+		return emitStateKey("mic")
 	}
 	var s struct {
 		Mic *struct {
@@ -160,12 +169,18 @@ func setRemote(key string, on bool) (remoteSettings, error) {
 func remoteInput(args []string) error {
 	switch first(args) {
 	case "on":
+		if jsonMode {
+			return act("settings.set", map[string]any{"key": "remoteInput", "value": true})
+		}
 		if _, err := setRemote("remoteInput", true); err != nil {
 			return err
 		}
 		fmt.Println("Remote input is on. A paired phone or Mac can move the pointer and type on this computer.")
 		return nil
 	case "off":
+		if jsonMode {
+			return act("settings.set", map[string]any{"key": "remoteInput", "value": false})
+		}
 		if _, err := setRemote("remoteInput", false); err != nil {
 			return err
 		}
@@ -174,6 +189,9 @@ func remoteInput(args []string) error {
 	case "":
 	default:
 		return fmt.Errorf("unknown argument %q. Usage: flux-cli input [on|off]", first(args))
+	}
+	if jsonMode {
+		return emitSettingObject("remoteInput", "false")
 	}
 	var s struct {
 		Settings remoteSettings `json:"settings"`
@@ -194,8 +212,11 @@ func remoteInput(args []string) error {
 func remoteDesktop(args []string) error {
 	switch first(args) {
 	case "stop":
-		return call("desktop.stop", nil)
+		return act("desktop.stop", nil)
 	case "on":
+		if jsonMode {
+			return act("settings.set", map[string]any{"key": "remoteDesktop", "value": true})
+		}
 		s, err := setRemote("remoteDesktop", true)
 		if err != nil {
 			return err
@@ -206,6 +227,9 @@ func remoteDesktop(args []string) error {
 		}
 		return nil
 	case "off":
+		if jsonMode {
+			return act("settings.set", map[string]any{"key": "remoteDesktop", "value": false})
+		}
 		if _, err := setRemote("remoteDesktop", false); err != nil {
 			return err
 		}
@@ -214,6 +238,9 @@ func remoteDesktop(args []string) error {
 	case "":
 	default:
 		return fmt.Errorf("unknown argument %q. Usage: flux-cli desktop [on|off|stop]", first(args))
+	}
+	if jsonMode {
+		return emitStateKey("desktop")
 	}
 	var s struct {
 		Settings remoteSettings `json:"settings"`
@@ -253,7 +280,10 @@ func remoteDesktop(args []string) error {
 // screen shows the screen mirror state, or stops it.
 func screen(args []string) error {
 	if first(args) == "stop" {
-		return call("screen.stop", nil)
+		return act("screen.stop", nil)
+	}
+	if jsonMode {
+		return emitStateKey("screen")
 	}
 	var s struct {
 		Screen *struct {
@@ -287,10 +317,13 @@ func screen(args []string) error {
 func browse(args []string, device string) error {
 	switch first(args) {
 	case "stop":
-		return call("browse.stop", map[string]any{"device": device})
+		return act("browse.stop", map[string]any{"device": device})
 	case "":
 	default:
 		return fmt.Errorf("unknown argument %q. Usage: flux-cli browse [stop]", first(args))
+	}
+	if jsonMode {
+		return emitStateKey("browse")
 	}
 	var s struct {
 		Browse []struct {

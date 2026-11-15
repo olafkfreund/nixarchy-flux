@@ -32,8 +32,7 @@ var errNoSSHKey = errors.New("no connected phone offers an SSH key. In Flux on t
 // sshCmd runs flux-cli ssh, ssh key, and ssh socket, each with --json.
 // docs/ssh.md describes the agent.
 func sshCmd(args []string, device string) error {
-	asJSON := slices.Contains(args, "--json")
-	args = slices.DeleteFunc(slices.Clone(args), func(a string) bool { return a == "--json" })
+	asJSON := jsonMode
 	what := first(args)
 	if what != "" && what != "key" && what != "socket" {
 		return fmt.Errorf("unknown command: ssh %s. Use key or socket", what)
