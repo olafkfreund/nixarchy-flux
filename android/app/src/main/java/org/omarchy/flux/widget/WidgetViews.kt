@@ -178,7 +178,7 @@ private fun rowViews(context: Context, r: WidgetRow, fit: WidgetFit, paint: Pain
 private fun open(context: Context, t: WidgetTarget): PendingIntent = when (t) {
     is WidgetTarget.Agent -> Android.openAgent(context, t.deviceId, t.pane)
     // The sample approval of a debug build has no approval screen.
-    is WidgetTarget.Approval -> if (isDemo(t.computerId)) Android.openChats(context) else Approvals.openScreen(context)
+    is WidgetTarget.Approval -> if (isDemo(t.computerId)) Android.openChats(context) else Approvals.openScreen(context, t.key, 13)
     WidgetTarget.Chats -> Android.openChats(context)
 }
 

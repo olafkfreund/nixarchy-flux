@@ -88,12 +88,14 @@ import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.launch
 import org.omarchy.flux.camera.CameraMode
 import org.omarchy.flux.camera.CameraScreen
+import org.omarchy.flux.core.Approvals
 import org.omarchy.flux.core.ApproveRequest
 import org.omarchy.flux.core.DeviceUi
 import org.omarchy.flux.core.FluxCore
 import org.omarchy.flux.core.UiState
 import org.omarchy.flux.core.inboxReach
 import org.omarchy.flux.core.needsYou
+import org.omarchy.flux.core.requestKey
 import org.omarchy.flux.mic.MicScreen
 import org.omarchy.flux.stream.LiveStreams
 import org.omarchy.flux.webcam.WebcamScreen
@@ -195,7 +197,10 @@ fun FluxShell(
         if (isDemo(r.computerId)) {
             FluxCore.toast("This is a sample request")
         } else {
-            context.startActivity(Intent(context, ApproveActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            val i = Intent(context, ApproveActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // A tap that a window covered opens the screen without the fast path, so Approve there checks it again.
+            if ((context as? MainActivity)?.touchObscured == false) i.putExtra(Approvals.EXTRA_TAP, requestKey(r))
+            context.startActivity(i)
         }
     }
     val actions = ChatActions(

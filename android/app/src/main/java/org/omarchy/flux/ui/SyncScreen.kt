@@ -52,7 +52,7 @@ import org.omarchy.flux.net.TsnetNode
 import org.omarchy.flux.service.FluxNotificationListener
 
 /** 1 sync switch: what it does, and its state. [key] names the switch, so that a refused permission shows under it. */
-private class SyncItem(
+internal class SyncItem(
     val key: String,
     @DrawableRes val icon: Int,
     val title: String,
@@ -368,7 +368,7 @@ private fun ContactsNotice(onAllow: () -> Unit) {
 
 /** A sync switch. TalkBack reads it as a switch with its state. */
 @Composable
-private fun SyncRow(s: SyncItem) {
+internal fun SyncRow(s: SyncItem) {
     Row(
         Modifier.fillMaxWidth().heightIn(min = 64.dp).clip(TileShape).background(Tn.tile).border(1.dp, Tn.line, TileShape)
             .toggleable(value = s.on, role = Role.Switch, onValueChange = { s.onToggle() })

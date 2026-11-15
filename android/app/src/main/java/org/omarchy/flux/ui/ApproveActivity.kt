@@ -1,5 +1,7 @@
 package org.omarchy.flux.ui
 
+import android.app.KeyguardManager
+import android.content.Intent
 import android.os.Bundle
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.util.Log
@@ -42,16 +44,34 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import org.omarchy.flux.R
 import org.omarchy.flux.core.ApproveKeys
 import org.omarchy.flux.core.ApproveMessage
 import org.omarchy.flux.core.ApproveRequest
 import org.omarchy.flux.core.Approvals
 import org.omarchy.flux.core.FluxCore
+import org.omarchy.flux.core.requestKey
 import java.security.Signature
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+/** The services whose approvals can take the fast path: the list in internal/approve/pam.go. */
+internal val FAST_SERVICES = setOf("sudo", "polkit-1", "hyprlock")
+
+/**
+ * True when a tap on [r] opens the fingerprint prompt at once:
+ * Fingerprint first is [on] for its computer, the tap was for this
+ * request, the phone is not [locked], the request has not taken the
+ * fast path ([done]), and the screen is [asking].
+ */
+internal fun fastPath(r: ApproveRequest, tapFor: String?, on: Boolean, locked: Boolean, done: String?, asking: Boolean): Boolean {
+    val key = requestKey(r)
+    return r.kind == ApproveRequest.Kind.Approve && r.service in FAST_SERVICES &&
+        tapFor == key && on && !locked && done != key && asking
+}
 
 /**
  * The Approve screen: 1 request from a computer, with Approve and Deny.
@@ -83,6 +103,12 @@ class ApproveActivity : FragmentActivity() {
     // True when a window of another app covered this window during the last touch.
     private var touchObscured = false
 
+    // The request key of the tap that started or brought this screen, until onResume takes it.
+    private var tapFor: String? = null
+
+    // True while the open prompt came from the fast path.
+    private var fastPrompt = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         FluxCore.init(this)
@@ -95,6 +121,7 @@ class ApproveActivity : FragmentActivity() {
                 val r = signing
                 onSigned = null
                 signing = null
+                fastPrompt = false
                 if (done == null || r == null) return
                 // Each failure goes to the computer, so the command stops at once and prints the reason.
                 if (s == null) {
@@ -113,18 +140,55 @@ class ApproveActivity : FragmentActivity() {
 
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                 val r = signing
+                val fast = fastPrompt
                 onSigned = null
                 signing = null
+                fastPrompt = false
                 discardPending()
                 when (errorCode) {
                     // A cancel keeps the request open, so the user can approve or deny it again.
                     BiometricPrompt.ERROR_NEGATIVE_BUTTON, BiometricPrompt.ERROR_USER_CANCELED, BiometricPrompt.ERROR_CANCELED -> phase.value = Phase.Ask
+                    // A fast-path prompt that nobody answered, or a locked sensor, goes back to the screen. The request stays open.
+                    BiometricPrompt.ERROR_TIMEOUT, BiometricPrompt.ERROR_LOCKOUT, BiometricPrompt.ERROR_LOCKOUT_PERMANENT ->
+                        if (fast) phase.value = Phase.Ask else if (r != null) fail(r, errString.toString()) else phase.value = Phase.Failed(errString.toString())
                     else -> if (r != null) fail(r, errString.toString()) else phase.value = Phase.Failed(errString.toString())
                 }
             }
         })
+        // A recreated screen lost the request it signed, so it closes a prompt that the old one left open.
+        if (savedInstanceState != null) prompt.cancelAuthentication()
+        if (savedInstanceState == null) tapFor = takeTap(intent)
+        // The prompt belongs to 1 request. It closes when that request ends or another takes its place.
+        lifecycleScope.launch {
+            Approvals.current.collect { c ->
+                val s = signing ?: return@collect
+                if (c == null || requestKey(c) != requestKey(s)) prompt.cancelAuthentication()
+            }
+        }
         setContent { TiledTheme { Screen() } }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        tapFor = takeTap(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val tap = tapFor
+        // A tap counts once: a later resume, such as an unlock, does not take the fast path.
+        tapFor = null
+        val r = Approvals.current.value ?: return
+        val locked = getSystemService(KeyguardManager::class.java)?.isKeyguardLocked != false
+        if (fastPath(r, tap, FluxCore.settings.fingerprintFirst(r.computerId), locked, Approvals.fastFor, phase.value == Phase.Ask)) {
+            Approvals.fastFor = requestKey(r)
+            start(r, tapped = true)
+        }
+    }
+
+    /** The tapped request key of [i], removed from it, so the intent counts once. */
+    private fun takeTap(i: Intent): String? = i.getStringExtra(Approvals.EXTRA_TAP).also { i.removeExtra(Approvals.EXTRA_TAP) }
 
     override fun onDestroy() {
         discardPending()
@@ -288,9 +352,9 @@ class ApproveActivity : FragmentActivity() {
         phase.value = Phase.Failed(message)
     }
 
-    private fun start(r: ApproveRequest) {
+    private fun start(r: ApproveRequest, tapped: Boolean = false) {
         val requestKey = "${r.computerId}/${r.id}"
-        if (touchObscured) {
+        if (!tapped && touchObscured) {
             blockedFor.value = requestKey
             return
         }
@@ -343,11 +407,22 @@ class ApproveActivity : FragmentActivity() {
         val info = BiometricPrompt.PromptInfo.Builder()
             .setTitle(if (key == null) "Approve ${r.service}" else "Enroll this phone")
             .setSubtitle("For ${r.user} on ${r.host}")
-            .apply { if (key == null && where.isNotEmpty()) setDescription(where) }
+            .apply {
+                val text = if (tapped) {
+                    val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(r.time * 1000))
+                    // The prompt covers the screen's warning, so the warning comes first.
+                    listOf("Approve only if you just typed the command.", where, "Asked at $time by ${r.computerName}")
+                        .filter { it.isNotEmpty() }.joinToString("\n")
+                } else {
+                    where
+                }
+                if (key == null && text.isNotEmpty()) setDescription(text)
+            }
             .setNegativeButtonText("Cancel")
             .setAllowedAuthenticators(BIOMETRIC_STRONG)
             .setConfirmationRequired(true)
             .build()
+        fastPrompt = tapped
         signing = r
         prompt.authenticate(info, BiometricPrompt.CryptoObject(signature))
     }
