@@ -169,6 +169,8 @@ The webcam needs `ffmpeg` and `v4l2loopback-dkms` with the matching kernel heade
 The microphone needs PipeWire and `pw-cat`.
 The screen mirror needs `mpv` or `ffplay`.
 The screen mirror does not provide phone input control.
+For control, the user runs scrcpy over `adb`, outside Flux.
+See `docs/camera.md`.
 
 ## Configuration
 

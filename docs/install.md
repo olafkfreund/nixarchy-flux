@@ -21,6 +21,7 @@ The macOS app requires macOS 14 or later.
 | Extended screen on an Android phone or tablet | `wf-recorder` |
 | Icons | A Nerd Font that provides `ttf-font-nerd` |
 | Android install with `adb` | `android-tools`, as in [Android requirements](android.md#requirements) |
+| Phone control | `scrcpy`, which brings `adb`. See [control the phone with scrcpy](camera.md#control-the-phone-with-scrcpy) |
 | Android build | JDK 21, SDK platform 36, and Build Tools 36.0.0 |
 | macOS build | Xcode and XcodeGen on macOS 14 or later |
 
