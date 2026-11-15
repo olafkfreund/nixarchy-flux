@@ -78,8 +78,11 @@ let
 
       plugin=$out/share/flux/omarchy-plugin
       mkdir -p $plugin/Flux
-      for f in manifest.json Service.qml Backend.qml BarWidget.qml Panel.qml; do
-        install -m644 gui/omarchy/$f $plugin/$f
+      # Every top-level plugin file, so a new one can't be left out (as
+      # MotionCues.qml was). Flux/ is a symlink and tools/ a folder: the
+      # globs skip both.
+      for f in gui/omarchy/manifest.json gui/omarchy/*.qml gui/omarchy/*.js; do
+        install -m644 "$f" $plugin/
       done
       (cd gui/qml && find . -path ./tools -prune -o -type f \
         \( -name '*.qml' -o -name qmldir -o -name '*.js' \) -print |
