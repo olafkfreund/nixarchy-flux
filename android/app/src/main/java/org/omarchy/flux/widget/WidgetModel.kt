@@ -10,6 +10,7 @@ import org.omarchy.flux.core.DeviceUi
 import org.omarchy.flux.core.PairRow
 import org.omarchy.flux.core.SeenClock
 import org.omarchy.flux.core.chatList
+import org.omarchy.flux.core.requestKey
 import org.omarchy.flux.theme.PaletteSpec
 import kotlin.math.floor
 import kotlin.math.max
@@ -40,8 +41,8 @@ sealed interface WidgetTarget {
     /** Chats in the app, for example for a pair request. */
     data object Chats : WidgetTarget
 
-    /** The approval screen of the request from the computer [computerId]. */
-    data class Approval(val computerId: String) : WidgetTarget
+    /** The approval screen of the request [key] from the computer [computerId]. */
+    data class Approval(val computerId: String, val key: String) : WidgetTarget
 
     /** The chat of the agent in [pane] on the computer [deviceId]. */
     data class Agent(val deviceId: String, val pane: String) : WidgetTarget
@@ -133,7 +134,7 @@ private fun rowOf(r: ChatRow): WidgetRow? = when (r) {
             computer = q.computerName,
             needs = true,
             strong = true,
-            target = WidgetTarget.Approval(q.computerId),
+            target = WidgetTarget.Approval(q.computerId, requestKey(q)),
         )
     }
     is PairRow -> WidgetRow(

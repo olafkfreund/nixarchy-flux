@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -28,6 +29,12 @@ object Approvals {
 
     /** The request that the Approve screen shows, or null. */
     val current: StateFlow<ApproveRequest?> = _current
+
+    /** The extra of an intent that a tap on a request starts. It holds the request's [requestKey]. */
+    const val EXTRA_TAP = "tap"
+
+    /** The key of the request that took the fast path, so it opens the prompt once. Main thread only. */
+    var fastFor: String? = null
 
     /** Handles flux.approve from a paired computer. The core lock is held. */
     fun onPacket(core: FluxCore, d: Device, p: Packet) {
@@ -112,22 +119,33 @@ object Approvals {
     fun clear(context: Context, id: String) {
         if (_current.value?.id != id) return
         _current.value = null
+        fastFor = null
         NotificationManagerCompat.from(context).cancel(Android.ID_APPROVE)
     }
 
     /**
-     * Opens the Approve screen of the open request. The approval
-     * notification and the agents widget use it. The screen asks for the
-     * fingerprint before it signs.
+     * Opens the Approve screen after a tap: the approval notification
+     * (request code 10) and the agents widget (13). [key] is the tapped
+     * request's [requestKey], or null. PendingIntent ignores extras when
+     * it compares intents, so each route has its own request code, and the
+     * key is also the data URI: an old token keeps its own request's key
+     * and is never updated to a newer request's.
      */
-    fun openScreen(context: Context): PendingIntent = PendingIntent.getActivity(
-        context, 10, Intent(context, ApproveActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+    fun openScreen(context: Context, key: String?, code: Int = 10): PendingIntent = PendingIntent.getActivity(
+        context, code,
+        Intent(context, ApproveActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .apply { if (key != null) putExtra(EXTRA_TAP, key).setData(Uri.fromParts("flux-approve", key, null)) },
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
     @SuppressLint("MissingPermission")
     private fun show(context: Context, r: ApproveRequest) {
-        val open = openScreen(context)
+        val open = openScreen(context, requestKey(r))
+        // The full-screen intent opens the screen with no tap, so it carries no key.
+        val full = PendingIntent.getActivity(
+            context, 12, Intent(context, ApproveActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
         val deny = PendingIntent.getService(
             context, 11, Intent(context, FluxService::class.java).setAction(FluxService.ACTION_APPROVE_DENY),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
@@ -138,7 +156,7 @@ object Approvals {
             .setContentText(ApproveMessage.question(r))
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setFullScreenIntent(open, true)
+            .setFullScreenIntent(full, true)
             .setContentIntent(open)
             .setOngoing(true)
             .setTimeoutAfter(r.timeoutSeconds * 1000L)
@@ -150,3 +168,6 @@ object Approvals {
         }
     }
 }
+
+/** The key of [r] for the fast path: its computer and its id. */
+internal fun requestKey(r: ApproveRequest): String = "${r.computerId}/${r.id}"
