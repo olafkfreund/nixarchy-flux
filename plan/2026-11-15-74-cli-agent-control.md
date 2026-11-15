@@ -89,22 +89,43 @@ reviewers:
 
 **`jsonout.go`:**
 - `var jsonMode bool`.
-- `splitJSON(in []string) []string`, with the rules above. It needs to
+- `splitJSON(in []string) []string`, in two passes:
+  1. Walk the arguments as `splitDevice` does (`main.go:254-277`). Skip
+     `--device NAME`, `-d NAME` and `--device=NAME` before the command and
+     in the flag region after it. Remove every `--json` in those places.
+     Keep everything else, in order, and stop at the first word after the
+     flag region or at `--`.
+  2. Then, when the last argument is `--json` and it isn't after `--`,
+     check `takesText` on the positional words after the command
+     (device flags and the trailing `--json` removed). When the form
+     takes no text, remove the trailing `--json`.
+
+  This order means that `sms --json threads`,
+  `sms --device P threads --json`, `--device=P status --json` and
+  `notifications --device P reply ID --json` all work. The last of these
+  keeps `--json` as reply text, because `reply` takes text. It needs to
   know which forms take text, so give it
   `takesText(cmd string, rest []string) bool`, covering the list above.
-  For `sms`, a first word of `threads`, `thread` or `refresh` means no
-  text. For `settings`, there is text only with 2 or more arguments.
+  For `sms`, a first positional word of `threads`, `thread` or `refresh`
+  means no text. For `settings`, there is text only with 2 or more
+  positional words before the trailing `--json`. So `settings KEY --json`
+  is a JSON read. Setting `name` to the literal `--json` is not
+  supported.
 - `callRaw(method, params) (json.RawMessage, error)`.
 - `act(method, params) error`: in JSON mode it prints the method's raw
   result through `safeJSON`, or `{}` when the result is empty or `null`.
   Otherwise it behaves as `call`.
 - `emitJSON(raw json.RawMessage)`: prints one value through `safeJSON`.
+  An empty `raw` prints `null`, never an empty line.
 - `stateRaw() (map[string]json.RawMessage, error)` decodes the raw state
   for projections.
 - `devicesRaw(device string) (map[string]map[string]json.RawMessage, error)`:
   the paired devices keyed by ID, filtered by `--device` with the same
   rule as the socket. That rule: an exact ID first, else a name with no
-  case. On no match it returns `*ipc.Error{Code:"not_found"}`.
+  case. On no match it returns `*ipc.Error{Code:"not_found"}`. A name
+  that matches more than one paired device returns `ambiguous`, with the
+  IDs in the message. Text output walks the devices sorted by name, then
+  ID.
 - `usageErr(format, ...) error` returns
   `*ipc.Error{Code:"bad_args",Message:…}`.
 - `jsonError(err error, exit int)` maps the error to a code:
@@ -125,8 +146,13 @@ reviewers:
 - Unknown command:
   - JSON mode: `jsonError(&ipc.Error{Code:"unknown_command"}, 1)`
   - otherwise: as today, exit 2.
-- `fail` and the `err != nil` path: in JSON mode they call `jsonError`.
-  `need` uses the code `bad_args`.
+- `fail` is only used for usage failures, so in JSON mode it gives
+  `bad_args`. That covers `need` and the direct `fail(...)` calls in
+  `sms`, `send`, `commands add` and `notify`.
+- The `err != nil` path of `main` (`main.go:244-246`) calls
+  `jsonError(err, 1)` directly, and that maps the code.
+- `jsonError` cleans the stderr message with `safe`, as `fail` does
+  (`main.go:295-298`), and cleans stdout with `safeJSON`.
 - `dial` returns three sentinel errors (wrapped, with the same messages
   as today), so `jsonError` can map them.
 - `callInto` asks `Call` for a `json.RawMessage`. Then, only when
@@ -152,16 +178,25 @@ reviewers:
   - for every form that takes text, the last word `--json` stays text
   - `clip --json` stays text
   - `--json` after `--` stays
+  - `--device=P clip --json` stays text
+  - `sms --json threads`, `sms --device P threads --json`
+  - `settings --json checkUpdates`, `settings checkUpdates --json`
+  - `notifications --device P reply ID --json` keeps `--json` as
+    text
 - **Subprocess tests.** `TestMain` runs `main()` when
-  `FLUXCLI_TEST_MAIN=1`, and the tests run `os.Args[0]` with arguments
-  and `FLUX_SOCKET`. They cover:
+  `FLUXCLI_TEST_MAIN=1`. The tests run `os.Args[0]` with arguments, with
+  `FLUX_SOCKET` set, and with `HOME` and `XDG_CONFIG_HOME` pointing at a
+  temp dir. `dial` checks the off marker first (`main.go:309-312`), so
+  without that isolation a host with `fluxd` off would give
+  `daemon_off`. They cover:
   - `--json bogus`: exit 1, `unknown_command`
   - `bogus`: exit 2
   - `--json ring` with no socket: `daemon_down`
   - `--json ring` against a socket that returns `offline`
   - `--json sms` (through `fail`): `bad_args`
   - `--json run` with no ID (through `need`): `bad_args`
-  - `--json --help` and `--json --version`: `no_json`
+  - `--json --help`, `--json --version`, and a bare `--json` (which
+    means `open`): `no_json`
   - `--json notify Title --run`: sends the body `--run`, and is not
     refused
   - `--json notify --run -- touch F`: `no_json`, F doesn't exist, and
@@ -187,8 +222,9 @@ make vet
 
 ### 2. New commands (coder)
 
-**Files:** `cmd/flux/main.go` (the switch at `:179-189`, plus the
-usage), `cmd/flux/features.go` (`transferCommand` at `:13-33`), and
+**Files:** `cmd/flux/main.go` (the `sms` and `notifications` cases at
+`:179-189`, new `dnd`, `text` and `settings` cases in the switch at
+`:140-243`, and the usage), `cmd/flux/features.go` (`transferCommand` at `:13-33`), and
 tests in `cmd/flux/features_test.go` (new, or next to the existing
 tests).
 
@@ -208,6 +244,23 @@ tests).
 | `settings KEY` | the same | the value | `{"key":K,"value":V}` |
 | `settings KEY VALUE` | `settings.set` `{key,value}` | none | the result |
 
+**Field names** (from `internal/core/sms.go`, `notifications.go` and
+`docs/ipc.md:163-169`):
+- A conversation is
+  `{thread:int64, name, address, addresses, last, time (Unix s), unread, outgoing}`.
+- `sms.thread` returns `{"messages":[{id, thread, body, address, addresses, name, time (Unix s), outgoing, pending, failed, read}]}`,
+  oldest first.
+- A notification is
+  `{id, app, title, text, time, replyId, actions, dismissable}`.
+- A device's `dnd` is `{on: bool or null, by, at}`. It is left out when
+  the device has no link, and the JSON gives `null` then.
+- Text output:
+  - `sms threads`: `THREAD  NAME  LAST`, newest `time` first.
+  - `sms thread`: `YYYY-MM-DD HH:MM  NAME  BODY` (local time), with
+    `me` as the name for outgoing messages.
+  - `dnd`: `on` / `off` / `unknown` (when `on` is null or `dnd` is
+    missing).
+
 **Types:**
 - `id`, `message` and `action` are strings.
 - `thread` is `strconv.ParseInt(s,10,64)` and must be > 0, else
@@ -223,6 +276,11 @@ tests).
   - Finite number: `motionSensitivity`.
   - Strings: `name`, `downloadDir`, `motionSize`.
   - An unknown key, for a read or a write, is `bad_args`.
+- `settings` JSON is the full `settings` object, the three `*Rules` keys
+  included, plus `name` from `self.name`. Text leaves the `*Rules` keys
+  out, and prints strings unquoted through `safe`.
+- `transfers open` and `transfers copy` without an ID are `bad_args`
+  (`usageErr`).
 - `sms`: a first word of `threads`, `thread` or `refresh` picks the new
   forms. Any other first word keeps `sms NUMBER TEXT...`.
 
@@ -237,7 +295,7 @@ tests).
 - Each form sends the exact method and params JSON. `dnd off` sends
   `"on":false`.
 - A bad thread (`0`, `-1`, `9223372036854775808`, `abc`) is `bad_args`.
-- `motionSensitivity NaN` is `bad_args`.
+- `motionSensitivity NaN` and `Inf` are `bad_args`.
 - An unknown setting is `bad_args`.
 - The text output of each read.
 - The JSON shape of every new form. Device-scoped reads cover:
@@ -299,6 +357,16 @@ nothing after one call, change that `call(…)` to `act(…)`.
 **Tests:** a table test runs every form above in JSON mode against
 `serveRecord`, with a fixed state that has two paired devices, a
 notification body with `\n` and a control character, and a transfer.
+The fixed state holds a literal U+202E, a literal `\x7f`, and a `\n`
+in a notification body. Go's encoder leaves U+202E and `\x7f` unescaped
+on the wire, so only `safeJSON` can escape them, and the test fails when
+it is skipped. If the map in `recordHandler.state` (`streams_test.go:20`)
+can't carry these exact bytes, add a raw-state option.
+
+The table also covers:
+- `devices --json`
+- `--device` filtering, `not_found` and `{}` on the device-scoped reads
+
 For each form it checks that:
 - the recorded socket calls are exactly the expected method, params and
   count. Each action method returns a distinctive result (for example
@@ -319,6 +387,10 @@ make vet
 
 **Traps:**
 - Never decode into a CLI struct for JSON output.
+- In JSON mode, a form that prints text after its action (all of
+  `motion`, `input on|off`, `desktop on|off`, `notifications clear`)
+  returns right after `act`. It prints no text, and makes no extra
+  `state` read.
 - For a set-then-read form, the JSON is the set's result.
 - Text-mode output must stay byte-for-byte. The existing tests in
   `main_test.go` and `streams_test.go` must pass unchanged.
