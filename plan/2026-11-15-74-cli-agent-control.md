@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 74
 spec: spec/2026-11-15-74-cli-agent-control.md
 coders:
