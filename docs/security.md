@@ -9,7 +9,7 @@ A paired device is an Android phone, an iPhone, or a Mac that you paired with `f
 Global settings in `~/.config/flux/config.toml` apply to every paired device.
 The [per-device access settings](workflows.md#per-device-access) can restrict a feature for one device.
 A device restriction cannot enable a feature that the global settings disable.
-To remove all access for one device, [unpair it](#unpair-a-device).
+To remove all Flux access for one device, [unpair it](#unpair-a-device).
 
 ## Pair only with your own device
 
@@ -192,6 +192,34 @@ This was checked against tailscale v1.104.4, and the check runs again with each 
 The node's state is in the app's files, and app backup is off.
 The auth key is kept only until the node is up.
 
+## scrcpy and adb
+
+[scrcpy](camera.md#control-the-phone-with-scrcpy) controls the phone through `adb`, outside Flux.
+Flux itself never injects input on the phone.
+
+`adb` gives the computer a shell on the phone.
+It can install apps, read shared storage, grant permissions, and tap and type anywhere.
+Android's app sandbox keeps it out of the private files of most apps.
+It can still open any app and read what the app shows, and it can read the files of a debug build such as a debug Flux.
+That is more than any Flux feature grants.
+
+While **Wireless debugging** or **USB debugging** is on, any program of your user can connect with the `adb` key, also when scrcpy does not run.
+It can then tap the buttons of Flux on the phone: **Pair**, **Start**, **Play on phone**, and SSH signing, if it knows the screen lock.
+A tap then no longer proves that a person touched the phone.
+An approval that needs a fingerprint still needs one.
+So turn off **Wireless debugging**, or **USB debugging**, when you are done.
+
+The `adb` key is `~/.android/adbkey` on the computer.
+Each program of your user can use it, and the Flux settings do not limit it.
+While the `adb` server runs, it listens on `127.0.0.1:5037`, which other local users can reach too.
+
+A Flux unpair does not stop scrcpy or revoke `adb`.
+To remove 1 computer, open **Wireless debugging > Paired devices** on the phone and forget it.
+**Developer options > Revoke USB debugging authorizations** removes every computer, also the computers that you connected with a cable.
+
+Do not use `adb tcpip`.
+It has no pairing code and no encryption, and only a prompt on the phone protects it, the first time each key connects.
+
 ## Album art
 
 Besides the paired computers and, with Remote access, Tailscale, the apps connect to 1 other kind of host.
@@ -235,6 +263,9 @@ An unpair from either side ends every session of the device:
 - Browse PC, the streams, the remote desktop, and remote input stop. `fluxd` drops the input that waits and releases a held button.
 - `fluxd` sends no answer of a herdr read, a reply, or a start that still runs.
 - `fluxd` removes the notifications, the messages, the battery state, and the extra addresses of the device. It closes the desktop notifications of the device, because their buttons no longer reach it.
+
+An unpair does not stop scrcpy or revoke `adb`.
+See [scrcpy and adb](#scrcpy-and-adb).
 
 When `fluxd` cannot save `devices.json`, the command returns the `not_saved` error.
 The device is then unpaired only until `fluxd` restarts, because `~/.local/share/flux/devices.json` still has it.

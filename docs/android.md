@@ -16,7 +16,7 @@ The app requires Android 10 or later, API 29, on a 64-bit ARM device (`arm64-v8a
 | Network | The phone and the computer are on the same local network. |
 | Install with `adb` | `adb` on the computer, and **USB debugging** or **Wireless debugging** on the phone |
 
-You need `adb` only to install the APK from the computer, for example when Play Protect blocks it.
+You need `adb` to install the APK from the computer, for example when Play Protect blocks it, and for [scrcpy](camera.md#control-the-phone-with-scrcpy).
 On Omarchy and Arch Linux, the `android-tools` package contains `adb`:
 
 ```sh

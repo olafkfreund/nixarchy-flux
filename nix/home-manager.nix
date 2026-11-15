@@ -38,6 +38,8 @@ in
         ffmpeg
         wtype
         mpv
+        scrcpy
+        android-tools
         gpu-screen-recorder
         wf-recorder
         libxkbcommon
@@ -47,7 +49,7 @@ in
         xdg-utils
       ];
       defaultText = lib.literalExpression "[ pkgs.pipewire pkgs.ffmpeg … ]";
-      description = "Programs that fluxd runs. They go on the user profile, and fluxd is not wrapped.";
+      description = "Programs that fluxd runs, and scrcpy with adb to control the phone. They go on the user profile, and fluxd is not wrapped.";
     };
 
     plugin.enable = lib.mkOption {
