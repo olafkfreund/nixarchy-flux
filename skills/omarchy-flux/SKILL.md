@@ -17,6 +17,7 @@ The `fluxcd` package also installs a `flux` command, so always run `flux-cli`.
 | Task | Reference |
 | --- | --- |
 | Pair a phone, use the CLI, change settings, or diagnose a connection | [Runtime reference](references/runtime.md) |
+| Act on the phone for the user: notifications, text messages, Do Not Disturb, files, or settings | [Operate Flux for the user](references/runtime.md#operate-flux-for-the-user) |
 | Build, install, test, package, or release Flux | [Build and release reference](references/build-release.md) |
 | Change the source | Read the relevant files in the repository and the topic in `docs/README.md`. |
 | Change fingerprint approval | Read `docs/approve.md` before you edit the approval code. |
