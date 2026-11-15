@@ -346,7 +346,7 @@ A phone can start a new mirror at most once in 3 seconds.
 scrcpy is a separate app that streams and controls an Android phone over `adb`.
 It does not use Flux, its pairing, or the Flux screen mirror.
 
-scrcpy needs **Wireless debugging**, which needs Android 11 or later.
+Over Wi-Fi, scrcpy needs **Wireless debugging**, which needs Android 11 or later.
 On Android 10, use a USB cable with **USB debugging**.
 
 The NixOS and Home Manager modules install scrcpy and `adb`.
@@ -358,7 +358,8 @@ sudo pacman -S --needed scrcpy
 
 The first time, pair the computer with the phone:
 
-1. On the phone, open **Developer options > Wireless debugging** and select **Pair device with pairing code**.
+1. Turn on **Developer options** as in [install with adb](android-setup.md#install-with-adb).
+   On the phone, open **Developer options > Wireless debugging** and select **Pair device with pairing code**.
 2. On the computer, run `adb pair` with the address, the pairing port, and the code that the phone shows:
 
    ```sh
@@ -384,7 +385,8 @@ With more than 1 device, run `adb devices` and pass the serial of the phone to s
 scrcpy -s <serial>
 ```
 
-To stop, close the window, then turn off **Wireless debugging**.
+To stop, close the window, then turn off **Wireless debugging**, or **USB debugging** after a cable.
+To stop the `adb` server too, run `adb kill-server`.
 `adb` gives the computer a shell on the phone.
 See [scrcpy and adb](security.md#scrcpy-and-adb).
 

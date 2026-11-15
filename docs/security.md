@@ -202,10 +202,11 @@ It can install apps, read shared storage, grant permissions, and tap and type an
 Android's permissions still keep it out of the private data of other apps.
 That is more than any Flux feature grants.
 
-While `adb` is connected, software on the computer can tap the buttons of Flux on the phone: **Pair**, **Start**, **Play on phone**, and SSH signing with a screen lock that it knows.
+While **Wireless debugging** or **USB debugging** is on, any program of your user can connect with the `adb` key, also when scrcpy does not run.
+It can then tap the buttons of Flux on the phone: **Pair**, **Start**, **Play on phone**, and SSH signing, if it knows the screen lock.
 A tap then no longer proves that a person touched the phone.
 An approval that needs a fingerprint still needs one.
-So turn off **Wireless debugging** when you are done.
+So turn off **Wireless debugging**, or **USB debugging**, when you are done.
 
 The `adb` key is `~/.android/adbkey` on the computer.
 Each program of your user can use it, and the Flux settings do not limit it.
