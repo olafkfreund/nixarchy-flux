@@ -327,6 +327,7 @@ sudo pacman -S --needed mpv
 
 On the phone, select **Mirror screen** and accept the Android capture prompt.
 The desktop window shows the screen but does not control phone input.
+To control the phone, see [Control the phone with scrcpy](#control-the-phone-with-scrcpy).
 
 To stop, close the window, use the phone notification, or run:
 
@@ -339,6 +340,53 @@ The window uses the `flux-screen` app ID.
 `dist/hyprland.lua` includes a rule that floats the window and keeps it from taking the keyboard focus.
 `ffplay` closes its window at the end of the stream, as `mpv` does.
 A phone can start a new mirror at most once in 3 seconds.
+
+### Control the phone with scrcpy
+
+scrcpy is a separate app that streams and controls an Android phone over `adb`.
+It does not use Flux, its pairing, or the Flux screen mirror.
+
+scrcpy needs **Wireless debugging**, which needs Android 11 or later.
+On Android 10, use a USB cable with **USB debugging**.
+
+The NixOS and Home Manager modules install scrcpy and `adb`.
+On Omarchy and Arch Linux, install scrcpy, which brings `adb`:
+
+```sh
+sudo pacman -S --needed scrcpy
+```
+
+The first time, pair the computer with the phone:
+
+1. On the phone, open **Developer options > Wireless debugging** and select **Pair device with pairing code**.
+2. On the computer, run `adb pair` with the address, the pairing port, and the code that the phone shows:
+
+   ```sh
+   adb pair 192.168.1.20:37215
+   ```
+
+The pairing port and the connection port are different, as in [install with adb](android-setup.md#install-with-adb).
+
+Each time:
+
+1. On the phone, turn on **Wireless debugging**.
+2. Open **scrcpy** from the app launcher.
+   If nothing opens, open **scrcpy (console)** to see why.
+3. If `adb` does not find the phone, run `adb connect` with the address and the port on the **Wireless debugging** page, then open **scrcpy** again:
+
+   ```sh
+   adb connect 192.168.1.20:41393
+   ```
+
+With more than 1 device, run `adb devices` and pass the serial of the phone to scrcpy:
+
+```sh
+scrcpy -s <serial>
+```
+
+To stop, close the window, then turn off **Wireless debugging**.
+`adb` gives the computer a shell on the phone.
+See [scrcpy and adb](security.md#scrcpy-and-adb).
 
 ## Stream sessions
 
