@@ -180,13 +180,12 @@ A device that is not paired shows only while it has a link.
 | State | `state`, `subscribe`, `discover` |
 | Pairing | `pair.address`, `pair.request`, `pair.accept`, `pair.reject`, `pair.unpair` |
 | Addresses | `addresses.add`, `addresses.remove` |
-| Device | `ring`, `ping`, `dnd.set` |
-| Sharing | `clipboard.send`, `clipboard.copy`, `clipboard.pause`, `clipboard.resume`, `share.files`, `share.text`, `share.url`, `transfer.cancel`, `transfer.open`, `transfer.copy` |
-| Commands | `commands.add`, `commands.remove`, `commands.run` |
-| Notifications | `notification.dismiss`, `notification.dismissAll`, `notification.reply`, `notification.action`, `notify.send` |
+| Device | `ring`, `ping`, `dnd.set`, `device.settings`, `device.settings.set` |
+| Sharing | `clipboard.send`, `clipboard.copy`, `clipboard.pause`, `clipboard.resume`, `clipboard.delete`, `clipboard.clear`, `clipboard.pin`, `clipboard.unpin`, `clipboard.search`, `share.files`, `share.text`, `share.url`, `transfer.retry`, `transfer.cancel`, `transfer.open`, `transfer.copy` |
+| Commands | `commands.add`, `commands.remove`, `commands.run`, `automation.add`, `automation.remove` |
+| Notifications | `notification.dismiss`, `notification.dismissAll`, `notification.reply`, `notification.action`, `notification.rule.add`, `notification.rule.remove`, `notify.send` |
 | Text messages | `sms.refresh`, `sms.thread`, `sms.send` |
 | Streams | `webcam.start`, `webcam.config`, `webcam.stop`, `mic.start`, `mic.stop`, `speaker.start`, `speaker.stop`, `screen.stop`, `desktop.stop`, `browse.stop` |
-| Streams | `webcam.start`, `webcam.config`, `webcam.stop`, `mic.start`, `mic.stop`, `screen.stop`, `desktop.stop`, `browse.stop` |
 | Motion cues | `motion.start` with an optional `device`, `motion.stop` |
 | Approval | `approve.request`, `approve.wait`, `approve.enroll`, `approve.cancel` |
 | SSH key | `ssh.keys` |
@@ -221,6 +220,9 @@ Without `device`, a method uses the only connected paired device.
 | `share.files` | `device`, and `paths`, a list of absolute paths. The result has the IDs of the new `transfers`. |
 | `share.text`, `share.url` | `device`, and `text` or `url` |
 | `transfer.cancel` | `id` of a transfer |
+| `transfer.open` | `id` of a finished incoming transfer |
+| `transfer.copy` | `id` of a finished incoming transfer |
+| `transfer.retry` | `id` of a transfer |
 | `commands.add` | `name`, `command`. The result has the new `id`. |
 | `commands.remove`, `commands.run` | `id` |
 | `notification.dismiss` | `device`, `id` |
@@ -242,9 +244,11 @@ Without `device`, a method uses the only connected paired device.
 `share.url` takes only an `http` or `https` URL with a host.
 `share.text`, `share.url`, and `clipboard.send` refuse a text of more than 256 KiB with `too_large`.
 
-`settings.set` takes these keys with a boolean `value`: `autoClipboard`, `notifications`, `shareHome`, `pauseMediaOnCall`, `syncDnd`, `herdr`, `herdrControl`, `herdrTerminals`, `remoteInput`, `remoteDesktop`, and `checkUpdates`.
-`name` and `downloadDir` take a string.
+`settings.set` takes these keys with a boolean `value`: `autoClipboard`, `notifications`, `shareHome`, `pauseMediaOnCall`, `syncDnd`, `herdr`, `herdrControl`, `herdrTerminals`, `remoteInput`, `remoteDesktop`, `checkUpdates`, `motionCues`, and `motionAuto`.
+`name`, `downloadDir`, and `motionSize` (`small`, `medium`, or `large`) take a string.
 `clipboardLimit` takes an integer between 1 and 500 (default 50).
+`motionIdle` takes an integer between 30 and 3600 (seconds).
+`motionSensitivity` takes a number (`0.5`, `1`, or `1.6`).
 To turn the release check off or on over IPC, send:
 
 ```json
