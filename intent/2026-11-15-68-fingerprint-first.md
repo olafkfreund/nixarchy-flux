@@ -117,8 +117,7 @@ first touch of the sensor can approve.
   - After a cancel, the prompt does not open again by itself for that
     request.
   - When the request ends, its prompt closes.
-- Whether the prompt also opens with no action at all, over the lock screen
-  or when Flux is on screen, is open question 1.
+- The prompt never opens with no action at all (decision 1).
 - With the setting off, nothing changes.
 - An enrollment always keeps the two steps. It shows a key code to compare.
 - When Android does not allow the full-screen intent, the setting says so.
@@ -149,26 +148,25 @@ first touch of the sensor can approve.
 - The overlay hiding stays. The tap guard stays for every tap that still
   approves, such as **Approve** after a cancel.
 
-## Open questions
+## Decisions (owner, 2026-11-15)
 
-1. **Open the prompt with no user action?** #183 asks for it over the lock
-   screen and when Flux is in the background. Proposed: no.
+1. **One tap is always needed.** The prompt never opens without a user
+   action. The part of #183 that asks for no tap, over the lock screen or
+   with Flux in the background, is declined:
    - A finger on the sensor to unlock the phone would then approve a
      request the user has not read. Code that runs as the user can start
      that request.
    - The overlay guard has no tap to check.
    - The Mac and Windows also need a tap first.
-   - If yes: one setting for both, or a second one?
-2. **For each computer, or for the whole app?** Proposed: for each
-   computer, so the user can leave it off for a computer where agents run.
-   It does not stop other code on the computer from asking.
-3. **Which requests?** Proposed: every approval (`sudo`, polkit and
-   `hyprlock`), but not an enrollment. A `hyprlock` approval unlocks the
-   screen and does not give root.
-4. **SSH signing too?** Proposed: not now. It has its own screen and its
-   own risks. A separate issue can follow.
-5. **Lock screen test.** Does the prompt show and sign over the lock screen
-   on the owner's devices: after a tap on the full-screen screen, and after
-   a reboot before the first unlock? Does the phone stay locked after the
-   approval? This needs a test before the spec. If it fails, the locked
-   phone keeps today's flow.
+2. **The setting is per computer.** The user can leave it off for a
+   computer where agents run. It does not stop other code on that
+   computer from asking.
+3. **Which requests:** `sudo`, polkit and `hyprlock` approvals only. Never
+   an enrollment. A `hyprlock` approval unlocks the screen and does not
+   give root.
+4. **SSH signing is not in scope now.** A separate issue can follow.
+5. **Lock screen: a device check.** The spec plans a test on the owner's
+   devices. Does the prompt show and sign over the lock screen after a
+   tap, also after a restart before the first unlock? Does the phone stay
+   locked after the approval? A locked phone keeps today's flow unless
+   the test passes.
