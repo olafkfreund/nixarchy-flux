@@ -5,7 +5,7 @@ spec: spec/2026-11-15-74-cli-agent-control.md
 coders:
   1: codex   # small, tricky logic: flag parsing before command selection, raw results, error codes, os.Exit paths
   2: coder   # new commands on the existing patterns, with typed params and tests against the fake socket
-  3: agy     # large mechanical edit: a JSON branch in about 40 existing command forms, table given below
+  3: agy     # wide edit: a JSON branch in about 40 existing command forms, exact table given below; codex reviews its semantics
   4: agy     # long doc edits in docs/cli.md and docs/ipc.md, content given below
   5: coder   # skill section, one SKILL.md row, one fix and two evals, text given below
 reviewers:
@@ -114,7 +114,9 @@ reviewers:
 
   It writes the JSON to stdout and the message to stderr, then exits.
 - `refusesJSON(cmd string, args []string) bool`, with the refusal list
-  above (`notify` refuses only when `args` has `--run`).
+  above, including the aliases `--version`, `-h` and `--help`. `notify`
+  refuses only when `args[0] == "--run"` (`notify.go:18`). `notify Title
+  --run` is text, and is sent.
 
 **`main.go`:**
 - Run `splitJSON` first, then `splitDevice`, then pick the command.
@@ -127,16 +129,18 @@ reviewers:
   `need` uses the code `bad_args`.
 - `dial` returns three sentinel errors (wrapped, with the same messages
   as today), so `jsonError` can map them.
-- `callInto` asks `Call` for a `json.RawMessage`, then
-  `json.Unmarshal(raw, result)` and `cleanAll` when `result` isn't nil.
-  This replaces the decode inside `Call`; the behaviour for existing
-  callers is the same.
+- `callInto` asks `Call` for a `json.RawMessage`. Then, only when
+  `result != nil && len(raw) > 0`, it runs `json.Unmarshal(raw, result)`
+  and `cleanAll`. That keeps today's empty-result behaviour: `Call` skips
+  the decode when the result is absent (`ipc.go:456`), and an unguarded
+  `Unmarshal` would return `EOF`. Test an empty result.
 - `status`: read `jsonMode` instead of `args[0] == "--json"`
   (`main.go:144`). The output path is the same.
 
 **`ssh.go:35-36`:**
-- `asJSON := jsonMode || slices.Contains(args, "--json")`.
-- Keep the `DeleteFunc`.
+- `asJSON := jsonMode`. Drop `slices.Contains` and `DeleteFunc`, because
+  `splitJSON` already takes a trailing `ssh key --json`.
+- `ssh key -- --json` must not select JSON. Test it.
 - The output path is the same.
 
 **Tests, in `jsonout_test.go`:**
@@ -155,7 +159,11 @@ reviewers:
   - `bogus`: exit 2
   - `--json ring` with no socket: `daemon_down`
   - `--json ring` against a socket that returns `offline`
-  - `--json sms`: `bad_args`
+  - `--json sms` (through `fail`): `bad_args`
+  - `--json run` with no ID (through `need`): `bad_args`
+  - `--json --help` and `--json --version`: `no_json`
+  - `--json notify Title --run`: sends the body `--run`, and is not
+    refused
   - `--json notify --run -- touch F`: `no_json`, F doesn't exist, and
     the socket got no call
 - `status --json` and `ssh --json` give the same bytes as before against
@@ -232,6 +240,11 @@ tests).
 - `motionSensitivity NaN` is `bad_args`.
 - An unknown setting is `bad_args`.
 - The text output of each read.
+- The JSON shape of every new form. Device-scoped reads cover:
+  - an empty set of paired devices (`{}`)
+  - a `--device` that matches no device (`not_found`)
+  - an exact ID winning over a name
+  - an offline device's `dnd` as `null`
 
 **Check:**
 
@@ -243,12 +256,15 @@ make vet
 **Traps:**
 - Use `act` and `emitJSON` from step 1.
 - Device-scoped reads use `devicesRaw`.
+- `dnd` is `null` for a device that isn't online, even when the state
+  still holds an old value.
 - Don't touch the existing `sms NUMBER TEXT` path.
 
 ### 3. JSON for the existing forms (agy)
 
 **Files:** `cmd/flux/main.go`, `features.go`, `streams.go`, `motion.go`,
-`ssh.go` (no change), and a new `cmd/flux/json_forms_test.go`.
+`notify.go` (the `notify.send` call at `:40` becomes `act`), and a new
+`cmd/flux/json_forms_test.go`.
 
 Each existing form gets its JSON output. Where the form already prints
 nothing after one call, change that `call(…)` to `act(…)`.
@@ -261,21 +277,22 @@ nothing after one call, change that `call(…)` to `act(…)`.
 | `send PATH...` | the `share.files` result |
 | `transfers` | the state's `transfers`, raw |
 | `transfers retry\|cancel` | the method's result |
-| `clipboard` and `snippets` (no args, `search`) | as today through `printCall` (already raw JSON) |
+| `clipboard` and `snippets` (no args, `search`) | `printCall`. In JSON mode, it prints through `safeJSON`, and its text output stays the same |
 | `clipboard status` | `{"paused":…,"autoClipboard":…}` from the raw state |
 | `clipboard pause\|resume\|clear\|delete`, `snippets save\|remove\|copy` | the method's result |
 | `clipboard limit` | `{"clipboardLimit":N}` |
 | `clipboard limit N` | the method's result |
 | `notifications` | `{deviceID:[notifications]}` |
 | `notifications clear` | the `dismissAll` result, `{"dismissed":N}` |
-| `notification-rules`, `automation`, `device-settings` (list forms) | the raw setting, as `printSetting` prints it (`features.go:137-148`) |
+| `notification-rules`, `automation` (list forms) | the raw setting from `printSetting` (`features.go:137-148`). In JSON mode, it prints through `safeJSON` |
+| `device-settings` (list) | the `device.settings` result, `{device}` (`features.go:196`). This corrects the spec, which grouped it with `printSetting` |
 | their add, remove and set forms | the method's result |
 | `commands` | the state's `commands`, raw |
 | `commands add\|remove` | the method's result |
 | `webcam`, `mic`, `speaker`, `screen`, `browse`, `motion` (status forms) | the state key of the same name, raw |
-| `desktop` (status) | `{"remoteDesktop":…,"desktop":<the state's desktop>}` |
+| `desktop` (status) | the state's `desktop`, raw (as the spec says) |
 | `input` (status) | `{"remoteInput":…}` |
-| `webcam\|mic\|speaker start`, `… stop`, `webcam set\|reset`, `screen stop`, `browse stop`, `motion start\|stop` | the result of the action method |
+| `webcam\|mic\|speaker start`, `… stop`, `webcam set\|reset`, `screen stop`, `desktop stop`, `browse stop`, `motion start\|stop` | the result of the action method |
 | `input on\|off`, `desktop on\|off` | the `settings.set` result, not the state read after it (`streams.go:148-157`) |
 | motion setting forms | the `settings.set` result |
 
@@ -283,10 +300,15 @@ nothing after one call, change that `call(…)` to `act(…)`.
 `serveRecord`, with a fixed state that has two paired devices, a
 notification body with `\n` and a control character, and a transfer.
 For each form it checks that:
+- the recorded socket calls are exactly the expected method, params and
+  count. Each action method returns a distinctive result (for example
+  `{"m":"<method>"}`), so a wrong method can't pass on the harness's
+  default `{}` (`streams_test.go:41`)
 - stdout is exactly one JSON value
 - that value is the expected one (not the whole state)
 - fields and `\n` survive
-- control characters are escaped
+- control characters are escaped, including a literal U+202E in a
+  `printCall` and a `printSetting` result
 
 **Check:**
 
