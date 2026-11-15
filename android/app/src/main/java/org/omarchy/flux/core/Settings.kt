@@ -70,6 +70,16 @@ class Settings(context: Context) {
         get() = prefs.getString("computerThemes", null)
         set(v) = prefs.edit().putString("computerThemes", v).apply()
 
+    /** The computers whose approvals open the fingerprint prompt on the first tap. See docs/approve.md. */
+    fun fingerprintFirst(computerId: String): Boolean =
+        computerId in prefs.getStringSet("fingerprintFirst", emptySet()).orEmpty()
+
+    fun setFingerprintFirst(computerId: String, on: Boolean) {
+        val ids = prefs.getStringSet("fingerprintFirst", emptySet()).orEmpty().toMutableSet()
+        if (on) ids += computerId else ids -= computerId
+        prefs.edit().putStringSet("fingerprintFirst", ids).apply()
+    }
+
     /** The scroll direction of the touchpad screen. Without a choice, it is [ScrollMode.Computer]. */
     var touchpadScroll: ScrollMode
         get() = ScrollMode.fromKey(prefs.getString("touchpadScroll", null))

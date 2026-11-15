@@ -587,6 +587,7 @@ fun FluxRoot(activity: MainActivity) {
                     FluxCore.unpair(id)
                     // A new pairing needs a new enrollment. The key file on the computer stays until: sudo flux-cli approve remove
                     ApproveKeys.delete(id)
+                    FluxCore.settings.setFingerprintFirst(id, false)
                     unpairing = null
                 },
             )

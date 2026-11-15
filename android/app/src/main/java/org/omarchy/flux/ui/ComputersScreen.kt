@@ -1,5 +1,7 @@
 package org.omarchy.flux.ui
 
+import android.app.NotificationManager
+import android.os.Build
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -39,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.customActions
@@ -47,12 +50,15 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.net.InetAddress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.omarchy.flux.BuildConfig
+import org.omarchy.flux.R
+import org.omarchy.flux.core.ApproveKeys
 import org.omarchy.flux.core.DeviceUi
 import org.omarchy.flux.core.FluxCore
 import org.omarchy.flux.core.ScrollMode
@@ -115,6 +121,7 @@ fun ComputersScreen(
                         for (d in paired) {
                             ComputerCard(d, state.onWifi, inScope = scope == d.id, onScope = { onScope(if (scope == d.id) null else d.id) }, onUnpair = { onUnpair(d) })
                             if (showsMotion(d)) MotionRow(d, state)
+                            FingerprintFirstRow(d)
                         }
                         ListHeader("Available")
                         for (d in available) AvailableRow(d) { onPair(d) }
@@ -461,6 +468,29 @@ private fun ThemeRow(state: UiState) {
             Choice(label, icon, mode == state.theme, if (mode == ThemeMode.Computer) computerLine else null) { FluxCore.setTheme(mode) }
         },
     )
+}
+
+/** Fingerprint first for 1 computer with an approval key. docs/approve.md describes it. */
+@Composable
+private fun FingerprintFirstRow(d: DeviceUi) {
+    val context = LocalContext.current
+    var keyed by remember(d.id) { mutableStateOf(false) }
+    var fullScreen by remember { mutableStateOf(true) }
+    var on by remember(d.id) { mutableStateOf(FluxCore.settings.fingerprintFirst(d.id)) }
+    // An enrollment runs in its own task, and the Android settings are another app, so read both again on return.
+    LifecycleResumeEffect(d.id) {
+        keyed = ApproveKeys.has(d.id)
+        fullScreen = Build.VERSION.SDK_INT < 34 ||
+            context.getSystemService(NotificationManager::class.java)?.canUseFullScreenIntent() == true
+        onPauseOrDispose { }
+    }
+    if (!keyed) return
+    val detail = (if (on) "A tap on a request asks for the fingerprint at once. Leave it off for a computer where agents run sudo." else "Approve asks for the fingerprint after a second tap.") +
+        (if (fullScreen) "" else " Android does not let Flux open requests by itself on the lock screen. Tap the notification.")
+    SyncRow(SyncItem("fingerprintFirst", R.drawable.ic_fingerprint, "Fingerprint first", detail, on) {
+        on = !on
+        FluxCore.settings.setFingerprintFirst(d.id, on)
+    })
 }
 
 /** The scroll direction of the touchpad screen, see [ScrollMode]. */
