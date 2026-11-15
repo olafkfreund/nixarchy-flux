@@ -130,6 +130,15 @@ Windows Hello also accepts its PIN, see the section Windows.
   keeps, such as the S Pen Air Command button, can stay. The phone
   refuses **Approve** when another window covered the touch point,
   and says so on the screen.
+- **Fingerprint first** is a switch for each paired computer, under
+  the computer on the Computers screen, and off by default. With it
+  on, a tap on a `sudo`, `polkit-1`, or `hyprlock` request in the
+  notification, the widget, or the chat card opens `BiometricPrompt`
+  at once, without the Approve screen first. It never opens without
+  a tap, never for an enrollment, and not while the phone is locked.
+  The prompt then also shows the computer, the time, and the
+  warning. A cancel, a timeout, or a lockout goes back to the Approve
+  screen.
 
 ### iPhone and Mac
 
@@ -298,6 +307,7 @@ enrollment is never a valid approval, and the reverse.
 9. Approve asks for the biometric check: `BiometricPrompt` on Android,
    Face ID or Touch ID on the iPhone and the Mac. After the check, the
    phone signs the approval message and sends it. Deny sends a denial.
+   With Fingerprint first on Android, a tap on the request asks at once.
 10. The helper calls `approve.wait` until it gets a result or its time
     ends.
 11. The helper builds the approval message again from its own fields. It
@@ -403,7 +413,7 @@ Every failure gives a non-zero exit, and PAM asks for the password.
 | A stale or future time | The helper stops |
 | The phone has no strong biometric | The phone sends an error |
 | A new fingerprint on the phone | The key is invalid, the phone sends an error, and the user enrolls again |
-| The fingerprint check fails, for example after too many tries | The phone sends the error, and the helper or the command stops |
+| The fingerprint check fails, for example after too many tries | The phone sends the error, and the helper or the command stops. With Fingerprint first on Android, a timeout or a lockout of the prompt goes back to the Approve screen, and the request stays open |
 | The phone cannot sign, for example after a Keystore error | The phone sends the error with its reason, and the helper or the command stops. The command prints the reason |
 | The service is `sshd` | The helper stops at once |
 | Another user asks, for example with the sudoers option `targetpw` | The helper stops at once |
@@ -438,6 +448,9 @@ person at the keyboard. The password protects against the same person.
   user, the host, the TTY, and the time. Approve a request only right
   after you typed the command. Code that runs as the user can also get the
   password in other ways, for example with a shell alias for `sudo`.
+  Fingerprint first on Android skips the second look at the Approve
+  screen, so turn it on only for a computer where you type `sudo`
+  yourself.
 - **No key attestation.** The computer trusts that the phone made the key
   with the settings above. Android key attestation can prove it, but Flux
   does not check it yet. The computer also cannot check the settings of a
