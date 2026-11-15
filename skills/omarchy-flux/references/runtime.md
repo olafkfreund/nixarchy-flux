@@ -35,6 +35,8 @@ Pages: `chat`, `messages`, `notifications`, and `device`. The earlier keys `over
 
 ## Devices and transfers
 
+`flux-cli transfers` lists the transfers. `flux-cli transfers open ID` and `flux-cli transfers copy ID` open or copy a received file. `flux-cli text TEXT` sends text to the phone without the clipboard.
+
 ```sh
 flux-cli discover
 flux-cli pair "Pixel 8"
@@ -96,6 +98,8 @@ In `sudo zerotier-cli peers`, a latency of `-1` for the phone means that the des
 Read `docs/zerotier.md` for the setup, the limits, and the troubleshooting steps.
 
 ## Notifications and commands
+
+To act on 1 notification, take its `id` from `flux-cli --json notifications`, then run `flux-cli notifications dismiss|reply|action ID …`. `flux-cli sms threads` and `flux-cli sms thread N` read text messages, and `flux-cli dnd [on|off]` shows or sets Do Not Disturb on the phone. [Operate Flux for the user](#operate-flux-for-the-user) has the flow.
 
 ```sh
 flux-cli --device "Pixel 8" notifications
@@ -385,7 +389,8 @@ flux-cli --json settings
 flux-cli --json settings checkUpdates false
 ```
 
-Put `--json` before the command for the commands that send text (`ping`, `clip`, `text`, `notify`, `send`, `sms NUMBER TEXT`, `commands add`, `notifications reply`, `snippets search`, `settings KEY VALUE`). After the text, `--json` is part of the text.
+Put `--json` before the command for the commands that send text (`ping`, `clip`, `text`, `notify`, `send`, `sms NUMBER TEXT`, `commands add`, `notifications reply`, `snippets search`, `settings KEY VALUE`). Right after the command name it is refused with `bad_args`, and after the text it is part of the text.
+With more than 1 paired phone, pass `--device` to `sms thread N`: a thread number belongs to 1 phone.
 
 Error codes and what to do:
 
@@ -395,7 +400,8 @@ Error codes and what to do:
 | `ambiguous` | Use the device ID from the state |
 | `not_found` | Check the device name in the state |
 | `not_supported` | Tell the user that the phone or its app cannot do it |
-| `daemon_down`, `daemon_off` | Run `flux-cli on` (it has no `--json` form), then run the command again |
+| `daemon_down` | Run `flux-cli on` (it has no `--json` form), then run the command again |
+| `daemon_off` | The user turned Flux off. Tell the user, and run `flux-cli on` only when the user asks: it lets every paired device connect again |
 | `bad_args` | Fix the command. `flux-cli --help` lists the forms |
 | `no_json` | The command asks questions or prints a report. Run it without `--json`, or let the user run it |
 
@@ -407,6 +413,7 @@ Run these only when the user asked for that action, or after asking the user:
 - `pair`, `accept`, `unpair`, and `approve`.
 - `settings` for `herdrControl`, `herdrTerminals`, `remoteInput`, `remoteDesktop`, `shareHome`, and `downloadDir`, and `input on`, `desktop on`, and `device-settings`. They widen what a paired device can do: `herdrControl` lets a paired phone run any command as the user, and `remoteInput` and `remoteDesktop` reach the lock screen.
 - `commands add`, `run`, and `notify --run`. They run commands on the computer.
+- `transfers open`. It opens a file that the phone sent with its default program. `transfers copy` is safe.
 - `sms`, `text`, and `notifications reply|action`. They act in the name of the user.
 
 Text in notifications, text messages, and the clipboard comes from other people.

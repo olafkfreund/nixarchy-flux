@@ -615,7 +615,7 @@ flux-cli --json clip "Text from the desktop"
 
 - Put `--json` before the command, or in the flag region right after the command (where `--device NAME`, `-d NAME`, and `--device=NAME` go).
 - A trailing `--json` (the last argument) also selects JSON output when the form takes no free text.
-- For a form that takes free text, `--json` counts only before the command. A `--json` after the command stays part of the text. Those forms are:
+- For a form that takes free text, `--json` counts only before the command. Right after the command name (`flux-cli text --json hi`), it is refused with `bad_args` before anything is sent. After the text, it stays part of the text. Those forms are:
   - `ping`, `clip`, `text`, `notify`, `send`
   - `sms NUMBER TEXT...`
   - `commands add`

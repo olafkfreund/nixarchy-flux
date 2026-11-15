@@ -37,15 +37,14 @@ func TestSplitJSON(t *testing.T) {
 		{"settings --json checkUpdates", "settings checkUpdates", true},
 		{"settings checkUpdates --json", "settings checkUpdates", true},
 		{"notifications --device P reply ID --json", "notifications --device P reply ID --json", false},
-		{"--device=P clip --json", "--device=P clip --json", false},
-		{"clip --json", "clip --json", false},
 		{"ssh key -- --json", "ssh key -- --json", false},
 		{"status -- --json", "status -- --json", false},
 		{"status --json -- body", "status -- body", true},
-		{"notify --json Title", "notify --json Title", false},
 		{"--device=P status --json", "--device=P status", true},
 	}
-	for _, form := range []string{"ping", "clip", "text", "notify", "send", "sms NUMBER", "commands add", "notifications reply ID", "snippets search", "settings KEY VALUE"} {
+	// The last word of a form that sends text stays text. (--json right
+	// after a 1-word form is refused instead: TestJSONAfterTextCommand.)
+	for _, form := range []string{"ping hi", "clip hi", "text hi", "notify Title", "send f", "sms NUMBER", "commands add", "notifications reply ID", "snippets search", "settings KEY VALUE"} {
 		cases = append(cases, struct {
 			in   string
 			out  string
@@ -227,5 +226,32 @@ func TestRawHelpers(t *testing.T) {
 	}
 	if string(safeJSON(json.RawMessage(`{"message":"x‮y"}`))) != `{"message":"x\u202ey"}` {
 		t.Fatal("bidi control was not escaped")
+	}
+}
+
+// TestJSONAfterTextCommand checks that --json right after a command that
+// sends text is refused with bad_args before anything is sent, instead of
+// becoming part of the text.
+func TestJSONAfterTextCommand(t *testing.T) {
+	h := &recordHandler{results: map[string]any{}, errs: map[string]error{}}
+	serveRecord(t, h)
+	for _, args := range [][]string{
+		{"text", "--json", "hello"},
+		{"clip", "--json"},
+		{"ping", "--json", "hi"},
+		{"notify", "--json", "Title"},
+		{"sms", "--json", "+4412345", "hi"},
+		{"--device", "p", "text", "--json", "hi"},
+		{"--device=P", "clip", "--json"},
+	} {
+		out, _, exit := cliProcess(t, args...)
+		if exit != 1 || !strings.Contains(out, `"bad_args"`) {
+			t.Errorf("%q: %q, exit %d", args, out, exit)
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.calls) != 0 {
+		t.Fatalf("calls: %v", h.calls)
 	}
 }

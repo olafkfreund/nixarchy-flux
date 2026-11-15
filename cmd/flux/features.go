@@ -47,6 +47,9 @@ func printCall(method string, params any) error {
 		return err
 	}
 	if jsonMode {
+		if len(result) == 0 || string(result) == "null" {
+			result = json.RawMessage(`{}`)
+		}
 		emitJSON(result)
 		return nil
 	}

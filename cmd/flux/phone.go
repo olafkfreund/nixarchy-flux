@@ -120,6 +120,7 @@ func smsCommand(device string, args []string) error {
 		Name   string
 		Last   string
 		Time   int64
+		Device string `json:"-"`
 	}
 	var all []conv
 	for _, id := range sortedDevices(devs) {
@@ -129,10 +130,20 @@ func smsCommand(device string, args []string) error {
 				return err
 			}
 		}
+		var name string
+		_ = json.Unmarshal(devs[id]["name"], &name)
+		for i := range cs {
+			cs[i].Device = name
+		}
 		all = append(all, cs...)
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].Time > all[j].Time })
 	for _, c := range all {
+		// With more than 1 phone, name the phone, since a thread number
+		// belongs to 1 phone: flux-cli --device NAME sms thread N.
+		if len(devs) > 1 {
+			fmt.Printf("%s  ", safe(c.Device))
+		}
 		fmt.Printf("%d  %s  %s\n", c.Thread, safe(c.Name), safe(c.Last))
 	}
 	return nil
@@ -223,8 +234,10 @@ func settingsCommand(args []string) error {
 		return err
 	}
 	settings := map[string]json.RawMessage{}
-	if err := json.Unmarshal(state["settings"], &settings); err != nil {
-		return err
+	if len(state["settings"]) > 0 {
+		if err := json.Unmarshal(state["settings"], &settings); err != nil {
+			return err
+		}
 	}
 	var self struct{ Name json.RawMessage }
 	_ = json.Unmarshal(state["self"], &self)

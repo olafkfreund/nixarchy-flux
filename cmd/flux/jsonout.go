@@ -73,6 +73,34 @@ func stripCommandJSON(out []string) []string {
 		}
 	}
 	if takesText(cmd, rest) {
+		// A form that sends text reads --json only before the command. Right
+		// after the command it would become part of the text, so refuse it
+		// before anything is sent.
+		seen := false
+		for i := 0; i < len(out); i++ {
+			a := out[i]
+			if a == "--" {
+				break
+			}
+			if (a == "--device" || a == "-d") && i+1 < len(out) {
+				i++
+				continue
+			}
+			if strings.HasPrefix(a, "--device=") {
+				continue
+			}
+			if !seen && a != "--json" {
+				seen = true
+				continue
+			}
+			if a == "--json" {
+				jsonMode = true
+				jsonError(usageErr("put --json before the command: flux-cli --json %s ...", cmd), 1)
+			}
+			if !strings.HasPrefix(a, "-") {
+				break
+			}
+		}
 		return out
 	}
 	command, flagRegion := false, true
@@ -155,8 +183,10 @@ func devicesRaw(device string) (map[string]map[string]json.RawMessage, error) {
 		return nil, err
 	}
 	var devices []map[string]json.RawMessage
-	if err := json.Unmarshal(state["devices"], &devices); err != nil {
-		return nil, err
+	if len(state["devices"]) > 0 {
+		if err := json.Unmarshal(state["devices"], &devices); err != nil {
+			return nil, err
+		}
 	}
 	out := make(map[string]map[string]json.RawMessage)
 	var matches []string
@@ -222,6 +252,9 @@ func jsonError(err error, exit int) {
 	message = strings.Join(lines, "\n")
 	data, _ := json.Marshal(map[string]any{"error": map[string]string{"code": code, "message": message}})
 	fmt.Println(string(safeJSON(data)))
+	if !strings.HasPrefix(message, "flux-cli:") {
+		message = "flux-cli: " + message
+	}
 	fmt.Fprintln(os.Stderr, message)
 	os.Exit(exit)
 }

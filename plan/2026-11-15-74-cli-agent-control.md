@@ -525,3 +525,24 @@ user (notifications, SMS, DND, settings)" →
   so a revert is clean.
 - The hosts get the change only with a later `nixarchy-flux` input bump.
   Before that bump, nothing on p620 or razer changes.
+
+## Deviations during implementation
+
+- **Step 5 implementer:** the lead wrote step 5. The coder agent stopped
+  before it edited any file.
+- **`--json` right after the name of a command that sends text** is refused
+  with `bad_args` before any socket call, for example
+  `flux-cli text --json hi`. The plan kept it as text. The Opus review
+  showed that an agent which puts it there would still send the message,
+  or would register a command named `--json`. `--json` after the text
+  stays text, as planned.
+- **`printCall` in JSON mode** prints `{}` for an empty or `null` result,
+  as `act` does.
+- **`sms threads` text output** starts each line with the phone name when
+  more than one phone is paired, because a thread number belongs to one
+  phone.
+- **JSON-mode stderr** keeps the `flux-cli: ` prefix, as text mode does.
+- **The skill**:
+  - It splits `daemon_off` from `daemon_down`. When the user turned Flux
+    off, the agent asks before it runs `flux-cli on`.
+  - It adds `transfers open` to the actions that need the user's request.

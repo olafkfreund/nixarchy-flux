@@ -115,7 +115,7 @@ func TestNewCommandsReads(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"sms", "threads"}, "2  Bob  new\n1  Ann  old\n"},
+		{[]string{"sms", "threads"}, "Phone  2  Bob  new\nPhone  1  Ann  old\n"},
 		{[]string{"sms", "thread", "1"}, when + "  Ann  hi\n" + when2 + "  me  yo\n"},
 		{[]string{"dnd"}, "Do Not Disturb is on on Phone\nDo Not Disturb is unknown on Tablet\n"},
 		{[]string{"--device", "p2", "dnd"}, "Do Not Disturb is unknown on Tablet\n"},
