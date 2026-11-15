@@ -131,17 +131,20 @@ Without --device, flux-cli uses the only connected paired device. Put
 `
 
 func main() {
-	args, device := splitDevice(os.Args[1:])
+	args, device := splitDevice(splitJSON(os.Args[1:]))
 	cmd := "open"
 	if len(args) > 0 {
 		cmd, args = args[0], args[1:]
+	}
+	if jsonMode && refusesJSON(cmd, args) {
+		jsonError(&ipc.Error{Code: "no_json", Message: "JSON output is not available for " + cmd}, 1)
 	}
 	var err error
 	switch cmd {
 	case "open":
 		err = openWindow(first(args))
 	case "status", "devices":
-		err = status(len(args) > 0 && args[0] == "--json")
+		err = status(jsonMode)
 	case "discover":
 		err = call("discover", nil)
 	case "pair":
@@ -238,10 +241,16 @@ func main() {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
+		if jsonMode {
+			jsonError(&ipc.Error{Code: "unknown_command", Message: fmt.Sprintf("flux-cli: unknown command %q", cmd)}, 1)
+		}
 		fmt.Fprintf(os.Stderr, "flux-cli: unknown command %q\n\n%s", cmd, usage)
 		os.Exit(2)
 	}
 	if err != nil {
+		if jsonMode {
+			jsonError(err, 1)
+		}
 		fail("flux-cli: %v", err)
 	}
 }
@@ -291,6 +300,9 @@ func need(args []string, name string) string {
 }
 
 func fail(format string, args ...any) {
+	if jsonMode {
+		jsonError(&ipc.Error{Code: "bad_args", Message: fmt.Sprintf(format, args...)}, 1)
+	}
 	// An error can have more than 1 line. safe cleans each line.
 	lines := strings.Split(fmt.Sprintf(format, args...), "\n")
 	for i := range lines {
@@ -300,6 +312,14 @@ func fail(format string, args ...any) {
 	os.Exit(1)
 }
 
+var errDaemonOff = errors.New("fluxd is off. To turn it on, run: flux-cli on")
+var errDaemonDown = errors.New("fluxd does not run. To start it, run: flux-cli on. To find the cause, run: flux-cli doctor")
+var errDaemonUnreachable = errors.New("daemon_unreachable")
+
+type unreachableError struct{ error }
+
+func (e unreachableError) Is(target error) bool { return target == errDaemonUnreachable }
+
 func dial() (*ipc.Client, error) {
 	path := config.SocketPath()
 	c, err := ipc.Dial(path)
@@ -307,11 +327,11 @@ func dial() (*ipc.Client, error) {
 	case err == nil:
 		return c, nil
 	case config.IsOff():
-		return nil, errors.New("fluxd is off. To turn it on, run: flux-cli on")
+		return nil, errDaemonOff
 	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED):
-		return nil, errors.New("fluxd does not run. To start it, run: flux-cli on. To find the cause, run: flux-cli doctor")
+		return nil, errDaemonDown
 	default:
-		return nil, fmt.Errorf("cannot connect to fluxd on %s: %w", path, err)
+		return nil, unreachableError{fmt.Errorf("cannot connect to fluxd on %s: %w", path, err)}
 	}
 }
 
@@ -321,15 +341,16 @@ func call(method string, params any) error { return callInto(method, params, nil
 // replaces the control characters in the strings of the result and of an
 // error, so that the callers can print them.
 func callInto(method string, params, result any) error {
-	c, err := dial()
+	raw, err := callRaw(method, params)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
-	if err := c.Call(method, params, result); err != nil {
-		return cleanErr(err)
+	if result != nil && len(raw) > 0 {
+		if err := json.Unmarshal(raw, result); err != nil {
+			return err
+		}
+		cleanAll(result)
 	}
-	cleanAll(result)
 	return nil
 }
 
