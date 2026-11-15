@@ -169,5 +169,9 @@ object Approvals {
     }
 }
 
-/** The key of [r] for the fast path: its computer and its id. */
-internal fun requestKey(r: ApproveRequest): String = "${r.computerId}/${r.id}"
+/**
+ * The key of [r] for the fast path: its computer, its id, and its nonce.
+ * The nonce keeps a request that reuses an id after a cancel apart from
+ * the one the user tapped.
+ */
+internal fun requestKey(r: ApproveRequest): String = "${r.computerId}/${r.id}/${r.nonce}"

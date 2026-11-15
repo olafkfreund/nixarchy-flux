@@ -134,8 +134,12 @@ Windows Hello also accepts its PIN, see the section Windows.
   the computer on the Computers screen, and off by default. With it
   on, a tap on a `sudo`, `polkit-1`, or `hyprlock` request in the
   notification, the widget, or the chat card opens `BiometricPrompt`
-  at once, without the Approve screen first. It never opens without
-  a tap, never for an enrollment, and not while the phone is locked.
+  at once, without the Approve screen first. It opens only from
+  those 3 Flux routes, never by itself, never for an enrollment, and
+  not while the phone is locked. An app that holds the notification,
+  such as one with notification access, can open those routes too, so
+  it can show a prompt that you did not ask for. It still needs your
+  fingerprint.
   The prompt then also shows the computer, the time, and the
   warning. A cancel, a timeout, or a lockout goes back to the Approve
   screen.

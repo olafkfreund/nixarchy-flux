@@ -515,6 +515,7 @@ they start with `android/`, `docs/` or `internal/`.
 | R4 | 2 | The tap intent's data URI is the request key, so `FLAG_UPDATE_CURRENT` never moves an old token to a newer request. The spec named only the request codes. |
 | R5 | 3 | A recreated `ApproveActivity` cancels a prompt left open by the old instance. `configChanges` (`AndroidManifest.xml:138`) already avoids recreation on rotation, resizing and dark mode; this covers the rest, such as a locale change. |
 | R6 | 6 | The owner deferred the device checks (lead, 2026-11-15): they are owner-run follow-ups, not merge gates. The spec had the lock-screen probe during implementation and a cut description as a failure before the PR. Until they run, these are unverified: the lifecycle (`onNewIntent`, `onResume`), the routes, the cancel collector, the chat card's overlay guard, OEM prompts and the description at font scale 2.0. A cut description found later is fixed in a follow-up. |
+| R7 | 2, 3 | Diff reviews (lead, 2026-11-15): `requestKey` adds the nonce, so a request that reuses an id after a cancel (an untrusted `fluxd`, agy partial review) no longer matches the tapped key, and the cancel collector closes its prompt. ApproveFastPathTest adds the same id on another computer (Opus) and the same id with a new nonce. approve.md no longer says "never opens without a tap": an app that holds the notification's or the widget's PendingIntent can open those routes, so it says the prompt opens only from the 3 Flux routes and still needs the fingerprint (Opus). |
 
 ## Review changes
 

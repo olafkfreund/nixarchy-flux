@@ -81,7 +81,7 @@ class WidgetModelTest {
         assertEquals("Needs approval", sudo.status)
         assertEquals("user dev · pts/3", sudo.source)
         assertTrue("an approval has the strong border", sudo.strong)
-        assertEquals(WidgetTarget.Approval("pc", "pc/r1"), sudo.target)
+        assertEquals(WidgetTarget.Approval("pc", "pc/r1/"), sudo.target)
 
         assertEquals(WidgetTone.Works, working.tone)
         assertFalse(working.needs)
