@@ -57,14 +57,23 @@ Commands:
   ring                   Ring the phone
   ping [MESSAGE]         Send a ping
   send PATH...           Queue files or folders. Folders use ZIP archives
-  transfers [retry ID|cancel ID]  Show or control the outbox
+  transfers [retry|cancel|open|copy ID]  Show the transfers, or retry, cancel, open or copy one
   clip [TEXT]            Send the clipboard, or TEXT
   clipboard [clear [--all]|delete ID|limit [N]]  Manage clipboard history and limit
   clipboard pause|resume|status  Stop or restart sending copies to devices, or show it
   snippets [search TEXT|save ID [DURATION]|remove ID|copy ID]  Manage saved clipboard entries
   url URL                Open a URL on the phone
   sms NUMBER TEXT...     Send a text message through the phone
+  sms threads            List the message threads
+  sms thread N           Show the messages of thread N
+  sms refresh            Ask the phone for the message threads again
+  text TEXT...           Send text to the phone
+  dnd [on|off]           Show Do Not Disturb on the phone, or set it
+  settings [KEY [VALUE]] Show the Flux settings, one setting, or set one
   notifications          List the phone notifications
+  notifications dismiss ID        Dismiss one phone notification
+  notifications reply ID TEXT...  Reply to a phone notification
+  notifications action ID ACTION  Run an action of a phone notification
   notifications clear    Dismiss the phone notifications, on the phone and here.
                          Ongoing notifications, such as a media player, stay
   notification-rules     List rules. Actions: add APP MODE [DURATION], quiet START END, remove ID
@@ -126,6 +135,8 @@ Commands:
   update --phone         Send the latest Flux for Android to the phone
   version                Print the versions of flux-cli and the running fluxd
 
+Add --json for one JSON value on stdout. See docs/cli.md.
+
 Without --device, flux-cli uses the only connected paired device. Put
 --device NAME before the command or right after it.
 `
@@ -180,16 +191,29 @@ func main() {
 	case "url":
 		err = call("share.url", map[string]any{"device": device, "url": need(args, "URL")})
 	case "sms":
+		if k := first(args); k == "threads" || k == "thread" || k == "refresh" {
+			err = smsCommand(device, args)
+			break
+		}
 		if len(args) < 2 {
 			fail("Usage: flux-cli sms NUMBER TEXT...")
 		}
 		err = call("sms.send", map[string]any{"device": device, "addresses": []string{args[0]}, "body": strings.Join(args[1:], " ")})
 	case "notifications":
-		if first(args) == "clear" {
+		switch first(args) {
+		case "clear":
 			err = clearNotifications(device)
-		} else {
+		case "dismiss", "reply", "action":
+			err = notificationActions(device, args)
+		default:
 			err = notifications(device)
 		}
+	case "dnd":
+		err = dndCommand(device, args)
+	case "text":
+		err = textCommand(device, args)
+	case "settings":
+		err = settingsCommand(args)
 	case "notification-rules":
 		err = notificationRulesCommand(device, args)
 	case "device-settings":
