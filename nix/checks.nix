@@ -87,6 +87,10 @@ let
     assert lib.assertMsg (lib.any (
       p: lib.getName p == "ffmpeg"
     ) good.environment.systemPackages) "runtimePackages must be on the system path";
+    assert lib.assertMsg (lib.all (n: lib.any (p: lib.getName p == n) good.environment.systemPackages) [
+      "scrcpy"
+      "android-tools"
+    ]) "scrcpy and android-tools must be on the system path";
     assert lib.assertMsg (lib.any (
       l:
       lib.hasPrefix "auth sufficient" l
@@ -189,6 +193,10 @@ let
     assert lib.assertMsg (builtins.deepSeq (map (
       p: p.drvPath
     ) hm.home.packages) true) "HM packages do not evaluate";
+    assert lib.assertMsg (lib.all (n: lib.any (p: lib.getName p == n) hm.home.packages) [
+      "scrcpy"
+      "android-tools"
+    ]) "scrcpy and android-tools must be in home.packages";
     assert lib.assertMsg (
       builtins.fromJSON chromiumFile.text
       == hostBase // { allowed_origins = [ "chrome-extension://jgfibbdalckcbmdcngbalobbhcbepamm/" ]; }
