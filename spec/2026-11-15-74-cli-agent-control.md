@@ -24,6 +24,11 @@ and `input on` correct: it calls `settings.set` and then `state`
 `main.go:134-137`). It removes `--json` and sets `jsonMode`:
 - **Before the command**, and among the flags right after it. These are
   the places where `splitDevice` reads `--device` (`main.go:254-277`).
+  `splitJSON` skips `--device NAME` and `-d NAME` pairs while it looks for
+  the command, so `--json --device P status` and `--device P --json status`
+  both work.
+- For a form that takes text, the flag counts only **before** the command.
+  `flux-cli clip --json` sends the text `--json`, as it does today.
 - **As the last argument**, but only when the form takes no free text.
   The forms that take text keep a trailing `--json` as text:
   - `ping`, `clip`, `text`, `notify`, `send`
@@ -74,24 +79,33 @@ and `input on` correct: it calls `settings.set` and then `state`
 | `clipboard limit` | `{"clipboardLimit":N}` |
 | `clipboard limit N` | the method's result |
 | `snippets …` | as today (`printCall`), or the method's result |
-| `notifications` | the device's `notifications`, or `{deviceID: […]}` when more than one paired device matches |
+| `notifications` | `{deviceID: [notifications]}` |
 | `notifications clear` | `{"dismissed":N}` |
 | `notifications dismiss\|reply\|action` | the method's result |
 | `notification-rules`, `automation`, `device-settings` | the setting's raw value (as `printSetting` prints today) |
 | their `add`, `remove` and set forms | the method's result |
 | `commands` | the state's `commands` |
 | `commands add\|remove` | the method's result (`add` has the new `id`) |
-| `sms threads` | the device's `conversations` |
+| `sms threads` | `{deviceID: [conversations]}` |
 | `sms thread N` | the `sms.thread` result |
 | `sms refresh` | the method's result |
-| `dnd` | the device's `dnd` |
+| `dnd` | `{deviceID: dnd or null}` |
 | `dnd on\|off` | the method's result |
-| `settings` | the state's `settings` |
-| `settings KEY` | `{"key":K,"value":V}` |
+| `settings` | the state's `settings`, plus `name` from `self.name` |
+| `settings KEY` | `{"key":K,"value":V}`. `name` is read from `self.name` |
 | `settings KEY VALUE` | the method's result |
 | `webcam`, `mic`, `speaker`, `screen`, `desktop`, `browse`, `motion` (status forms) | the state key of the same name |
 | `input` | `{"remoteInput":…}` |
 | their `start`, `stop`, `set`, `reset`, `on`, `off` forms | the result of the action method, not of the `state` read after it |
+
+**Reads that are scoped to a device** (`addresses`, `notifications`,
+`sms threads`, `dnd`):
+- They print an object keyed by device ID, so the shape doesn't change
+  when a second device is paired.
+- With `--device`, the object has the one matching paired device.
+- With `--device` and no match, the command fails with `not_found`.
+- With no paired device, the object is empty, `{}`.
+- `dnd` is `null` for a device that is offline or not paired.
 
 **Commands that refuse JSON mode.** These ask questions, or their text is
 the point:
@@ -118,9 +132,12 @@ the flag.
     - `bad_args` from `need` and usage failures, through a new
       `usageErr`.
     - `unknown_command`.
-    - `no_key` for `errNoSSHKey`.
+    - `not_found` for a device-scoped read whose `--device` matches no
+      paired device.
     - `no_json` for the refusals above.
-    - `error` for anything else.
+    - `error` for anything else. This includes the usage errors that
+      existing commands return with `fmt.Errorf` today. They stay as they
+      are, and only the new commands and `need` use `bad_args`.
 - **Partial success.** Some errors come after the action took effect:
   - A set followed by a failing `state` read.
   - `transfer.open` with `launch_failed` (`docs/ipc.md:315`).
@@ -167,10 +184,14 @@ the flag.
 
   The value is `true`/`false` or `on`/`off`.
 - Integer: `clipboardLimit` (1–500), `motionIdle` (30–3600).
-- Number: `motionSensitivity`.
+- Number: `motionSensitivity`. Finite values only: `NaN` and `Inf` are
+  `bad_args`.
 - String: `name`, `downloadDir`, `motionSize`.
 
-An unknown key is `bad_args`. `fluxd` still checks every value.
+An unknown key is `bad_args`, for both reads and writes. `fluxd` still
+checks every value.
+`text`, `notifications reply` and `notifications action` refuse empty
+text with `bad_args`.
 
 **Existing text output doesn't change** (intent constraint).
 `flux-cli notifications` keeps its line. The IDs are in its JSON output.
@@ -191,7 +212,8 @@ one".
   - partial success
 - **`docs/ipc.md`:**
   - Remove the second Streams row (`:189`).
-  - Add `transfer.open` and `transfer.copy` to the parameter table.
+  - Add `transfer.open`, `transfer.copy` and `transfer.retry` to the
+    parameter table.
   - Add the motion keys to the `settings.set` key list.
   - Add the workflow methods of `:393-405` to the method groups.
 
@@ -206,11 +228,12 @@ one".
   - What to do for each common code:
     - `offline` → `flux-cli discover`, then tell the user.
     - `ambiguous` → use the device ID.
-    - `daemon_down` → `flux-cli on`.
+    - `daemon_down` → run `flux-cli on`. `on` has no `--json` form.
+      Run the command again afterwards.
     - `not_supported` → tell the user.
   - **Needs a tap on the phone:** streams, the screen mirror (the phone
     starts it), pairing, approval, SSH signing.
-  - **Ask the user first:**
+  - **Only when the user asked for that action, or after asking them:**
     - `pair`, `accept`, `unpair`, `approve`
     - `settings` for `herdrControl`, `herdrTerminals`, `remoteInput`,
       `remoteDesktop`, `shareHome` and `downloadDir`
