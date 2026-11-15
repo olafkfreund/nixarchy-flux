@@ -379,7 +379,7 @@ Each time:
    adb connect 192.168.1.20:41393
    ```
 
-With more than 1 device, run `adb devices` and pass the serial of the phone to scrcpy:
+With more than 1 device, or when `adb devices` lists the phone twice after `adb connect`, run `adb devices` and pass the serial of the phone to scrcpy:
 
 ```sh
 scrcpy -s <serial>

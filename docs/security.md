@@ -199,7 +199,8 @@ Flux itself never injects input on the phone.
 
 `adb` gives the computer a shell on the phone.
 It can install apps, read shared storage, grant permissions, and tap and type anywhere.
-Android's permissions still keep it out of the private data of other apps.
+Android's app sandbox keeps it out of the private files of most apps.
+It can still open any app and read what the app shows, and it can read the files of a debug build such as a debug Flux.
 That is more than any Flux feature grants.
 
 While **Wireless debugging** or **USB debugging** is on, any program of your user can connect with the `adb` key, also when scrcpy does not run.
