@@ -157,7 +157,7 @@ func main() {
 	case "status", "devices":
 		err = status(jsonMode)
 	case "discover":
-		err = call("discover", nil)
+		err = act("discover", nil)
 	case "pair":
 		if addr, ok := addressArg(args); ok {
 			err = pairAddress(addr)
@@ -175,21 +175,21 @@ func main() {
 	case "addresses":
 		err = addresses(device, args)
 	case "ring":
-		err = call("ring", map[string]any{"device": device})
+		err = act("ring", map[string]any{"device": device})
 	case "ping":
-		err = call("ping", map[string]any{"device": device, "message": strings.Join(args, " ")})
+		err = act("ping", map[string]any{"device": device, "message": strings.Join(args, " ")})
 	case "send":
 		err = send(device, args)
 	case "transfers":
 		err = transferCommand(args)
 	case "clip":
-		err = call("clipboard.send", map[string]any{"device": device, "text": strings.Join(args, " ")})
+		err = act("clipboard.send", map[string]any{"device": device, "text": strings.Join(args, " ")})
 	case "clipboard":
 		err = clipboardCommand(args)
 	case "snippets":
 		err = snippetCommand(args)
 	case "url":
-		err = call("share.url", map[string]any{"device": device, "url": need(args, "URL")})
+		err = act("share.url", map[string]any{"device": device, "url": need(args, "URL")})
 	case "sms":
 		if k := first(args); k == "threads" || k == "thread" || k == "refresh" {
 			err = smsCommand(device, args)
@@ -198,7 +198,7 @@ func main() {
 		if len(args) < 2 {
 			fail("Usage: flux-cli sms NUMBER TEXT...")
 		}
-		err = call("sms.send", map[string]any{"device": device, "addresses": []string{args[0]}, "body": strings.Join(args[1:], " ")})
+		err = act("sms.send", map[string]any{"device": device, "addresses": []string{args[0]}, "body": strings.Join(args[1:], " ")})
 	case "notifications":
 		switch first(args) {
 		case "clear":
@@ -225,7 +225,7 @@ func main() {
 	case "commands":
 		err = commands(args)
 	case "run":
-		err = call("commands.run", map[string]any{"id": need(args, "ID")})
+		err = act("commands.run", map[string]any{"id": need(args, "ID")})
 	case "webcam":
 		err = webcam(args, device)
 	case "mic":
@@ -847,6 +847,15 @@ func unpair(device string) error {
 	return nil
 }
 
+func emitStateKey(key string) error {
+	state, err := stateRaw()
+	if err != nil {
+		return err
+	}
+	emitJSON(state[key])
+	return nil
+}
+
 // addresses lists, adds, or removes the extra addresses of a paired
 // device. fluxd dials them while the device is offline, for example
 // through Tailscale.
@@ -857,12 +866,16 @@ func addresses(device string, args []string) error {
 		if args[0] != "add" {
 			method, verb = "addresses.remove", "Removed"
 		}
+		params := map[string]any{"device": device, "address": need(args[1:], "HOST")}
+		if jsonMode {
+			return act(method, params)
+		}
 		var res struct {
 			Device    string   `json:"device"`
 			Address   string   `json:"address"`
 			Addresses []string `json:"addresses"`
 		}
-		if err := callInto(method, map[string]any{"device": device, "address": need(args[1:], "HOST")}, &res); err != nil {
+		if err := callInto(method, params, &res); err != nil {
 			return err
 		}
 		fmt.Printf("%s %s. Addresses of %s: %s\n", verb, res.Address, res.Device, joinOrNone(res.Addresses))
@@ -870,6 +883,14 @@ func addresses(device string, args []string) error {
 	case "", "list":
 	default:
 		return fmt.Errorf("unknown addresses action %q. Use add, remove, or list", args[0])
+	}
+	if jsonMode {
+		devs, err := devicesRaw(device)
+		if err != nil {
+			return err
+		}
+		emitJSON(deviceField(devs, "addresses", "[]"))
+		return nil
 	}
 	var s State
 	if err := callInto("state", nil, &s); err != nil {
@@ -916,10 +937,14 @@ func send(device string, files []string) error {
 		}
 		paths = append(paths, abs)
 	}
+	params := map[string]any{"device": device, "paths": paths}
+	if jsonMode {
+		return act("share.files", params)
+	}
 	var res struct {
 		Transfers []string `json:"transfers"`
 	}
-	if err := callInto("share.files", map[string]any{"device": device, "paths": paths}, &res); err != nil {
+	if err := callInto("share.files", params, &res); err != nil {
 		return err
 	}
 	fmt.Printf("Queued %d transfers\n", len(res.Transfers))
@@ -927,6 +952,14 @@ func send(device string, files []string) error {
 }
 
 func notifications(device string) error {
+	if jsonMode {
+		devs, err := devicesRaw(device)
+		if err != nil {
+			return err
+		}
+		emitJSON(deviceField(devs, "notifications", "[]"))
+		return nil
+	}
 	var s State
 	if err := callInto("state", nil, &s); err != nil {
 		return err
@@ -946,6 +979,9 @@ func notifications(device string) error {
 }
 
 func clearNotifications(device string) error {
+	if jsonMode {
+		return act("notification.dismissAll", map[string]any{"device": device})
+	}
 	var res struct {
 		Dismissed int `json:"dismissed"`
 	}
@@ -966,19 +1002,26 @@ func commands(args []string) error {
 		if len(args) < 3 {
 			fail("Usage: flux-cli commands add NAME COMMAND...")
 		}
+		params := map[string]any{"name": args[1], "command": commandLine(args[2:])}
+		if jsonMode {
+			return act("commands.add", params)
+		}
 		var res struct {
 			ID string `json:"id"`
 		}
-		if err := callInto("commands.add", map[string]any{"name": args[1], "command": commandLine(args[2:])}, &res); err != nil {
+		if err := callInto("commands.add", params, &res); err != nil {
 			return err
 		}
 		fmt.Printf("Added %s with ID %s\n", args[1], res.ID)
 		return nil
 	case "remove", "rm":
-		return call("commands.remove", map[string]any{"id": need(args[1:], "ID")})
+		return act("commands.remove", map[string]any{"id": need(args[1:], "ID")})
 	case "", "list":
 	default:
 		return fmt.Errorf("unknown commands action %q. Use add, remove, or list", args[0])
+	}
+	if jsonMode {
+		return emitStateKey("commands")
 	}
 	var s State
 	if err := callInto("state", nil, &s); err != nil {
@@ -1025,15 +1068,18 @@ func webcam(args []string, device string) error {
 	case "start":
 		return streamStart("webcam", args, device, os.Stdout)
 	case "stop":
-		return call("webcam.stop", nil)
+		return act("webcam.stop", nil)
 	case "reset":
-		return call("webcam.config", map[string]any{"reset": true})
+		return act("webcam.config", map[string]any{"reset": true})
 	case "set":
 		cfg, err := webcamSettings(args[1:])
 		if err != nil {
 			return err
 		}
-		return call("webcam.config", map[string]any{"config": cfg})
+		return act("webcam.config", map[string]any{"config": cfg})
+	}
+	if jsonMode {
+		return emitStateKey("webcam")
 	}
 	var s struct {
 		Webcam *struct {

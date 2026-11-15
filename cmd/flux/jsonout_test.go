@@ -165,7 +165,7 @@ func TestJSONSocket(t *testing.T) {
 		t.Fatalf("ssh without keys: %q, exit %d", out, exit)
 	}
 	out, _, exit = cliProcess(t, "--json", "notify", "Title", "--run")
-	if exit != 0 || out != "" {
+	if exit != 0 || strings.TrimSpace(out) != "{}" {
 		t.Fatalf("notify text: %q, exit %d", out, exit)
 	}
 	h.mu.Lock()

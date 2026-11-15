@@ -37,7 +37,7 @@ func notify(device string, args []string) error {
 	if len(args) == 0 {
 		fail("Usage: flux-cli notify [--device NAME] TITLE [BODY]")
 	}
-	return call("notify.send", map[string]any{"device": device, "title": args[0], "body": strings.Join(args[1:], " ")})
+	return act("notify.send", map[string]any{"device": device, "title": args[0], "body": strings.Join(args[1:], " ")})
 }
 
 // runForeground runs a command with the terminal of flux. Ctrl+C stops the

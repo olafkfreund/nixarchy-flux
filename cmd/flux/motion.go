@@ -30,7 +30,7 @@ type motionStatus struct {
 // settings, or shows their state.
 func motion(args []string, device string) error {
 	set := func(key string, value any) error {
-		return call("settings.set", map[string]any{"key": key, "value": value})
+		return act("settings.set", map[string]any{"key": key, "value": value})
 	}
 	second := ""
 	if len(args) > 1 {
@@ -38,26 +38,26 @@ func motion(args []string, device string) error {
 	}
 	switch first(args) {
 	case "on":
-		if err := set("motionCues", true); err != nil {
+		if err := set("motionCues", true); err != nil || jsonMode {
 			return err
 		}
 		fmt.Println("Motion cues are on. A paired phone can send its motion. Start them with: flux-cli motion start")
 		fmt.Println("Motion cues are experimental and not medical advice. Use them as a passenger only.")
 		return nil
 	case "off":
-		if err := set("motionCues", false); err != nil {
+		if err := set("motionCues", false); err != nil || jsonMode {
 			return err
 		}
 		fmt.Println("Motion cues are off.")
 		return nil
 	case "start":
-		if err := call("motion.start", map[string]any{"device": device}); err != nil {
+		if err := act("motion.start", map[string]any{"device": device}); err != nil || jsonMode {
 			return err
 		}
 		fmt.Println("Asked the phone to send its motion. The dots show when the first motion arrives.")
 		return nil
 	case "stop":
-		if err := call("motion.stop", nil); err != nil {
+		if err := act("motion.stop", nil); err != nil || jsonMode {
 			return err
 		}
 		fmt.Println("Motion cues stopped.")
@@ -66,7 +66,7 @@ func motion(args []string, device string) error {
 		if second != "on" && second != "off" {
 			return fmt.Errorf("%s", motionUsage)
 		}
-		if err := set("motionAuto", second == "on"); err != nil {
+		if err := set("motionAuto", second == "on"); err != nil || jsonMode {
 			return err
 		}
 		fmt.Printf("Automatic start is %s.\n", second)
@@ -88,6 +88,9 @@ func motion(args []string, device string) error {
 	case "", "status":
 	default:
 		return fmt.Errorf("unknown argument %q. %s", first(args), motionUsage)
+	}
+	if jsonMode {
+		return emitStateKey("motion")
 	}
 	var s motionStatus
 	if err := callInto("state", nil, &s); err != nil {
