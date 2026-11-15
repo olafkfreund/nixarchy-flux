@@ -99,7 +99,7 @@ Flux works only when the phone and the computer reach each other over IP.
 
 ## Proposed outcome
 
-For a Linux desktop and an Android phone (see Open questions), when the
+For a Linux desktop and an Android 12+ phone (see Decisions), when the
 IP link to a paired device is down and both have Bluetooth on:
 
 - A phone notification still shows on the desktop.
@@ -123,11 +123,10 @@ Out of scope for this version:
 
 - Pairing over Bluetooth, and enrollment of the approval key
   (`flux-cli approve enroll`).
-- iOS, macOS and Windows, unless the owner adds them.
+- iOS, macOS, Windows, and Android 10–11.
 - Files, clipboard images, clipboard history, screen, camera, mic,
   speaker, remote input, SSH, SFTP, herdr, SMS and calls.
-- Notification replies and actions, unless the owner adds them (see Open
-  questions).
+- Notification replies and actions, and SSH signing.
 - Using Bluetooth when the IP link works.
 
 ## Affected users and systems
@@ -135,8 +134,7 @@ Out of scope for this version:
 - Users whose phone and computer are close but share no working IP
   network.
 - `fluxd`: its network side, and its access to BlueZ on Linux.
-- Flux for Android: its link code, manifest and permission flow. iOS,
-  macOS and Windows only if the owner adds them.
+- Flux for Android: its link code, manifest and permission flow.
 - Desktop hosts: the Qt GUI and the shell plugin show the link type.
 - Docs: `docs/architecture.md`, `docs/security.md`, `docs/approve.md`,
   `docs/features.md`, `docs/troubleshooting.md`.
@@ -183,9 +181,9 @@ Out of scope for this version:
   while the IP link is up, nor for hours when the computer is out of
   range.
 - Android: the new permissions (`BLUETOOTH_CONNECT`, and `BLUETOOTH_SCAN`
-  or `BLUETOOTH_ADVERTISE` on Android 12+; older location rules on
-  Android 10–11, `minSdk 29`) are asked only when the user turns the
-  feature on. Background limits must still let an approval arrive while
+  or `BLUETOOTH_ADVERTISE`, Android 12+) are asked only when the user
+  turns the feature on. No location permission. On Android 10–11
+  (`minSdk 29`) the feature is not offered, and IP works as before. Background limits must still let an approval arrive while
   the screen is off, as the foreground service does today.
 - Linux: `fluxd` runs as the user. It must not need root or extra
   capabilities for Bluetooth, and it must not change the host's Bluetooth
@@ -196,30 +194,24 @@ Out of scope for this version:
 - No change to the IP protocol for peers that do not use Bluetooth.
   Older apps keep working.
 
-## Open questions
+## Decisions (owner, 2026-11-15)
 
-1. **Which features?** Proposed: only the three in the issue:
-   notifications (show only), clipboard text, and approval. Notification
-   replies/actions and SSH signing (`internal/sshagent`) stay out.
-2. **Which platforms?** Proposed: Linux `fluxd` and Android only. iOS
-   approval needs Flux on screen and the app has no Bluetooth background
-   mode, so iOS, macOS and Windows each get their own issue later.
-3. **A new Go dependency?** Is a BLE library for BlueZ acceptable, or
-   must `fluxd` use only the D-Bus library it already has? The spec
-   compares both; this is the owner's limit.
-4. **Size limit for clipboard text over Bluetooth?** Proposed: a few KiB,
-   with longer text refused and shown as such. And how long may the
-   switch to Bluetooth take before an approval is lost? Proposed: it must
-   fit inside the default 20 s `approve_timeout`.
-5. **Android 12 and later only?** Android 10–11 (`minSdk 29`) need the
-   location permission and Location on to use Bluetooth LE. Proposed:
-   Android 12+ only, so Flux never asks for location.
-6. **Which Linux setups must work?** Proposed: BlueZ 5 with a BLE adapter,
-   `fluxd` as the logged-in user's service. Others are best effort.
-7. **On by default?** Proposed: off on both sides until the user turns it
-   on.
-8. **Upstream.** Mirror of bjarneo/flux #185. Build it here first, or
-   agree the design upstream before work starts?
-9. **Test.** Needs a Linux host with a Bluetooth adapter and an Android
-   phone, with Wi-Fi off on the phone. Which host? p510 needs the owner's
-   OK before any build or deploy.
+1. **Features:** only notifications (show only), clipboard text and
+   approval. Notification replies/actions and SSH signing stay out.
+2. **Platforms:** Linux `fluxd` and Android 12+ only, so Flux never asks
+   for location. iOS, macOS and Windows each get their own issue later.
+3. **Dependency:** `fluxd` talks to BlueZ only through the D-Bus library
+   it already has (`godbus/dbus/v5`). No new Go Bluetooth dependency.
+4. **Default:** off on both sides until the user turns it on.
+5. **Upstream:** the design is agreed on bjarneo/flux #185 before any
+   building.
+6. **To settle in spec** (proposals kept):
+   - Clipboard text limit: a few KiB; longer text is refused and shown
+     as such.
+   - Switch time: the switch to Bluetooth fits inside the default 20 s
+     `approve_timeout`.
+   - Linux setups: BlueZ 5 with a BLE adapter, `fluxd` as the logged-in
+     user's service. Others are best effort.
+   - Test host: a Linux host with a Bluetooth adapter and an Android 12+
+     phone with Wi-Fi off. p510 needs the owner's OK before any build or
+     deploy.
