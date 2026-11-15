@@ -52,6 +52,9 @@ func notificationActions(device string, args []string) error {
 	if len(args) < 2 || args[1] == "" {
 		return usageErr("Usage: flux-cli notifications %s ID%s", sub, map[string]string{"dismiss": "", "reply": " TEXT...", "action": " ACTION"}[sub])
 	}
+	if sub == "dismiss" && len(args) != 2 {
+		return usageErr("Usage: flux-cli notifications dismiss ID")
+	}
 	params := map[string]any{"device": device, "id": args[1]}
 	switch sub {
 	case "reply":
@@ -72,6 +75,9 @@ func notificationActions(device string, args []string) error {
 func smsCommand(device string, args []string) error {
 	switch args[0] {
 	case "refresh":
+		if len(args) != 1 {
+			return usageErr("Usage: flux-cli sms refresh")
+		}
 		return act("sms.refresh", map[string]any{"device": device})
 	case "thread":
 		if len(args) != 2 {

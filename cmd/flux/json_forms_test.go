@@ -20,6 +20,7 @@ func runCLI(t *testing.T, args ...string) string {
 	os.Stdout = w
 	defer func() {
 		os.Args, os.Stdout = oldArgs, oldOut
+		jsonMode = false
 	}()
 	main()
 	w.Close()

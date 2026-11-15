@@ -631,7 +631,7 @@ JSON output passes the raw socket bytes or state projection through `safeJSON`, 
 | Form | JSON output |
 | --- | --- |
 | `status`, `devices` | The raw `state` snapshot |
-| `ssh [key\|socket]` | `{"socket":…,"error":…,"keys":[…]}` (`[…]` for `ssh key`, `{"socket":…,"error":…}` for `ssh socket`) |
+| `ssh [key\|socket]` | `{"socket":…,"error":…,"keys":[…]}`, the same object for all three forms |
 | `discover`, `ring`, `ping`, `clip`, `text`, `url`, `run`, `notify TITLE [BODY]`, `sms NUMBER TEXT...` | The method's result (`{}` when empty) |
 | `addresses` | `{deviceID:[addresses]}` from the state |
 | `addresses add\|remove HOST` | The method's result (`{"device":…,"address":…,"addresses":[…]}`) |

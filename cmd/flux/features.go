@@ -18,6 +18,9 @@ func transferCommand(args []string) error {
 		return usageErr("Usage: flux-cli transfers %s ID", args[0])
 	}
 	if len(args) == 2 && (args[0] == "open" || args[0] == "copy") {
+		if args[1] == "" {
+			return usageErr("Usage: flux-cli transfers %s ID", args[0])
+		}
 		return act("transfer."+args[0], map[string]any{"id": args[1]})
 	}
 	if len(args) != 0 {
