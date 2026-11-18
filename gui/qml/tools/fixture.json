@@ -317,7 +317,7 @@
    }
   ],
   "clipboardPaused": false,
- "clipboardPauses": [],
+  "clipboardPauses": [],
   "settings": {
    "autoClipboard": true,
    "clipboardLimit": 50,

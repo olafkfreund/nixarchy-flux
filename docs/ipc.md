@@ -459,7 +459,8 @@ Manual `clipboard.send` still works while paused, and clips from devices still a
 `clipboard.pauseOwned` holds a pause for an `owner` until `expires` seconds pass or `clipboard.resumeOwned` ends it.
 The clipboard stays paused until the plain pause and every owned pause have ended, and the 250 ms after a resume start when the last one ends.
 A second `clipboard.pauseOwned` with the same owner is a renewal: it replaces the expiry. The clear and the stop above happen on every pause call.
-An owner may hold a pause for 1 hour in total, however often it renews, and at most 8 owners may hold one at the same time.
+One continuous hold by an owner lasts at most 1 hour, however often it renews, and at most 8 owners may hold one at the same time.
+A renewal near the cap returns an `expires` earlier than asked, possibly now, so check it: when it has passed, the hold has ended, and the next call starts a fresh hour.
 An owner is a label, not a lock. fluxd does not identify socket callers, so use a unique label for each job, such as `nixi:JOB_ID`.
 Labels are untrusted text: show them as text, never as markup or commands.
 Owned pauses do not survive a restart of fluxd. Read `state` before and during the job, and renew when your entry is missing from `clipboardPauses`.

@@ -134,7 +134,7 @@ The [workflow controls](workflows.md) add an offline desktop outbox, folder arch
 While paused, a copy stays on this computer: no device gets it, the history doesn't keep it, and a device that connects later doesn't get it.
 Sending the clipboard by hand (`flux-cli clip`, Send clipboard) still works, and clips from your devices still arrive.
 The pause doesn't change `config.toml`. It survives a restart of fluxd, and ends at reboot, and at logout when lingering is off.
-A pause with an owner (`flux-cli clipboard pause --owner NAME --for 10m`) ends by itself, holds for 1 hour in total per owner, and does not survive a restart of fluxd. `resume --owner NAME` ends only that one.
+A pause with an owner (`flux-cli clipboard pause --owner NAME --for 10m`) ends by itself, holds for at most 1 hour without a break per owner, and does not survive a restart of fluxd. `resume --owner NAME` ends only that one.
 Bare `flux-cli clipboard resume` ends only the plain pause; `resume --all` ends every pause.
 A new copy in the first 250 ms after a resume isn't synced.
 The watcher also ignores a repeat of the last copy at any time, so a value you copied while paused doesn't sync when you copy it again after the resume. Copy something different, or send it by hand.

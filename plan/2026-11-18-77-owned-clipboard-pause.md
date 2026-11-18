@@ -128,6 +128,13 @@ ran with nixpkgs' `qt6.qtdeclarative` runner (98 passed) and `make snapshot` in 
 *Deviation (step 5):* the docs spell the error `unknown_method`, as the error
 table does; `too_many` already existed for addresses, and gets the pause case.
 
+*Deviation (Opus branch review):* the snapshot's `expires` is `until.Unix()`, not
+`time.Now().Unix() + remaining`; it differs only after a wall-clock step, and the
+timer itself runs on the monotonic clock. The docs now say the 1 h cap covers one
+continuous hold and that a renewal near the cap can return an `expires` already
+passed (the spec allows a fresh hold after expiry). Two owned-pause tests no
+longer race millisecond timers against unlocked reads.
+
 - Go: `make vet` (go vet plus `gofmt -l cmd internal scripts`), `make test`
   (`go test -race ./cmd/... ./internal/... ./scripts/...`); one test:
   `go test -race ./internal/core -run Name`.

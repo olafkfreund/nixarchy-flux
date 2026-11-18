@@ -1410,7 +1410,8 @@ func TestOwnedPauseExpiryAndMarker(t *testing.T) {
 	d, _ := clipDaemon(t, true)
 	path := filepath.Join(t.TempDir(), "clipboard-paused")
 	d.loadClipPause(path)
-	if _, err := d.PauseClipboardOwned("job", 30); err != nil || !d.clipPaused {
+	// 200 ms: long enough that the unlocked reads before waitFor run before expiry.
+	if _, err := d.PauseClipboardOwned("job", 200); err != nil || !d.clipPaused {
 		t.Fatalf("owned pause: %v, paused %v", err, d.clipPaused)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -1427,7 +1428,7 @@ func TestOwnedPauseExpiryAndMarker(t *testing.T) {
 	if err := d.PauseClipboard(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.PauseClipboardOwned("job", 30); err != nil {
+	if _, err := d.PauseClipboardOwned("job", 3000); err != nil { // no expiry before the resumes below
 		t.Fatal(err)
 	}
 	fresh, _ := clipDaemon(t, true)
@@ -1445,7 +1446,7 @@ func TestOwnedPauseExpiryAndMarker(t *testing.T) {
 }
 
 func TestOwnedPauseLastEndAndForce(t *testing.T) {
-	testPauseUnit(t)
+	// Real one-second unit: nothing here waits for an expiry, so no timer fires mid-test.
 	d, _ := clipDaemon(t, true)
 	if err := d.PauseClipboard(); err != nil {
 		t.Fatal(err)
