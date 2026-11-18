@@ -59,7 +59,9 @@ Method names and parameter handling live in `internal/core/api.go`.
 
 Call `state` for a snapshot.
 The snapshot includes `self`, `devices`, `approvals`, `clipboard`, `clipboardPaused`, `transfers`, `commands`, `settings`, `webcam`, `mic`, `screen`, `desktop`, `speaker`, `browse`, `herdr`, and `motion`.
-`clipboardPaused` is true while `clipboard.pause` holds. It survives a restart of fluxd, not a reboot.
+`clipboardPaused` is true while `clipboard.pause` holds or any owned pause holds. The plain pause survives a restart of fluxd, not a reboot. Owned pauses do not survive a restart of fluxd.
+`clipboardPauses` is always an array: one `{"owner":"LABEL","expires":UNIX_SECONDS}` per owned pause, sorted by owner, then `{"owner":""}` without `expires` for the plain pause.
+An older fluxd has no `clipboardPauses`.
 `motion` is the state of the [motion cues](motion-cues.md): `running`, the feeding `device` and its `deviceName`, `auto` for a start of vehicle detection, `active` while fresh motion arrives, and the last phone `error`.
 `browse` lists the [Browse PC](features.md#browse-pc) sessions, the oldest first: the `device` ID, the `name`, and `since`, the Unix time of the start.
 `approvals` lists the requests that wait for a phone, `sudo` before `ssh`, then the oldest first: `kind` (`sudo` or `ssh`), the `device` ID, and `since`, the Unix time when the wait started.
@@ -181,7 +183,7 @@ A device that is not paired shows only while it has a link.
 | Pairing | `pair.address`, `pair.request`, `pair.accept`, `pair.reject`, `pair.unpair` |
 | Addresses | `addresses.add`, `addresses.remove` |
 | Device | `ring`, `ping`, `dnd.set`, `device.settings`, `device.settings.set` |
-| Sharing | `clipboard.send`, `clipboard.copy`, `clipboard.pause`, `clipboard.resume`, `clipboard.delete`, `clipboard.clear`, `clipboard.pin`, `clipboard.unpin`, `clipboard.search`, `share.files`, `share.text`, `share.url`, `transfer.retry`, `transfer.cancel`, `transfer.open`, `transfer.copy` |
+| Sharing | `clipboard.send`, `clipboard.copy`, `clipboard.pause`, `clipboard.resume`, `clipboard.pauseOwned`, `clipboard.resumeOwned`, `clipboard.delete`, `clipboard.clear`, `clipboard.pin`, `clipboard.unpin`, `clipboard.search`, `share.files`, `share.text`, `share.url`, `transfer.retry`, `transfer.cancel`, `transfer.open`, `transfer.copy` |
 | Commands | `commands.add`, `commands.remove`, `commands.run`, `automation.add`, `automation.remove` |
 | Notifications | `notification.dismiss`, `notification.dismissAll`, `notification.reply`, `notification.action`, `notification.rule.add`, `notification.rule.remove`, `notify.send` |
 | Text messages | `sms.refresh`, `sms.thread`, `sms.send` |
@@ -216,7 +218,10 @@ Without `device`, a method uses the only connected paired device.
 | `dnd.set` | `device`, and `on` (`true` or `false`). It sets Do Not Disturb on that phone only and returns `{"sent":true}`. The phone's next `dnd` report shows the result. Errors: `bad_params` without `on`, `not_supported` when the device lacks `dnd` in `plugins`, `offline` without a link. |
 | `clipboard.send` | `device`, and `text`. Without `text`, the clipboard of the computer. |
 | `clipboard.copy` | `id` of an entry, or `text`, or `path` of an image in the history |
-| `clipboard.pause`, `clipboard.resume` | None |
+| `clipboard.pause` | None. `owner` or `expires`, even `null` or `0`, returns `bad_params`: use `clipboard.pauseOwned`. |
+| `clipboard.resume` | Optional `force` (`true`) also ends every owned pause. Without `force` it ends only the plain pause. `owner` or `expires` returns `bad_params`. |
+| `clipboard.pauseOwned` | `owner`, a label of 1 to 64 bytes of valid UTF-8 without control characters or U+FFFD, and `expires`, a whole number of seconds from 1 to 3600. It returns `{"expires":UNIX_SECONDS}`. |
+| `clipboard.resumeOwned` | `owner`. It ends that owner's pause and returns `{}`. An unknown owner is not an error. |
 | `share.files` | `device`, and `paths`, a list of absolute paths. The result has the IDs of the new `transfers`. |
 | `share.text`, `share.url` | `device`, and `text` or `url` |
 | `transfer.cancel` | `id` of a transfer |
@@ -316,9 +321,10 @@ These codes need a step from the client:
 | `not_paired`, `offline` | The device is not paired, or it has no link now. |
 | `unreachable` | `pair.address` cannot open a link to the address. The message gives the cause. |
 | `no_request` | No device with the name has an open pair request, or the open pairing has another `key`. |
-| `not_saved` | `pair.unpair` could not save `devices.json`; the device is unpaired only until fluxd restarts. Or `clipboard.pause` or `clipboard.resume` could not write or remove the pause marker; the call took effect, but a restart of fluxd brings back the state before it. |
+| `not_saved` | `pair.unpair` could not save `devices.json`; the device is unpaired only until fluxd restarts. Or `clipboard.pause` or `clipboard.resume` could not write or remove the pause marker (the plain pause only); the call took effect, but a restart of fluxd brings back the state before it. |
+| `too_many` | `clipboard.pauseOwned` for a ninth owner. A renewal by an owner that holds a pause still works. |
 | `too_large` | The text has more than 256 KiB, the most that fluxd sends to a device. |
-| `bad_params`, `bad_setting` | A parameter or a setting is missing or has the wrong type. |
+| `bad_params`, `bad_setting` | A parameter or a setting is missing or has the wrong type. For `clipboard.pauseOwned` and `clipboard.resumeOwned`, also an `owner` that is empty, longer than 64 bytes, not valid UTF-8, or has a control character or U+FFFD. For `clipboard.pauseOwned`, also an `expires` that is missing or outside 1 to 3600. |
 
 The [herdr wire format](herdr.md#wire-format) uses the code `blocked` for a prompt to an agent that waits for a choice.
 That code comes in a `flux.herdr` packet on the link of the device, not on this socket.
@@ -449,7 +455,16 @@ A copy made in the 250 ms after a resume is dropped too, so a new copy in that t
 The watcher ignores a repeat of the last copy at any time, so a value copied while paused doesn't sync by copying it again after the resume; copy something different or send it by hand.
 The 250 ms count from the start of the watcher script, so on a very loaded machine a copy whose script starts more than 250 ms after the copy, with a resume in between, can still sync.
 Manual `clipboard.send` still works while paused, and clips from devices still arrive.
-Both methods are idempotent, and the last call wins.
+`clipboard.pause` and `clipboard.resume` are idempotent. They set and clear the plain pause only, unless `resume` has `force`.
+`clipboard.pauseOwned` holds a pause for an `owner` until `expires` seconds pass or `clipboard.resumeOwned` ends it.
+The clipboard stays paused until the plain pause and every owned pause have ended, and the 250 ms after a resume start when the last one ends.
+A second `clipboard.pauseOwned` with the same owner is a renewal: it replaces the expiry. The clear and the stop above happen on every pause call.
+One continuous hold by an owner lasts at most 1 hour, however often it renews, and at most 8 owners may hold one at the same time.
+A renewal near the cap returns an `expires` earlier than asked, possibly now, so check it: when it has passed, the hold has ended, and the next call starts a fresh hour.
+An owner is a label, not a lock. fluxd does not identify socket callers, so use a unique label for each job, such as `nixi:JOB_ID`.
+Labels are untrusted text: show them as text, never as markup or commands.
+Owned pauses do not survive a restart of fluxd. Read `state` before and during the job, and renew when your entry is missing from `clipboardPauses`.
+An older fluxd answers `unknown_method` to the owned methods and ignores `force`. Treat that as an error, not as "no pause".
 
 ## Text messages
 

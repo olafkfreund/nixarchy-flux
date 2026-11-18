@@ -85,15 +85,13 @@ func clipboardCommand(args []string) error {
 		return printCall("clipboard.search", nil)
 	}
 	switch args[0] {
-	case "pause", "resume", "status":
+	case "pause":
+		return clipboardPause(args[1:])
+	case "resume":
+		return clipboardResume(args[1:])
+	case "status":
 		if len(args) != 1 {
-			return fmt.Errorf("clipboard %s takes no arguments", args[0])
-		}
-		switch args[0] {
-		case "pause":
-			return act("clipboard.pause", nil)
-		case "resume":
-			return act("clipboard.resume", nil)
+			return fmt.Errorf("clipboard status takes no arguments")
 		}
 		return clipboardStatus()
 	case "clear":
@@ -117,7 +115,80 @@ func clipboardCommand(args []string) error {
 		}
 		return act("settings.set", map[string]any{"key": "clipboardLimit", "value": limit})
 	}
-	return fmt.Errorf("use: flux-cli clipboard [clear [--all]|delete ID|limit [N]|pause|resume|status]")
+	return fmt.Errorf("use: flux-cli clipboard [clear [--all]|delete ID|limit [N]|pause [--owner NAME --for DURATION]|resume [--owner NAME|--all]|status]")
+}
+
+// clipboardFlags reads "--owner NAME", "--for DURATION" and "--all" from args.
+func clipboardFlags(cmd string, args []string, allowed ...string) (owner, dur string, all bool, err error) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		ok := false
+		for _, w := range allowed {
+			ok = ok || a == w
+		}
+		switch {
+		case !ok:
+			return "", "", false, fmt.Errorf("clipboard %s: unexpected argument %q", cmd, a)
+		case a == "--all":
+			all = true
+		default:
+			if i+1 >= len(args) || args[i+1] == "" {
+				return "", "", false, fmt.Errorf("clipboard %s: %s needs a value", cmd, a)
+			}
+			i++
+			if a == "--owner" {
+				owner = args[i]
+			} else {
+				dur = args[i]
+			}
+		}
+	}
+	return owner, dur, all, nil
+}
+
+func clipboardPause(args []string) error {
+	owner, dur, _, err := clipboardFlags("pause", args, "--owner", "--for")
+	if err != nil {
+		return err
+	}
+	if owner == "" && dur == "" {
+		if len(args) > 0 {
+			return fmt.Errorf("clipboard pause: --owner and --for need a value")
+		}
+		return act("clipboard.pause", nil)
+	}
+	if owner == "" || dur == "" {
+		return fmt.Errorf("clipboard pause: give --owner and --for together")
+	}
+	d, err := time.ParseDuration(dur)
+	if err != nil || d <= 0 {
+		return fmt.Errorf("--for needs a positive duration, such as 10m")
+	}
+	if d%time.Second != 0 {
+		return fmt.Errorf("--for must be whole seconds")
+	}
+	if d > time.Hour {
+		return fmt.Errorf("--for must not be more than 1h")
+	}
+	return act("clipboard.pauseOwned", map[string]any{"owner": owner, "expires": int64(d / time.Second)})
+}
+
+func clipboardResume(args []string) error {
+	owner, _, all, err := clipboardFlags("resume", args, "--owner", "--all")
+	if err != nil {
+		return err
+	}
+	switch {
+	case owner != "" && all:
+		return fmt.Errorf("clipboard resume: use --owner or --all, not both")
+	case all:
+		return act("clipboard.resume", map[string]any{"force": true})
+	case owner != "":
+		return act("clipboard.resumeOwned", map[string]any{"owner": owner})
+	case len(args) > 0:
+		return fmt.Errorf("clipboard resume: --owner needs a value")
+	}
+	return act("clipboard.resume", nil)
 }
 
 // clipboardStatus prints whether local copies go to the devices.
@@ -141,10 +212,15 @@ func clipboardStatus() error {
 		if len(auto) == 0 {
 			auto = json.RawMessage("false")
 		}
+		pauses := state["clipboardPauses"]
+		if len(pauses) == 0 || string(pauses) == "null" {
+			pauses = json.RawMessage("[]")
+		}
 		b, _ := json.Marshal(struct {
-			Paused        json.RawMessage `json:"paused"`
-			AutoClipboard json.RawMessage `json:"autoClipboard"`
-		}{paused, auto})
+			Paused          json.RawMessage `json:"paused"`
+			AutoClipboard   json.RawMessage `json:"autoClipboard"`
+			ClipboardPauses json.RawMessage `json:"clipboardPauses"`
+		}{paused, auto, pauses})
 		emitJSON(b)
 		return nil
 	}

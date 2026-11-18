@@ -56,6 +56,9 @@ type Daemon struct {
 	// pause stops at its next check. clipSendAuto is true while clipSend
 	// is an automatic image send. All under mu.
 	clipPaused   bool
+	clipPlain    bool
+	clipOwned    map[string]*ownedPause
+	pauseSeq     uint64
 	resumedAt    time.Duration
 	clipGen      uint64
 	clipSendAuto bool

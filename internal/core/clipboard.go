@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"flux/internal/config"
 	"flux/internal/desktop"
@@ -254,6 +257,37 @@ func (d *Daemon) stopAutoClipSend() {
 // watcher script, so a copy made just before a resume counts as paused.
 const resumeGrace = 250 * time.Millisecond
 
+var pauseCapSecs int64 = 3600
+var pauseUnit = time.Second
+
+type ownedPause struct {
+	first, until time.Time
+	timer        *time.Timer
+	seq          uint64
+}
+
+func ownerFromRaw(raw json.RawMessage) (string, error) {
+	var owner string
+	if !utf8.Valid(raw) || json.Unmarshal(raw, &owner) != nil || owner == "" || len(owner) > 64 || strings.ContainsRune(owner, unicode.ReplacementChar) || strings.IndexFunc(owner, unicode.IsControl) >= 0 {
+		return "", apiErr("bad_params", "invalid clipboard pause owner")
+	}
+	return owner, nil
+}
+
+// The caller holds mu.
+func (d *Daemon) setPausedLocked() {
+	d.clipPaused = d.clipPlain || len(d.clipOwned) > 0
+}
+
+// The caller holds mu.
+func (d *Daemon) endPauseLocked() {
+	wasPaused := d.clipPaused
+	d.setPausedLocked()
+	if wasPaused && !d.clipPaused {
+		d.resumedAt = desktop.BootTime()
+	}
+}
+
 // copyPausedLocked reports whether a local copy made at the boot time at
 // is a paused copy: made while paused, before the last resume, or less
 // than resumeGrace after it. The caller holds d.mu.
@@ -288,7 +322,8 @@ func (d *Daemon) PauseClipboard() error {
 		err = writePauseFile(d.clipPauseFile) // first, so a crash after it stays paused
 	}
 	d.mu.Lock()
-	d.clipPaused = true
+	d.clipPlain = true
+	d.setPausedLocked()
 	d.clipGen++
 	d.content.lastClip = ""
 	d.stopAutoClipSendLocked()
@@ -301,15 +336,87 @@ func (d *Daemon) PauseClipboard() error {
 	return nil
 }
 
-// ResumeClipboard ends a pause. It sends nothing by itself.
-func (d *Daemon) ResumeClipboard() error {
+// PauseClipboardOwned pauses automatic sync for one owner without a marker.
+func (d *Daemon) PauseClipboardOwned(owner string, secs int64) (time.Time, error) {
+	if secs < 1 || secs > pauseCapSecs {
+		return time.Time{}, apiErr("bad_params", "invalid clipboard pause expiry")
+	}
 	d.pauseMu.Lock()
 	defer d.pauseMu.Unlock()
 	d.mu.Lock()
-	if d.clipPaused {
-		d.clipPaused = false
-		d.resumedAt = desktop.BootTime()
+	old := d.clipOwned[owner]
+	if old == nil && len(d.clipOwned) >= 8 {
+		d.mu.Unlock()
+		return time.Time{}, apiErr("too_many", "too many clipboard pause owners")
 	}
+	now := time.Now()
+	first := now
+	if old != nil {
+		first = old.first
+		old.timer.Stop()
+	}
+	until := now.Add(time.Duration(secs) * pauseUnit)
+	if cap := first.Add(time.Duration(pauseCapSecs) * pauseUnit); until.After(cap) {
+		until = cap
+	}
+	d.pauseSeq++
+	seq := d.pauseSeq
+	if d.clipOwned == nil {
+		d.clipOwned = make(map[string]*ownedPause)
+	}
+	e := &ownedPause{first: first, until: until, seq: seq}
+	d.clipOwned[owner] = e
+	e.timer = time.AfterFunc(time.Until(until), func() { d.expireOwned(owner, seq) })
+	d.clipGen++
+	d.content.lastClip = ""
+	d.stopAutoClipSendLocked()
+	d.setPausedLocked()
+	d.mu.Unlock()
+	d.markDirty()
+	return until, nil
+}
+
+func (d *Daemon) expireOwned(owner string, seq uint64) {
+	d.pauseMu.Lock()
+	defer d.pauseMu.Unlock()
+	d.mu.Lock()
+	e := d.clipOwned[owner]
+	if e == nil || e.seq != seq {
+		d.mu.Unlock()
+		return
+	}
+	delete(d.clipOwned, owner)
+	d.endPauseLocked()
+	d.mu.Unlock()
+	d.markDirty()
+}
+
+func (d *Daemon) ResumeClipboardOwned(owner string) {
+	d.pauseMu.Lock()
+	defer d.pauseMu.Unlock()
+	d.mu.Lock()
+	if e := d.clipOwned[owner]; e != nil {
+		e.timer.Stop()
+		delete(d.clipOwned, owner)
+	}
+	d.endPauseLocked()
+	d.mu.Unlock()
+	d.markDirty()
+}
+
+// ResumeClipboard ends the plain pause, or every pause with force.
+func (d *Daemon) ResumeClipboard(force bool) error {
+	d.pauseMu.Lock()
+	defer d.pauseMu.Unlock()
+	d.mu.Lock()
+	d.clipPlain = false
+	if force {
+		for owner, e := range d.clipOwned {
+			e.timer.Stop()
+			delete(d.clipOwned, owner)
+		}
+	}
+	d.endPauseLocked()
 	d.mu.Unlock()
 	d.markDirty()
 	if d.clipPauseFile == "" {
@@ -337,10 +444,12 @@ func (d *Daemon) loadClipPause(path string) {
 	// Any error but "no marker" fails closed: a copy must not leak.
 	_, err := os.Stat(path)
 	if err == nil {
-		d.clipPaused = true
+		d.clipPlain = true
+		d.setPausedLocked()
 		d.logf("clipboard sync is paused (%s)", path)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		d.clipPaused = true
+		d.clipPlain = true
+		d.setPausedLocked()
 		d.logf("clipboard sync is paused, the marker can't be read: %v", err)
 	}
 }

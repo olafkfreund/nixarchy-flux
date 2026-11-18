@@ -316,7 +316,10 @@ See [workflow controls](workflows.md#desktop-outbox).
 flux-cli clipboard
 flux-cli clipboard status
 flux-cli clipboard pause
+flux-cli clipboard pause --owner NAME --for 10m
 flux-cli clipboard resume
+flux-cli clipboard resume --owner NAME
+flux-cli clipboard resume --all
 flux-cli clipboard clear
 flux-cli clipboard clear --all
 flux-cli clipboard delete CLIP_ID
@@ -333,7 +336,10 @@ flux-cli snippets remove CLIP_ID
 `flux-cli clipboard clear` removes unpinned clipboard history. Add `--all` to also remove saved snippets.
 `flux-cli clipboard delete ID` deletes a history entry or saved snippet.
 `flux-cli clipboard limit [N]` shows or sets the number of clipboard history entries to keep (1 to 500, default 50).
-`flux-cli clipboard pause` and `resume` stop and restart the automatic sync of copies to your devices; `status` prints `paused`, `syncing`, or `off`. See [pause clipboard sync](features.md#pause-clipboard-sync).
+`flux-cli clipboard pause` and `resume` stop and restart the automatic sync of copies to your devices; `status` prints `paused`, `syncing`, or `off`.
+`pause --owner NAME --for DURATION` holds a pause for a named job and ends it by itself after the duration (whole seconds, up to `1h`, such as `90s` or `10m`). Give both flags together. Running it again with the same name renews it.
+`resume --owner NAME` ends only that pause. `resume --all` ends the plain pause and every owned pause. `--owner` and `--all` do not go together. `resume` alone ends only the plain pause.
+Owned pauses do not survive a restart of fluxd. See [pause clipboard sync](features.md#pause-clipboard-sync).
 `flux-cli snippets` searches, saves (with an optional duration such as `24h`), copies, or unpins saved clipboard entries. See [saved clipboard snippets](workflows.md#saved-clipboard-snippets).
 
 ### Text messages
@@ -639,8 +645,8 @@ JSON output passes the raw socket bytes or state projection through `safeJSON`, 
 | `transfers` | The state's `transfers`, raw |
 | `transfers retry\|cancel\|open\|copy ID` | The method's result |
 | `clipboard` | The `clipboard.search` result |
-| `clipboard status` | `{"paused":…,"autoClipboard":…}` from the raw state |
-| `clipboard pause\|resume\|clear\|delete` | The method's result |
+| `clipboard status` | `{"paused":…,"autoClipboard":…,"clipboardPauses":[…]}` from the raw state (`[]` from an older fluxd) |
+| `clipboard pause\|resume\|clear\|delete`, with `--owner` or `--all` | The method's result |
 | `clipboard limit` | `{"clipboardLimit":N}` |
 | `clipboard limit N` | The `settings.set` result |
 | `snippets`, `snippets search TEXT` | The `clipboard.search` result |
