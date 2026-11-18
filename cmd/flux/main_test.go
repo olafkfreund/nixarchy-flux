@@ -335,7 +335,12 @@ func TestClipboardCommandArgs(t *testing.T) {
 }
 
 func TestClipboardPauseArgs(t *testing.T) {
-	for _, args := range [][]string{{"pause", "5m"}, {"resume", "now"}, {"status", "x"}} {
+	for _, args := range [][]string{{"pause", "5m"}, {"resume", "now"}, {"status", "x"},
+		{"pause", "--owner", "a"}, {"pause", "--for", "1m"}, {"pause", "--owner"},
+		{"pause", "--owner", "a", "--for", "0s"}, {"pause", "--owner", "a", "--for", "1500ms"},
+		{"pause", "--owner", "a", "--for", "61m"}, {"pause", "--owner", "a", "--for", "-1m"},
+		{"pause", "--owner", "a", "--for", "x"}, {"resume", "--owner"},
+		{"resume", "--owner", "a", "--all"}, {"resume", "--all", "x"}} {
 		if err := clipboardCommand(args); err == nil {
 			t.Errorf("clipboard %q should fail", args)
 		}

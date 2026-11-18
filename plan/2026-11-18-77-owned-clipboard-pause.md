@@ -117,6 +117,10 @@ Local runs skip exactly those with `-skip`; CI runs the whole package.
 `TestOwnedPauseRenewalAndStaleTimer` uses the real pause unit (Codex review),
 so no timer fires while it reads `clipOwned` without the lock.
 
+*Deviation (step 3):* `TestRootInstall` in `cmd/flux` fails on this host the same
+way: it sets `PATH=/usr/bin:/bin` and NixOS has no `mktemp` there. Local runs
+add it to `-skip`; CI runs it.
+
 - Go: `make vet` (go vet plus `gofmt -l cmd internal scripts`), `make test`
   (`go test -race ./cmd/... ./internal/... ./scripts/...`); one test:
   `go test -race ./internal/core -run Name`.

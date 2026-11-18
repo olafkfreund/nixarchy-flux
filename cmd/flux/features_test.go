@@ -177,3 +177,20 @@ func TestNewCommandsDeviceEdges(t *testing.T) {
 		t.Errorf("exact ID: %q, exit %d", out, exit)
 	}
 }
+
+func TestClipboardResumeEmptyOwner(t *testing.T) {
+	h := newPhoneHandler()
+	serveRecord(t, h)
+	for _, args := range [][]string{{"--owner", "", "--all"}, {"--owner", ""}} {
+		if _, _, exit := cliProcess(t, append([]string{"clipboard", "resume"}, args...)...); exit != 1 {
+			t.Errorf("%q: exit %d, want 1", args, exit)
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, c := range h.calls {
+		if strings.HasPrefix(c, "clipboard.") {
+			t.Errorf("reached the socket: %s", c)
+		}
+	}
+}
