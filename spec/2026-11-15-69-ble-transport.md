@@ -16,9 +16,11 @@ The owner approved the intent with these decisions, which this spec carries over
 
 **Upstream gate (decision 5).** The only reply on #185 so far is from a
 non-maintainer who agrees with the scope and trust requirements. That is
-not the maintainer's agreement. Implementation, and the `plan/` that
-starts it, wait for the maintainer to agree to this design on #185. Until
-then this spec is a proposal, and the owner decides whether to post it
+not the maintainer's agreement. Implementation, and the approval of the
+`plan/` that starts it, wait for the maintainer to agree to this design on
+#185. A `plan/` may be written and reviewed as `status: draft` before that,
+but no step starts and the plan is not approved until the agreement exists.
+Until then this spec is a proposal, and the owner decides whether to post it
 there.
 
 ## Design
@@ -54,14 +56,30 @@ sizes the link may carry.
   `AcquireNotify` (BlueZ 5.46 and later). Both return a file descriptor, so
   the stream is two fds with kernel backpressure and no D-Bus signal per
   chunk. A new file `internal/lan/ble_linux.go` wraps them in a `net.Conn`
-  (`Read`, `Write`, `Close`, deadlines through `os.File`).
+  (`Read`, `Write`, `Close`, deadlines through `os.File`). The wrapper turns
+  packets into a stream, because the BlueZ fds are, as far as the BlueZ
+  source shows, `SOCK_SEQPACKET` sockets (one read or write is one packet,
+  at most the MTU that `AcquireWrite` and `AcquireNotify` return next to the
+  fd). This is not yet verified on a real adapter; the fake-BlueZ test and
+  the runtime test check it, and the rules below also hold for a plain
+  stream fd:
+  - `Write(p)` splits `p` into packets of at most the write MTU, sends them
+    in order, and loops on a partial or `EAGAIN` send until all of `p` is
+    sent or the deadline passes. It returns the byte count sent.
+  - `Read(p)` reads 1 packet into a buffer of the read MTU and keeps the
+    bytes that do not fit in `p` for the next `Read`, so a small `p` (the
+    TLS record header read of 5 bytes) never loses data and never gets a
+    short packet mistaken for the end of the stream. A zero-length packet is
+    skipped; a closed fd is `io.EOF`.
 - **The phone** writes each chunk with `notifyCharacteristicChanged` and
   waits for `onNotificationSent` before the next one. It reads
   `onCharacteristicWriteRequest` into a bounded queue. A chunk is at most
   ATT MTU minus 3 bytes.
 - **No framing of its own.** A GATT connection is ordered and the link
-  layer retransmits, so the stream is a reliable ordered byte stream. TLS
-  records detect any damage. The stream adds no sequence numbers.
+  layer retransmits, so the stream is a reliable ordered byte stream once
+  the packet rules above (split on write, keep leftovers on read) are
+  applied on both sides. TLS records detect any damage. The stream adds no
+  sequence numbers.
 - BlueZ negotiates the ATT MTU when it connects (up to 517). The link
   works at the default 23 (20 byte chunks) but slowly. Flux logs the MTU,
   and the limits in 5 assume at least 10 KB/s.
@@ -130,13 +148,32 @@ sizes the link may carry.
     does not enforce it. A holder of `ble_key` without the pinned
     certificate is refused.
 - **Nothing identifies the user over the air.**
-  - The advertisement carries a 128-bit Flux service UUID (needed to filter
-    scans) and an 8-byte `tag = HMAC-SHA256(ble_key, "flux-ble-tag" || be64(t / 900 s))[:8]`
-    in service data. No name, no device ID. `setIncludeDeviceName(false)`.
+  - The air data is split over the 2 legacy packets, each at most 31 bytes
+    (the limit is from the Android documentation; the Android prototype
+    checks the real size). The advertisement holds the flags (3 bytes) and
+    the 128-bit Flux service UUID (2 + 16 bytes), 21 bytes, which BlueZ
+    needs to filter scans. The scan response holds the service data: the
+    128-bit UUID as key and an 8-byte
+    `tag = HMAC-SHA256(ble_key, "flux-ble-tag" || be64(t / 900 s))[:8]`,
+    2 + 16 + 8 = 26 bytes. BlueZ scans actively by default, so it asks for
+    the scan response. No name, no device ID. `setIncludeDeviceName(false)`.
+  - One tag in a payload, never 2. With several Bluetooth-enabled paired
+    desktops, the phone rotates the scan response between their tags every
+    2 s (one advertising set, no extra adapter instance), or uses one set
+    for each when the adapter offers them.
   - The tag changes every 15 minutes, and the desktop accepts the windows
-    t-1, t and t+1 (clock skew up to 15 minutes). The phone also restarts
-    its advertisement at each change so that the random address and the tag
-    change together. A stranger cannot link tags across windows without
+    t-1, t and t+1 (clock skew up to 15 minutes). The phone restarts its
+    advertisement at each change and asks for a new random address, so that
+    the address and the tag change together. **This is a goal with a gate,
+    not a fact:** Android does not promise that a restart gives a new
+    address. The first Android step (the prototype) and runtime test 7 record
+    the address across 2 tag windows. If the address does not change, a
+    stranger can follow the phone for as long as the address lasts, whatever
+    the tag does. Then the privacy constraint is not met and the owner
+    decides, before the plan is approved, between a shorter life of the
+    advertisement (it stops at the end of each window and starts again later
+    with a pause) and dropping the feature. The feature stays off by default
+    in either case. A stranger cannot link tags across windows without
     `ble_key`.
   - What stays visible: that some device near the stranger runs Flux (the
     UUID). That does not name or follow anyone. This is accepted.
@@ -145,8 +182,10 @@ sizes the link may carry.
 - **Limits on strangers.** The phone accepts 1 connection at a time (the
   GATT server refuses a second until the first has passed or failed the
   gate), drops a connection that has not passed the gate in 3 s and one
-  that has not finished TLS in 10 s, and reads at most 64 KiB before
-  pairing is checked (existing `maxUnpairedLine`, `tls.go:23-25`). The
+  that has not finished TLS in 10 s. A BLE link reads at most 16 KiB per
+  line from the start, paired or not (see 4); the IP-only
+  `maxUnpairedLine` of 64 KiB (`tls.go:23-25`) does not apply to it, and
+  `SetPaired` (`link.go:67-72`) keeps the 16 KiB limit on a BLE link. The
   desktop connects only to a tag that matches a paired, Bluetooth-enabled
   device, so it never connects to a stranger.
 - **Paired-only is enforced for BLE by new code, not by the old checks.**
@@ -183,19 +222,30 @@ sizes the link may carry.
   `RemoveDevice` on a device it did not create. When the adapter is off
   (`Powered=false`) Flux reports it and does not switch it on.
   `BlueZ` deletes an unbonded temporary device by itself.
-- **The daemon sees a BLE link as the device's link**, so the existing
-  code (`dev.link`, `send`, `featureLinks`, `internal/core/daemon.go:1347-1359`
-  and `internal/core/policies.go:38-48`) keeps working with no new branch.
-  The rules:
+- **The daemon sees a BLE link as the device's link when there is no IP
+  link**, so the existing code (`dev.link`, `send`, `featureLinks`,
+  `internal/core/daemon.go:1347-1359` and `internal/core/policies.go:38-48`)
+  keeps working there. The rules:
   - A BLE link is made only while `dev.link == nil` for a paired,
-    Bluetooth-enabled device, and `Preferred` (`link.go:85`) never prefers
-    a BLE link over an IP link.
+    Bluetooth-enabled device, with one exception: the one device that has
+    an open approval in the "unconfirmed" state (see 5) may get a BLE link
+    next to a live IP link. That link goes into a secondary slot
+    (`dev.bleLink`), not into `dev.link`. `Preferred` (`link.go:85`) never
+    prefers a BLE link over an IP link.
   - When an IP link comes up while a BLE link is the current link, the IP
-    link becomes `dev.link` as `onLink` does today (`daemon.go:957-970`).
+    link becomes `dev.link` as `onLink` does today (`daemon.go:957-970`)
+    and the BLE link moves to `dev.bleLink`.
     The BLE link is not closed while an approval of that device is open,
     and is closed at the end of it (at most `approve_timeout` later). Its
-    answers still reach `approvals.deliver`, which keys on the device and
-    the request ID (`approve.go:436`), not on the link.
+    answers reach `approvals.deliver`, which keys on the device and the
+    request ID (`approve.go:436`), not on the link. But `handlePacket`
+    (`internal/core/handlers.go:19-30`) drops every packet from a link that
+    is not `dev.link`, so it also accepts `flux.approve` of kind `response`,
+    `shown` and `cancel` from `dev.bleLink`, and nothing else.
+  - A BLE-only `dev.link` does not count as a link for dialing IP:
+    `HasLink` (`daemon.go:502-506`), the skip in `provider.go:396` and the
+    `dialKnown` skip at `daemon.go:872` use a new `HasIPLink`, so IP is still
+    found while BLE is up. `HasLink` keeps its meaning for features.
   - `receive` (`daemon.go:1105-1128`) only drops approvals when the link
     that ended was `dev.link`. Because a replaced link is not current, the
     switch from BLE to IP cancels nothing.
@@ -205,10 +255,34 @@ sizes the link may carry.
   switch on the phone. `ble_key` is sent only when both ends have the global
   and the per-device flag on. Turning the global flag off, or revoking the
   Android permission, stops the scan and the advertisement, closes every
-  BLE link, and drops anything queued for BLE (never moved to IP); an open
-  approval then follows the link-lost rule in 5 and falls back to the
-  password. Turning off one device does the same for that device. The key
+  BLE link, and drops anything queued for BLE (never moved to IP). An open
+  approval then follows the "IP fails after `shown`" rule of 5: with a live IP
+  link it goes on over IP and nothing changes for the user; with no link
+  left it is kept until its deadline, as for an IP loss, but no BLE connect
+  is started, so it ends at the password. Turning off one device does the
+  same for that device. The key
   is kept, so turning it on again needs no IP link.
+- **Consent exchange.** Each side tells the other its effective state for
+  this pair in a new packet `flux.ble.state` with `{"enabled":bool}` (new
+  type in `internal/proto/identity.go`, added to `Incoming` and `Outgoing`
+  so older apps never see it). The phone's state is true only when its
+  global switch, its per-computer flag and the Android permission are all
+  on; the desktop's is true when its global `ble` and the per-device `ble`
+  flag are on. It is sent on every IP link after the identity, on every BLE
+  link right after TLS, and again at each change. Each side keeps the
+  peer's last state in memory only, and takes it as `false` until it has
+  seen one on a link since start.
+  - **Admission on the desktop:** the desktop scans for and connects to a
+    device only when its own state is on, the device has a `ble_key`, and
+    the phone's last state is `true`. Having a key is not consent: a kept
+    key with either state off means no scan and no connect.
+  - **Admission on the phone:** it advertises a tag for a desktop only while
+    its own state for that desktop is on, and the gate refuses a hello whose
+    tag belongs to a desktop that is off.
+  - `finishID` for `Transport == "ble"` closes the link when the device's
+    desktop-side flag is off or a `flux.ble.state` with `false` arrives, so
+    a state that changed while the link was being made is honoured. A
+    `flux.ble.state` is in the allow-list of 4.
 - **Config.** `ble = false` in `config.toml` (`internal/config/config.go`,
   next to `approve_timeout`, `config.go:94`), a `ble.enable` IPC call,
   a Bluetooth line in `flux-cli status`, and a switch in the Qt GUI and
@@ -224,6 +298,7 @@ An allow-list on a BLE link, in `Link.Send` and in the receive loop
 queued for IP:
 - `flux.identity` (once, after TLS, as today),
 - `flux.ping`,
+- `flux.ble.state` (not `flux.ble.key`: the key goes only over IP),
 - `flux.pair` with `{"pair":false}` only (an unpair, `pairing.go:195,202-226`,
   so a BLE-only link can still make the peer delete `ble_key` and the pin).
   `{"pair":true}` is dropped: pairing stays IP-only,
@@ -245,7 +320,7 @@ link never has the 16 MiB limit):
 | --- | --- | --- |
 | Any line | 16 KiB read, 16 KiB write | 64 KiB / 16 MiB |
 | Clipboard text | 4 KiB (4096 bytes UTF-8), and the serialized line at most 16 KiB (JSON escaping can expand control characters up to 6 times, so 4096 bytes can exceed 16 KiB) | 256 KiB sent (`share.go:948`), 1 MiB read (`desktop/clipboard.go:30`) |
-| Notification | title and text each cut to 1 KiB by the phone, no icon or large image, line at most 4 KiB | as the phone sends |
+| Notification | title and text each cut to 1 KiB by the phone, no icon or large image, and then the phone shrinks the text until the serialized line is at most 4 KiB (JSON escaping can expand control characters up to 6 times, so two 1 KiB fields can exceed 4 KiB); the desktop drops a longer line | as the phone sends |
 | Approval | request and answer are small (under 2 KiB) | same |
 
 - **Clipboard limit: 4 KiB.** It is "a few KiB" as the owner proposed. At
@@ -259,16 +334,25 @@ link never has the 16 MiB limit):
   same text appears as a toast and in the notification of Flux. The
   receiver also refuses an oversize clip (`handleClipboard`,
   `clipboard.go:520`, gets the transport limit).
-- **Stalls.** The stream has 1 writer queue per link with 2 lanes: approve
-  packets first, everything else second, at most 8 packets and 32 KiB
-  waiting (`maxSendQueue`, `link.go:50`, is 32 MiB today, a BLE link gets
-  its own small value). A full lane drops the oldest notification, never
-  an approval. The stream is newline-delimited JSON and `Link.Send` writes
-  whole serialized lines under `wmu` (`link.go:120-145`), so a packet is
-  never split to let an approval in. An approval waits for the line in
-  flight, at most 16 KiB (about 1.6 s at 10 KB/s), and the lanes only order
-  whole lines. The BLE write deadline is 5 s, not 30 s. Each half-received
-  line has a 5 s read deadline.
+- **Stalls.** The stream has 1 writer queue per link with 2 lanes, each at
+  most 8 packets and 32 KiB waiting (`maxSendQueue`, `link.go:50`, is
+  32 MiB today, a BLE link gets its own small value):
+  - **Control lane, sent first:** `flux.approve`, `flux.identity`,
+    `flux.ble.state` and `flux.pair` (unpair). These are never dropped. A
+    full control lane means the peer or a bug is flooding it, and the link is
+    closed (an approval then follows the "IP fails after `shown`" rule of 5).
+  - **Data lane:** `flux.notification` (and its `cancel`), `flux.clipboard`,
+    `flux.ping`. When it is full, the new packet is queued and the oldest
+    waiting packet of the first kind found in this order is dropped:
+    notification, clipboard, ping (counted and logged once). A clipboard
+    that is dropped this way gets the "did not sync" toast of the clipboard
+    limit below.
+  - The stream is newline-delimited JSON and `Link.Send` writes whole
+    serialized lines under `wmu` (`link.go:120-145`), so a packet is never
+    split to let an approval in. An approval waits for the line in flight,
+    at most 16 KiB (about 1.6 s at 10 KB/s), and the lanes only order whole
+    lines. The BLE write deadline is 5 s, not 30 s. Each half-received line
+    has a 5 s read deadline.
 - **Reconnect bursts.** On a BLE link `requestNotifications`
   (`internal/core/notifications.go:391`) is not sent, and `onLink` does not
   clear `dev.notifications` (`daemon.go:983-986`). So the phone does not
@@ -297,7 +381,7 @@ stay as they are. `fluxd` only carries the request.
   `sudo` starts.
 - **Background delivery.** The helper's `approve.request` call has a 3 s
   timeout (`docs/approve.md:374-376`), but `ApproveRequest` today calls
-  `d.send` before it returns `Started` (`approve.go:338-346`), and a send can
+  `d.send` before it returns `Started` (`approve.go:293`), and a send can
   wait on `wmu` and then up to the write deadline (`link.go:133-143`). So
   `ApproveRequest` registers the request and returns `Started` at once, and
   the send, the BLE connect and every later re-send run in a goroutine under
@@ -310,7 +394,9 @@ stay as they are. `fluxd` only carries the request.
   on a healthy link. So for a Bluetooth-enabled phone, when `shown` has not
   come 3 s after the first send, `fluxd` does not close the IP link. It
   keeps IP, and in addition starts a BLE connect and sends the same request
-  ID over BLE (the "unconfirmed" state). The phone shows 1 prompt per request
+  ID over BLE (the "unconfirmed" state; the BLE link sits in `dev.bleLink`
+  next to the live IP link, the one exception in 3, and it needs the phone
+  to be advertising, see the timeline). The phone shows 1 prompt per request
   ID, and keeps the IDs it has seen until their deadline (also after a
   cancel), so whichever copy arrives first shows it and a late duplicate,
   a second link or a cancelled request never gives a second prompt or brings
@@ -325,23 +411,43 @@ stay as they are. `fluxd` only carries the request.
   when its IP link ends (`dropApprovals`, `approve.go:383`, is skipped); it
   starts a BLE connect if the 5 s rule below allows and waits for the answer
   on any link, until the deadline.
-- **Switch time inside the default 20 s `approve_timeout`** (decision 6):
+- **Switch time inside the default 20 s `approve_timeout`** (decision 6).
+  The rows are targets, and the runtime test measures them:
   - A BLE link already up: the prompt shows within about 1 s (up to about
     3 s behind a 16 KiB line in flight).
   - IP stuck, BLE link up: 3 s (the `shown` wait) plus about 1 s, so about
-    4 s (up to 6 s), and at least 14 s remain for the user.
+    4 s (up to 6 s), and at least 14 s remain for the user. This row holds
+    only when the phone already advertises or is connected, that is, when
+    the phone saw its IP link go down while the desktop still holds a
+    half-dead link. If the IP link is stuck on both sides, the phone does
+    not advertise (it never advertises while IP looks up), no tag is seen,
+    the unconfirmed BLE send cannot connect, and PAM asks for the password
+    (see Risks, accepted for version 1).
   - No BLE link yet, tag seen: at most 8 s to connect (scan hit at most 2 s,
     connect and GATT discovery at most 3 s, TLS 1.3 at most 3 s). The prompt
-    then shows at about 11 s and at least 9 s remain.
+    then shows at about 11 s and at least 9 s remain. With an A2DP transport
+    active there is no scan (see 7), so this row does not apply and PAM
+    asks for the password.
   - `fluxd` starts a connect only when at least 5 s of the wait remain. A
     request is never started again after it ends, and the deadline is the
-    one that `ApproveRequest` set (`approve.go:269-272`), never extended.
-    The `timeout` field of the request sent over BLE is the time that is
-    left, so the phone closes the prompt at the same moment.
+    one that `ApproveRequest` set (`approve.go:282-284`), never extended.
+    The request sent over BLE is the same packet as the first send, with
+    the same `id`, fields and `timeout`. It must not carry a reduced
+    `timeout`: the Android side clamps the field to at least 5 s
+    (`ApproveMessage.kt:110`), treats a same-ID request with different
+    fields as a conflict that closes the open request (`admit()`,
+    `ApproveMessage.kt:139-143`), and starts its expiry at receipt
+    (`Approvals.kt:75`). An identical copy is a `Repeat` and changes
+    nothing. The desktop deadline is the one that counts: `fluxd` sends
+    `cancel` over every link at its deadline, drops any answer after it, and
+    the helper's own nonce and time checks refuse a late one. So a prompt
+    that starts late on the phone (a copy that arrived late over BLE) can
+    outlive the desktop deadline by the delay of that copy, and the cancel
+    closes it.
   - A switch that does not make it in time is a timeout, and PAM asks for
     the password.
 - **Cancel and unpair.** A cancel goes over whichever link is current, and
-  also over the old BLE link while it is still open. An unpair closes every
+  also over `dev.bleLink` while it is open. An unpair closes every
   link of the device, including the BLE one, and deletes `ble_key`
   (`docs/architecture.md:84`, `pairing.go` calls `dropApprovals`
   at `161,218,309,377,411`, unchanged). The phone answers on the link that
@@ -357,9 +463,12 @@ stay as they are. `fluxd` only carries the request.
 ### 6. Android
 
 - **Manifest** (`android/app/src/main/AndroidManifest.xml:5-49`): add
-  `BLUETOOTH_ADVERTISE` and `BLUETOOTH_CONNECT` with
-  `android:minSdkVersion="31"` semantics (declared with `maxSdkVersion`
-  none; the feature is only offered on API 31+), and
+  `BLUETOOTH_ADVERTISE` and `BLUETOOTH_CONNECT`, declared plainly with no
+  SDK attribute (`<uses-permission>` has no `minSdkVersion`; Android 10 and
+  11 ignore a permission they do not know, as the manifest already does for
+  `POST_NOTIFICATIONS`). The feature is gated in code on
+  `Build.VERSION.SDK_INT >= 31`, and the permission request and the switch
+  exist only there. Also add
   `<uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>`
   (next to `manifest:51-53`). No `BLUETOOTH_SCAN`, no location, no legacy
   `BLUETOOTH` or `BLUETOOTH_ADMIN`.
@@ -372,21 +481,23 @@ stay as they are. `fluxd` only carries the request.
   autoClose)` over a `java.net.Socket` subclass whose streams are the GATT
   stream, so a new `net/BleBackend.kt` produces a `Link` through the same
   `LanBackend.finish` (`LanBackend.kt:420`) as TCP. This is the one
-  piece that is not proven; step 1 of the plan is a prototype of it (see
-  Risks). The fall-back is a loopback `ServerSocket` bridge on 127.0.0.1
+  piece that is not proven; the first Android step of the plan is a
+  prototype of it, before `BleBackend.kt` (see Risks and 8). The fall-back is a loopback `ServerSocket` bridge on 127.0.0.1
   with a random port and a one-time token, the pattern `android/tsnet`
   already uses to forward Flux ports.
 - **Battery.** No advertising while an IP link to a paired desktop is up.
   When it is down: `ADVERTISE_MODE_LOW_POWER` (about 1 s interval), no
-  scanning, an advertisement for each Bluetooth-enabled paired desktop (at
-  most 2 tags in 1 payload). It runs for 15 minutes after the IP link is
+  scanning, an advertisement for each Bluetooth-enabled paired desktop (1
+  tag in a payload, rotated as in 2). It runs for 15 minutes after the IP link is
   lost without a BLE connection, then 1 minute in every 15 minutes
   (an inexact alarm), and fully again on screen unlock, on opening Flux, and
   on a change of the default network. So a computer that is out of range
   for hours costs about 1/15 of the low-power duty. While a BLE link is up
   there is no advertising.
-- Notification text limits in 4 are applied where `FluxService` builds the
-  `flux.notification` packet for a BLE link.
+- Notification text limits in 4 (the 1 KiB cuts, then the cut after
+  serializing to a 4 KiB line) are applied where `NotificationSync.kt:306-320`
+  builds the `Packet(Types.NOTIFICATION, ...)` for a BLE link, not in
+  `FluxService`.
 
 ### 7. Linux packaging and supported setups
 
@@ -412,8 +523,10 @@ stay as they are. `fluxd` only carries the request.
   paired phone has no IP link and no BLE link. While an A2DP transport is
   active (`MediaTransport1.State == active` under the adapter) the desktop
   does not start a scan and instead waits; a BLE link that already exists
-  is kept. When it is in use, there is no scan at all. This is the
-  mitigation for the known dropouts on single-radio adapters.
+  is kept. So while audio plays there is no scan at all. This is the
+  mitigation for the known dropouts on single-radio adapters, and it means a
+  BLE link that is not yet up cannot start during audio (the approval
+  falls back to the password).
 
 ### 8. Documents and tests
 
@@ -426,10 +539,15 @@ stay as they are. `fluxd` only carries the request.
   parts come last, in the same PR. The protocol version stays 8: the new type and
   kind are ignored by older apps (the intent's "no change to the IP
   protocol").
-- Plan steps are not set here. Likely order: prototype the Android TLS over
-  GATT; then `ble.go` (tag, gate, allow-list, limits) with tests; then BlueZ
-  in `ble_linux.go`; then the daemon rules and the approval timeline; then
-  Android service and settings; then docs and the Nix and Arch parts.
+- Plan steps are not set here. Order: the Go side first (`ble.go` with tag,
+  gate, allow-list and limits, and tests; the BLE `Link` and `finishID`;
+  then the daemon rules and the approval timeline; then BlueZ in
+  `ble_linux.go`), then the Android prototype of TLS over GATT (needs a real
+  phone), then the Android link code, service and settings, then docs and
+  the Nix and Arch parts. The Go steps do not depend on the prototype. The
+  prototype is the only unproven piece, so the owner may move it to the
+  front; a failed prototype switches `BleBackend.kt` to the loopback bridge
+  and never changes the design.
 
 ## Alternatives rejected
 
@@ -479,13 +597,15 @@ stay as they are. `fluxd` only carries the request.
 - **TLS over a custom `Socket` on Android (Conscrypt).** Not yet shown to
   work on all Android 12 to 16 builds. Phone makers patch Conscrypt. The
   loopback bridge is the fallback (it exposes a loopback port, so it needs
-  the token and a short life). Prove it on a real phone first.
+  the token and a short life). Prove it on a real phone before the Android
+  link code is written.
 - **BlueZ differences.** `AcquireWrite` and `AcquireNotify` behave
   differently across BlueZ 5.46 to 5.7x. Some adapters (and their firmware)
   cap LE connections or scanning while Bluetooth audio runs. Flux's scan
   only runs when needed, but a dropout on a single-radio adapter can still
   happen on the first scan. This affects Linux desktops that use Bluetooth
-  headphones, and is why the test host plays A2DP audio during the test.
+  headphones, and is why the runtime test starts A2DP audio while a BLE
+  link is already up (see Verification).
 - **Phone makers kill background Bluetooth.** Some vendors stop advertising
   from a service when the battery saver is on. Flux says so in the settings,
   and falls back to the password. The approval is never blocked by it.
@@ -522,7 +642,19 @@ stay as they are. `fluxd` only carries the request.
 
 - **Go unit tests (no hardware, `go test ./internal/lan ./internal/core ./internal/proto`):**
   - tag: same key and window give the same tag, windows t-1, t, t+1 match,
-    others do not, no field reveals the ID;
+    others do not, no field reveals the ID; the advertisement is at most 31
+    bytes and the scan response at most 31 bytes, with 1 tag each;
+  - stream wrapper (on a `SOCK_SEQPACKET` socketpair, and on a stream pair):
+    a write larger than the MTU arrives whole and in order, a read into a
+    5-byte buffer keeps the rest of the packet, a zero-length packet is
+    skipped, a deadline ends a blocked read and write;
+  - consent: a kept key with either state off gives no scan, no connect and
+    no advertised tag; a `flux.ble.state` of `false` closes a BLE link; no
+    state seen since start counts as off;
+  - queue: a full data lane drops the oldest notification, then clipboard,
+    then ping, and keeps the new packet; a full control lane closes the link;
+    identity, unpair and approve are never dropped; a lane of only clipboard
+    packets still accepts a new one;
   - hello gate: a wrong HMAC, a captured hello replayed on the same tag and
     on another tag (the new challenge differs), a spoofed tag, a 3 s silence
     and an oversize hello are all closed before any TLS byte; on a BLE link
@@ -538,7 +670,11 @@ stay as they are. `fluxd` only carries the request.
     notification, a burst of 50 notifications shows at most 10;
   - approvals: a switch from IP to BLE keeps the request ID and the deadline
     and shows 1 prompt, a late duplicate and a cancelled ID do not come back,
-    `shown` missing at 3 s adds a BLE send and keeps IP, a late prompt on a
+    `shown` missing at 3 s adds a BLE send and keeps IP, the BLE send is the
+    same packet (same `timeout`) and the Android `admit()` gives `Repeat`,
+    not `Conflict`, a cancel is sent at the desktop deadline, turning
+    Bluetooth off with an open approval keeps it on a live IP link and keeps
+    it to the deadline with no link, a late prompt on a
     healthy IP link and a loss of IP after `shown` give 1 prompt and 1
     answer, `ApproveRequest` returns `Started` inside 3 s with a blocked
     link, an IP link that returns during
@@ -569,14 +705,69 @@ stay as they are. `fluxd` only carries the request.
   4. `sudo true` with the phone locked, screen off, Flux in the background:
      the prompt shows, the fingerprint unlocks it, inside 20 s. Repeat with
      the IP link made stuck (block the traffic with the firewall, do not
-     close it) and measure the time to the prompt. Repeat with the phone
+     close it) and measure the time to the prompt; the result may be the
+     password if the phone does not advertise (see 5). Repeat with the phone
      out of range, with Bluetooth off, and with Flux force-stopped: each
      asks for the password.
   5. Turn Wi-Fi on while a request is open: 1 prompt, answered, not
      cancelled. Unpair during a BLE link: the prompt closes.
-  6. Play A2DP audio during steps 2 to 4 and listen for dropouts.
+  6. Run steps 2 to 4 first with no audio. Then, with a BLE link already
+     up, start A2DP audio and listen for dropouts: the existing link is
+     kept and no scan starts. With audio playing and no BLE link, check
+     that no scan starts and `sudo` asks for the password.
   7. Capture the air with a sniffer or `btmon` for a day: no name, no ID, the
-     tag changes every 15 minutes.
+     tag changes every 15 minutes, and the random address changes with it
+     (the gate of 2; if it does not, stop and take the decision there).
   8. Measure the phone battery for 2 hours with the computer out of range.
 - **Docs:** the 7 files in 8 are changed in the same PR, and the review
   checks them against `plan/`.
+
+## Revised after review (2026-11-18)
+
+Findings that changed this spec: a packet-to-stream rule for the BlueZ
+`SOCK_SEQPACKET` fds (1); the 31-byte air layout, 1 tag per payload (2); the
+address-rotation gate (3); the `flux.ble.state` consent exchange and
+admission (4); an unchanged same-`timeout` approval copy and the desktop
+deadline as the authority (5); one rule for Bluetooth off during an open
+approval (6); the queue lanes and their full-lane policy (7); corrected code
+references (8). The BlueZ `SOCK_SEQPACKET` claim, the 31-byte limit and the
+Android address behaviour were not verified here; each has a test above.
+
+## Settled while planning (2026-11-18)
+
+The draft plan listed 8 contradictions in this spec. Each is settled above
+with the plan's provisional choice, unless noted. The owner confirms or
+changes them before the plan is approved.
+
+1. **Plan gate.** A `plan/` may exist as `status: draft` now. Its approval
+   and every implementation step wait for the maintainer's agreement on
+   bjarneo/flux #185. The upstream gate is unchanged.
+2. **BLE link only while `dev.link == nil` vs the `shown` fallback.** The
+   rule holds, with one exception: the one device with an open
+   "unconfirmed" approval may get a BLE link next to a live IP link, in a
+   secondary slot `dev.bleLink`. The code shows the spec was incomplete
+   here: `handlePacket` (`handlers.go:19-30`) drops packets from any link
+   that is not `dev.link`, so `dev.bleLink` must be accepted for approve
+   `response`, `shown` and `cancel`, and `HasIPLink` is needed so a BLE-only
+   link does not stop IP dialing (see 3).
+3. **Phone does not advertise while IP is up vs a connect for a stuck IP
+   link.** The phone's battery rule wins (the intent). The "IP stuck" rows
+   are targets: they work only when the phone saw its IP link go down, and
+   a link stuck on both sides ends at the password (Risks, accepted for
+   version 1). The runtime test measures it.
+4. **A2DP: no scan vs the runtime test.** Section 7 stands (the intent wants
+   no audio dropouts). The runtime test runs steps 2 to 4 without audio,
+   then starts audio with a BLE link already up. With audio and no BLE link
+   there is no scan and the approval asks for the password.
+5. **Step order.** Go side first, then the Android prototype (first Android
+   step, before `BleBackend.kt`), as in the plan. The owner may move the
+   prototype to the front. A failed prototype uses the loopback bridge.
+6. **64 KiB before pairing vs 16 KiB on BLE.** A BLE link reads 16 KiB per
+   line from the start, and `SetPaired` keeps that. `maxUnpairedLine` is
+   IP-only.
+7. **Notification line limit.** The phone cuts title and text to 1 KiB, then
+   shrinks the text until the serialized line is at most 4 KiB. The desktop
+   drops a longer line.
+8. **Manifest wording.** The two permissions are declared plainly, as the
+   manifest already does for `POST_NOTIFICATIONS`. The feature is gated in
+   code on `SDK_INT >= 31`.
