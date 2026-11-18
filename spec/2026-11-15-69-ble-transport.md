@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 69
 intent: intent/2026-11-15-69-ble-transport.md
 ---
