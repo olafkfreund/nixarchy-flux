@@ -808,7 +808,7 @@ func TestPausedText(t *testing.T) {
 	if len(d.clipboard) != 1 || d.clipboard[0].Text != "before" || d.content.lastClip != "" || !d.lastLocalClip.Equal(local) || !d.lastClipAt.After(at) {
 		t.Fatalf("history %+v, last text %q", d.clipboard, d.content.lastClip)
 	}
-	if err := d.ResumeClipboard(); err != nil {
+	if err := d.ResumeClipboard(false); err != nil {
 		t.Fatal(err)
 	}
 	d.onLocalClipboard("after", afterGrace(d))
@@ -841,7 +841,7 @@ func TestLateRecordsAfterResume(t *testing.T) {
 	before := desktop.BootTime()
 	_ = d.PauseClipboard()
 	paused := desktop.BootTime()
-	_ = d.ResumeClipboard()
+	_ = d.ResumeClipboard(false)
 	for _, at := range []time.Duration{before, paused, d.resumedAt, d.resumedAt + resumeGrace} {
 		d.onLocalClipboard(fmt.Sprint("late ", at), at)
 		d.onLocalImage(testPNG(1), "image/png", at)
@@ -849,7 +849,7 @@ func TestLateRecordsAfterResume(t *testing.T) {
 	grace1 := afterGrace(d)
 	time.Sleep(2 * time.Millisecond)
 	_ = d.PauseClipboard()
-	_ = d.ResumeClipboard()
+	_ = d.ResumeClipboard(false)
 	// grace1 is after cycle 1's grace but inside cycle 2's.
 	for _, at := range []time.Duration{paused, grace1} {
 		d.onLocalClipboard("first cycle", at)
@@ -879,7 +879,7 @@ func TestConnectAfterPause(t *testing.T) {
 	d.mu.Lock()
 	d.content.lastClip = ""
 	d.mu.Unlock()
-	_ = d.ResumeClipboard()
+	_ = d.ResumeClipboard(false)
 	d.sendConnectClipboard(onDesk)
 	d.onLocalClipboard("after", afterGrace(d))
 	d.sendConnectClipboard(onDesk)
@@ -897,7 +897,7 @@ func TestPauseAfterImageAdmission(t *testing.T) {
 			if stage == "image" {
 				_ = d.PauseClipboard()
 				if resume {
-					_ = d.ResumeClipboard()
+					_ = d.ResumeClipboard(false)
 				}
 			}
 		}
@@ -922,7 +922,7 @@ func TestPauseBetweenTextLinks(t *testing.T) {
 			if n++; n == 2 {
 				// A pause and a resume: only the generation shows the pause.
 				_ = d.PauseClipboard()
-				_ = d.ResumeClipboard()
+				_ = d.ResumeClipboard(false)
 			}
 		}
 	}
@@ -940,33 +940,42 @@ func TestPauseBetweenTextLinks(t *testing.T) {
 // automatic image. The phone never fetches the payload, so only the pause
 // ends the send well before the 20 seconds of the payload wait.
 func TestPauseDuringImageSend(t *testing.T) {
-	onDesk, onPhone, _, phoneID := linkPair(t, t.Context())
-	d, _ := clipDaemon(t, true)
-	d.devices[phoneID] = &Device{ID: phoneID, Name: "phone", Paired: true, link: onDesk, Incoming: []string{proto.TypeFluxClipboardImage}}
-	offered, ended := make(chan struct{}), make(chan struct{})
-	go onPhone.Receive(func(p *proto.Packet) {
-		if p.Type == proto.TypeFluxClipboardImage {
-			close(offered)
-		}
-	})
-	d.clipHook = func(stage string) {
-		if stage == "image-end" {
-			close(ended)
-		}
-	}
-	d.onLocalImage(testPNG(3), "image/png", desktop.BootTime())
-	wait(t, offered, "the phone gets the offer")
-	select {
-	case <-ended:
-		t.Fatal("the send ended before the pause")
-	default:
-	}
-	if err := d.PauseClipboard(); err != nil {
-		t.Fatal(err)
-	}
-	wait(t, ended, "the pause ends the send")
-	if d.clipSend != nil {
-		t.Fatal("the send is still registered")
+	for _, owned := range []bool{false, true} {
+		t.Run(fmt.Sprint("owned=", owned), func(t *testing.T) {
+			onDesk, onPhone, _, phoneID := linkPair(t, t.Context())
+			d, _ := clipDaemon(t, true)
+			d.devices[phoneID] = &Device{ID: phoneID, Name: "phone", Paired: true, link: onDesk, Incoming: []string{proto.TypeFluxClipboardImage}}
+			offered, ended := make(chan struct{}), make(chan struct{})
+			go onPhone.Receive(func(p *proto.Packet) {
+				if p.Type == proto.TypeFluxClipboardImage {
+					close(offered)
+				}
+			})
+			d.clipHook = func(stage string) {
+				if stage == "image-end" {
+					close(ended)
+				}
+			}
+			d.onLocalImage(testPNG(3), "image/png", desktop.BootTime())
+			wait(t, offered, "the phone gets the offer")
+			select {
+			case <-ended:
+				t.Fatal("the send ended before the pause")
+			default:
+			}
+			if owned {
+				if _, err := d.PauseClipboardOwned("job", 3600); err != nil {
+					t.Fatal(err)
+				}
+				defer d.ResumeClipboardOwned("job")
+			} else if err := d.PauseClipboard(); err != nil {
+				t.Fatal(err)
+			}
+			wait(t, ended, "the pause ends the send")
+			if d.clipSend != nil {
+				t.Fatal("the send is still registered")
+			}
+		})
 	}
 }
 
@@ -1082,7 +1091,7 @@ func TestClipSendKinds(t *testing.T) {
 	if mctx.Err() != nil {
 		t.Fatal("the pause cancelled a manual image")
 	}
-	_ = d.ResumeClipboard()
+	_ = d.ResumeClipboard(false)
 	if _, _, ok := d.newClipSend(true, d.clipGen-1); ok || mctx.Err() != nil {
 		t.Fatal("a stale automatic send registered or cancelled the manual one")
 	}
@@ -1119,10 +1128,10 @@ func TestPauseSurvivesSettings(t *testing.T) {
 func TestResumeWhileSyncing(t *testing.T) {
 	d, _ := clipDaemon(t, true)
 	_ = d.PauseClipboard()
-	_ = d.ResumeClipboard()
+	_ = d.ResumeClipboard(false)
 	first := d.resumedAt
 	time.Sleep(2 * time.Millisecond)
-	_ = d.ResumeClipboard()
+	_ = d.ResumeClipboard(false)
 	if d.resumedAt != first {
 		t.Fatalf("resumedAt moved from %v to %v", first, d.resumedAt)
 	}
@@ -1148,10 +1157,10 @@ func TestClipPauseMarker(t *testing.T) {
 	if !e.clipPaused {
 		t.Fatal("a restart resumed")
 	}
-	if err := d.ResumeClipboard(); err != nil {
+	if err := d.ResumeClipboard(false); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.ResumeClipboard(); err != nil {
+	if err := d.ResumeClipboard(false); err != nil {
 		t.Fatal("a second resume:", err)
 	}
 	// A marker that can't be read fails closed.
@@ -1178,10 +1187,10 @@ func TestClipPauseMarker(t *testing.T) {
 		t.Fatalf("pause in a read-only folder: %v, paused %v", err, d.clipPaused)
 	}
 	_ = os.Chmod(ro, 0o700)
-	_ = d.ResumeClipboard()
+	_ = d.ResumeClipboard(false)
 	_ = d.PauseClipboard()
 	_ = os.Chmod(ro, 0o500)
-	if err := d.ResumeClipboard(); errCode(err) != "not_saved" || d.clipPaused {
+	if err := d.ResumeClipboard(false); errCode(err) != "not_saved" || d.clipPaused {
 		t.Fatalf("resume in a read-only folder: %v, paused %v", err, d.clipPaused)
 	}
 }
@@ -1198,7 +1207,7 @@ func TestClipPauseRace(t *testing.T) {
 			if i%2 == 0 {
 				_ = d.PauseClipboard()
 			} else {
-				_ = d.ResumeClipboard()
+				_ = d.ResumeClipboard(false)
 			}
 		}()
 	}
@@ -1218,7 +1227,7 @@ func TestClipPauseHeadless(t *testing.T) {
 	if err := d.PauseClipboard(); err != nil || !d.clipPaused {
 		t.Fatal(err)
 	}
-	if err := d.ResumeClipboard(); err != nil || d.clipPaused {
+	if err := d.ResumeClipboard(false); err != nil || d.clipPaused {
 		t.Fatal(err)
 	}
 }
@@ -1288,7 +1297,7 @@ func TestSnapshotClipboardPaused(t *testing.T) {
 		if want {
 			_ = d.PauseClipboard()
 		} else {
-			_ = d.ResumeClipboard()
+			_ = d.ResumeClipboard(false)
 		}
 		var s struct {
 			Paused   *bool          `json:"clipboardPaused"`
@@ -1312,4 +1321,180 @@ func TestCallClipboardPause(t *testing.T) {
 	if _, err := d.Call(context.Background(), "clipboard.resume", nil); err != nil || d.clipPaused {
 		t.Fatal(err)
 	}
+}
+
+func testPauseUnit(t *testing.T) {
+	t.Helper()
+	old := pauseUnit
+	pauseUnit = time.Millisecond
+	t.Cleanup(func() { pauseUnit = old })
+}
+
+func TestOwnedPauseExpiryAndMarker(t *testing.T) {
+	testPauseUnit(t)
+	d, _ := clipDaemon(t, true)
+	path := filepath.Join(t.TempDir(), "clipboard-paused")
+	d.loadClipPause(path)
+	if _, err := d.PauseClipboardOwned("job", 30); err != nil || !d.clipPaused {
+		t.Fatalf("owned pause: %v, paused %v", err, d.clipPaused)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned pause wrote a marker: %v", err)
+	}
+	waitFor(t, "owned pause expiry", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return !d.clipPaused && len(d.clipOwned) == 0
+	})
+	if d.resumedAt == 0 {
+		t.Fatal("expiry did not start the resume grace")
+	}
+	if err := d.PauseClipboard(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.PauseClipboardOwned("job", 30); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _ := clipDaemon(t, true)
+	fresh.loadClipPause(path)
+	if !fresh.clipPlain || len(fresh.clipOwned) != 0 || !fresh.clipPaused {
+		t.Fatal("restart did not restore only the plain pause")
+	}
+	if err := d.ResumeClipboard(false); err != nil || !d.clipPaused || d.clipPlain {
+		t.Fatalf("plain resume ended owned pause: %v", err)
+	}
+	d.ResumeClipboardOwned("job")
+	if d.clipPaused {
+		t.Fatal("owned resume kept the last pause")
+	}
+}
+
+func TestOwnedPauseLastEndAndForce(t *testing.T) {
+	testPauseUnit(t)
+	d, _ := clipDaemon(t, true)
+	if err := d.PauseClipboard(); err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range []string{"a", "b"} {
+		if _, err := d.PauseClipboardOwned(owner, 200); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.ResumeClipboardOwned("a")
+	if !d.clipPaused || d.resumedAt != 0 {
+		t.Fatal("first owner ended the pause or moved the grace")
+	}
+	if err := d.ResumeClipboard(false); err != nil || !d.clipPaused || d.resumedAt != 0 {
+		t.Fatalf("plain resume ended an owner: %v", err)
+	}
+	d.ResumeClipboardOwned("missing")
+	if !d.clipPaused || d.resumedAt != 0 {
+		t.Fatal("unknown owner changed the pause")
+	}
+	d.ResumeClipboardOwned("b")
+	if d.clipPaused || d.resumedAt == 0 {
+		t.Fatal("last owner did not end the pause")
+	}
+	grace := d.resumedAt
+	d.ResumeClipboardOwned("b")
+	if d.resumedAt != grace {
+		t.Fatal("second resume moved the grace")
+	}
+	for _, owner := range []string{"a", "b"} {
+		if _, err := d.PauseClipboardOwned(owner, 200); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.ResumeClipboard(true); err != nil || d.clipPaused || len(d.clipOwned) != 0 {
+		t.Fatalf("force resume left an owner: %v", err)
+	}
+}
+
+func TestOwnedPauseRenewalAndStaleTimer(t *testing.T) {
+	// Real one-second unit: no timer fires mid-test, so the unlocked map reads are safe.
+	d, _ := clipDaemon(t, true)
+	first, err := d.PauseClipboardOwned("job", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq := d.clipOwned["job"].seq
+	second, err := d.PauseClipboardOwned("job", 200)
+	if err != nil || !second.After(first) {
+		t.Fatalf("renewal did not replace expiry: %v, %v <= %v", err, second, first)
+	}
+	d.expireOwned("job", seq)
+	if !d.clipPaused || d.clipOwned["job"].seq == seq {
+		t.Fatal("stale timer ended renewed pause")
+	}
+	if _, err := d.PauseClipboardOwned("job", pauseCapSecs); err != nil {
+		t.Fatal(err)
+	}
+	e := d.clipOwned["job"]
+	if !e.until.Equal(e.first.Add(time.Duration(pauseCapSecs) * pauseUnit)) {
+		t.Fatal("renewal exceeded the total owner cap")
+	}
+	seq = e.seq
+	d.ResumeClipboardOwned("job")
+	d.expireOwned("job", seq)
+	if d.clipPaused {
+		t.Fatal("resumed timer changed pause state")
+	}
+	if _, err := d.PauseClipboardOwned("job", 100); err != nil {
+		t.Fatal(err)
+	}
+	d.expireOwned("job", seq)
+	if !d.clipPaused {
+		t.Fatal("old timer ended a new pause")
+	}
+	d.ResumeClipboardOwned("job")
+}
+
+func TestOwnedPauseOwnerLimit(t *testing.T) {
+	testPauseUnit(t)
+	d, _ := clipDaemon(t, true)
+	defer d.ResumeClipboard(true)
+	for i := range 8 {
+		if _, err := d.PauseClipboardOwned(fmt.Sprint(i), 1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.PauseClipboardOwned("ninth", 1000); errCode(err) != "too_many" {
+		t.Fatalf("ninth owner: %v", err)
+	}
+	if _, err := d.PauseClipboardOwned("0", 1000); err != nil {
+		t.Fatalf("renewal at limit: %v", err)
+	}
+}
+
+func TestOwnerFromRaw(t *testing.T) {
+	for _, raw := range []json.RawMessage{
+		nil, []byte(`""`), []byte(`"` + strings.Repeat("a", 65) + `"`),
+		{'"', 0xff, '"'}, []byte(`"\ud800"`), []byte(`"\n"`),
+		[]byte(`"�"`), []byte(`null`),
+	} {
+		if _, err := ownerFromRaw(raw); errCode(err) != "bad_params" {
+			t.Errorf("%q: %v", raw, err)
+		}
+	}
+	if owner, err := ownerFromRaw([]byte(`"nixi:42"`)); err != nil || owner != "nixi:42" {
+		t.Fatalf("valid owner %q: %v", owner, err)
+	}
+}
+
+func TestOwnedPauseClearsAndStopsAutoSend(t *testing.T) {
+	testPauseUnit(t)
+	d, _ := clipDaemon(t, true)
+	d.content.lastClip = "before"
+	ctx, cancel, ok := d.newClipSend(true, d.clipGen)
+	defer cancel()
+	if !ok {
+		t.Fatal("automatic image did not start")
+	}
+	if _, err := d.PauseClipboardOwned("job", 100); err != nil {
+		t.Fatal(err)
+	}
+	if d.content.lastClip != "" || ctx.Err() == nil || d.clipSend != nil {
+		t.Fatal("owned pause kept text or automatic image send")
+	}
+	d.ResumeClipboardOwned("job")
 }

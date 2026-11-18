@@ -351,7 +351,7 @@ func (d *Daemon) Call(ctx context.Context, method string, raw json.RawMessage) (
 	case "clipboard.pause":
 		return ok, d.PauseClipboard()
 	case "clipboard.resume":
-		return ok, d.ResumeClipboard()
+		return ok, d.ResumeClipboard(false)
 	case "transfer.cancel":
 		return ok, d.CancelTransfer(p.ID)
 	case "transfer.open":

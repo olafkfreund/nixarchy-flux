@@ -110,6 +110,13 @@ pauses are lost on restart, accepted), 8 = A (8 owners, 1 h total per owner).
 
 ## Real checks (from the Makefile)
 
+*Deviation (step 1):* on this NixOS host the full `go test -race ./internal/core`
+fails 7 recorder/speaker tests and `TestBrowseDocumentsSymlinkToVisibleRoot` on
+clean `master` too (`fakeRecorder` hard-codes `/usr/bin/touch`, `sleep`, `kill`).
+Local runs skip exactly those with `-skip`; CI runs the whole package.
+`TestOwnedPauseRenewalAndStaleTimer` uses the real pause unit (Codex review),
+so no timer fires while it reads `clipOwned` without the lock.
+
 - Go: `make vet` (go vet plus `gofmt -l cmd internal scripts`), `make test`
   (`go test -race ./cmd/... ./internal/... ./scripts/...`); one test:
   `go test -race ./internal/core -run Name`.
