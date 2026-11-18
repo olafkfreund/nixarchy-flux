@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 77
 spec: spec/2026-11-18-77-owned-clipboard-pause.md
 coders:
