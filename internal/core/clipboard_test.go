@@ -1300,15 +1300,90 @@ func TestSnapshotClipboardPaused(t *testing.T) {
 			_ = d.ResumeClipboard(false)
 		}
 		var s struct {
-			Paused   *bool          `json:"clipboardPaused"`
+			Paused *bool `json:"clipboardPaused"`
+			Pauses []struct {
+				Owner   string
+				Expires *int64
+			} `json:"clipboardPauses"`
 			Settings map[string]any `json:"settings"`
 		}
 		if err := json.Unmarshal(d.Snapshot(), &s); err != nil {
 			t.Fatal(err)
 		}
-		if s.Paused == nil || *s.Paused != want || s.Settings["clipboardPaused"] != nil {
+		if s.Paused == nil || *s.Paused != want || s.Settings["clipboardPaused"] != nil || (len(s.Pauses) == 1) != want {
 			t.Fatalf("state %+v", s)
 		}
+	}
+}
+
+// clipboardPauses is always an array: owned pauses sorted, then the plain one.
+func TestSnapshotClipboardPauses(t *testing.T) {
+	testPauseUnit(t)
+	pauseUnit = time.Second
+	d := testDaemon()
+	if !strings.Contains(string(d.Snapshot()), `"clipboardPauses":[]`) {
+		t.Fatalf("not an empty array: %s", d.Snapshot())
+	}
+	defer d.ResumeClipboard(true)
+	_, _ = d.PauseClipboardOwned("b", 100)
+	_, _ = d.PauseClipboardOwned("a", 100)
+	_ = d.PauseClipboard()
+	var s struct {
+		Pauses []struct {
+			Owner   string
+			Expires *int64
+		} `json:"clipboardPauses"`
+	}
+	if err := json.Unmarshal(d.Snapshot(), &s); err != nil || len(s.Pauses) != 3 {
+		t.Fatalf("%v %+v", err, s)
+	}
+	if s.Pauses[0].Owner != "a" || s.Pauses[1].Owner != "b" || s.Pauses[0].Expires == nil || s.Pauses[2].Owner != "" || s.Pauses[2].Expires != nil {
+		t.Fatalf("%+v", s.Pauses)
+	}
+}
+
+// The owned methods, their bounds, and the plain methods refusing owner/expires.
+func TestCallClipboardPauseOwned(t *testing.T) {
+	d := testDaemon()
+	call := func(method, raw string) (any, error) {
+		return d.Call(context.Background(), method, json.RawMessage(raw))
+	}
+	defer d.ResumeClipboard(true)
+	res, err := call("clipboard.pauseOwned", `{"owner":"job","expires":60}`)
+	if m, _ := res.(map[string]any); err != nil || m["expires"].(int64) < time.Now().Unix()+55 || !d.clipPaused {
+		t.Fatalf("%v %v", res, err)
+	}
+	d.mu.Lock()
+	ps, until := d.clipPausesLocked(), d.clipOwned["job"].until.Unix()
+	d.mu.Unlock()
+	if len(ps) != 1 || ps[0]["expires"] != until {
+		t.Fatalf("snapshot expiry %v, want %d", ps, until)
+	}
+	for _, raw := range []string{`{"owner":"job","expires":0}`, `{"owner":"job","expires":-1}`, `{"owner":"job"}`,
+		`{"owner":"job","expires":3601}`, `{"owner":"job","expires":null}`, `{"expires":5}`, `{"owner":"","expires":5}`} {
+		if _, err := call("clipboard.pauseOwned", raw); errCode(err) != "bad_params" {
+			t.Errorf("%s: %v", raw, err)
+		}
+	}
+	if _, err := call("clipboard.resumeOwned", `{}`); errCode(err) != "bad_params" {
+		t.Errorf("resumeOwned without owner: %v", err)
+	}
+	for _, m := range []string{"clipboard.pause", "clipboard.resume"} {
+		for _, raw := range []string{`{"owner":"x"}`, `{"expires":0}`, `{"owner":null}`} {
+			if _, err := call(m, raw); errCode(err) != "bad_params" {
+				t.Errorf("%s %s: %v", m, raw, err)
+			}
+		}
+	}
+	if _, err := call("clipboard.resume", `{}`); err != nil || !d.clipPaused {
+		t.Fatalf("resume without force ended the owned pause: %v", err)
+	}
+	if _, err := call("clipboard.resume", `{"force":true}`); err != nil || d.clipPaused {
+		t.Fatalf("force: %v", err)
+	}
+	_, _ = call("clipboard.pauseOwned", `{"owner":"job","expires":60}`)
+	if _, err := call("clipboard.resumeOwned", `{"owner":"job"}`); err != nil || d.clipPaused {
+		t.Fatalf("resumeOwned: %v", err)
 	}
 }
 

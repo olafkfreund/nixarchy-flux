@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"sort"
@@ -177,6 +178,7 @@ func (d *Daemon) Snapshot() json.RawMessage {
 		"update":          d.updateViewLocked(),
 		"clipboard":       clip,
 		"clipboardPaused": d.clipPaused,
+		"clipboardPauses": d.clipPausesLocked(),
 		"transfers":       transfers,
 		"commands":        commands,
 		"settings": map[string]any{
@@ -256,7 +258,37 @@ type params struct {
 	Reset     bool            `json:"reset"`
 	All       bool            `json:"all"`
 	Expires   int64           `json:"expires"`
+	Force     bool            `json:"force"`
 	On        *bool           `json:"on"`
+}
+
+// ownerParams reads owner and expires raw, so absent differs from zero and
+// bad UTF-8 is not turned into U+FFFD.
+type ownerParams struct{ Owner, Expires json.RawMessage }
+
+// rejectOwnerParams refuses an owner or expires on the plain pause methods.
+func rejectOwnerParams(raw json.RawMessage) error {
+	var r ownerParams
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &r)
+	}
+	if r.Owner != nil || r.Expires != nil {
+		return apiErr("bad_params", "use clipboard.pauseOwned")
+	}
+	return nil
+}
+
+// clipPausesLocked lists the owned pauses by owner, then the plain one.
+// The caller holds mu.
+func (d *Daemon) clipPausesLocked() []map[string]any {
+	out := []map[string]any{}
+	for _, o := range slices.Sorted(maps.Keys(d.clipOwned)) {
+		out = append(out, map[string]any{"owner": o, "expires": d.clipOwned[o].until.Unix()})
+	}
+	if d.clipPlain {
+		out = append(out, map[string]any{"owner": ""})
+	}
+	return out
 }
 
 // Call runs one API method.
@@ -349,9 +381,44 @@ func (d *Daemon) Call(ctx context.Context, method string, raw json.RawMessage) (
 	case "clipboard.search":
 		return d.searchClips(p.Text), nil
 	case "clipboard.pause":
+		if err := rejectOwnerParams(raw); err != nil {
+			return nil, err
+		}
 		return ok, d.PauseClipboard()
 	case "clipboard.resume":
-		return ok, d.ResumeClipboard(false)
+		if err := rejectOwnerParams(raw); err != nil {
+			return nil, err
+		}
+		return ok, d.ResumeClipboard(p.Force)
+	case "clipboard.pauseOwned":
+		var r ownerParams
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &r)
+		}
+		owner, err := ownerFromRaw(r.Owner)
+		if err != nil {
+			return nil, err
+		}
+		var secs int64
+		if r.Expires == nil || json.Unmarshal(r.Expires, &secs) != nil {
+			return nil, apiErr("bad_params", "invalid clipboard pause expiry")
+		}
+		until, err := d.PauseClipboardOwned(owner, secs)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"expires": until.Unix()}, nil
+	case "clipboard.resumeOwned":
+		var r ownerParams
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &r)
+		}
+		owner, err := ownerFromRaw(r.Owner)
+		if err != nil {
+			return nil, err
+		}
+		d.ResumeClipboardOwned(owner)
+		return ok, nil
 	case "transfer.cancel":
 		return ok, d.CancelTransfer(p.ID)
 	case "transfer.open":
