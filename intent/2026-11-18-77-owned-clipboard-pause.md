@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 77
 author: olafkfreund
 ---
@@ -149,6 +149,9 @@ It can't do both: make sure its pause never sticks, and never undo the user's.
   (the existing pause tests set `clipPauseFile` to a temp path).
 
 ## Open questions
+
+Decided at approval (2026-11-18): the recommendations below.
+
 
 1. **Can `resume` without an owner end owned pauses?**
    - A: No. It ends only the pause without an owner. A client's pause is never
