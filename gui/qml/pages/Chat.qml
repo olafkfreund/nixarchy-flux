@@ -277,7 +277,8 @@ Item {
       padY: 6
       onClicked: {
         var v = root.view
-        v.call("clipboard.resume", {}, function () { v.toast("Clipboard sync resumed") })
+        // force: a user action ends every pause, owned ones too (#77).
+        v.call("clipboard.resume", { force: true }, function () { v.toast("Clipboard sync resumed") })
       }
     }
   }

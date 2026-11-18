@@ -121,6 +121,13 @@ so no timer fires while it reads `clipOwned` without the lock.
 way: it sets `PATH=/usr/bin:/bin` and NixOS has no `mktemp` there. Local runs
 add it to `-skip`; CI runs it.
 
+*Deviation (step 4):* `/usr/lib/qt6/bin/qmltestrunner` is absent here; `make test-gui`
+ran with nixpkgs' `qt6.qtdeclarative` runner (98 passed) and `make snapshot` in a
+`nix-shell` with Qt and libGL. `MockBackend.qml` needed no edit.
+
+*Deviation (step 5):* the docs spell the error `unknown_method`, as the error
+table does; `too_many` already existed for addresses, and gets the pause case.
+
 - Go: `make vet` (go vet plus `gofmt -l cmd internal scripts`), `make test`
   (`go test -race ./cmd/... ./internal/... ./scripts/...`); one test:
   `go test -race ./internal/core -run Name`.

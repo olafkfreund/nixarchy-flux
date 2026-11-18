@@ -1264,6 +1264,7 @@ Item {
       tryVerify(function () { var r = findBy(page(view), "objectName", "clipPaused"); return !!r && r.visible })
       findBy(page(view), "objectName", "clipResume").clicked()
       compare(requestsOf("clipboard.resume").length, 1)
+      compare(requestsOf("clipboard.resume")[0].params.force, true)
       tryVerify(function () { return !findBy(page(view), "objectName", "clipPaused").visible })
       tryVerify(function () { return !!findBy(view, "text", "Clipboard sync resumed") })
     }
