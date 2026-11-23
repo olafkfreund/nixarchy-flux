@@ -164,11 +164,12 @@ Each device in `devices` has these fields:
 | `pairKey` | The verification key of an open pairing: 16 uppercase hex digits. The apps show it in 4 groups of 4. |
 | `ip`, `addresses`, `lastSeen` | The address of the last link, the [extra addresses](#extra-addresses), and the Unix time of the last packet. |
 | `battery`, `notifications`, `conversations` | The phone data. A device that is not paired has none. |
-| `call` | The active phone call: `state` (`ringing` or `talking`), `caller`, `number`, and `since` (Unix seconds). Omitted when no call is active, after the link closes, or when the device is not paired. |
-| `missedCall` | The last missed call: `caller`, `number`, and `at` (Unix seconds). Omitted when none is recent, after 10 minutes, after a new call starts, or when the device is not paired. |
+| `call` | The active phone call: `id` (empty for an older app), `state` (`ringing` or `talking`), `caller`, `number`, `since` (Unix seconds), `waiting` (call waiting), and `handsFree` (connected hands-free device names). Omitted when no call is active, after the link closes, or when the device is not paired. |
+| `lastCall` | The last ended call: `id`, `end` (`hangup`, `missed`, or `lost` on a link drop), and `at` (Unix seconds). Omitted after 30 seconds or when the device is not paired. |
+| `missedCall` | The last missed call: `id`, `caller`, `number`, and `at` (Unix seconds). Omitted when none is recent, after 10 minutes, after a new call starts, or when the device is not paired. |
 | `dnd` | The Do Not Disturb state that the phone reported for itself: `on` (`true`, `false`, or `null` when the phone cannot read or set it), `by` (`phone`, `sync`, `set`, or `connect`, or an empty string for a value this fluxd does not know), and `at` (Unix seconds when fluxd received the report). Omitted when the device has no link or is not paired. |
 | `outbox` | The text messages that `sms.send` sent through the device and that the device did not report yet. See [the outbox](#outbox). A device that is not paired has an empty list. |
-| `plugins` | The features that the device offers. `streamrequest` means that the device can start its camera and its microphone when this computer asks. `speaker` means that the device can also play the audio of this computer when this computer asks. `dnd` means that the device reports its Do Not Disturb state and accepts `dnd.set`. |
+| `plugins` | The features that the device offers. `streamrequest` means that the device can start its camera and its microphone when this computer asks. `speaker` means that the device can also play the audio of this computer when this computer asks. `dnd` means that the device reports its Do Not Disturb state and accepts `dnd.set`. `telephony.action` means it accepts `call.action`. |
 | `app` | The Flux program of the device: `android`, `android-debug`, `ios`, `macos`, or `fluxd`. An earlier app sends none. |
 | `appVersion` | The version of that program, such as `0.7.0`. |
 | `appUpdate` | The version of a newer Android app in the latest release, or an empty string. |
@@ -182,7 +183,7 @@ A device that is not paired shows only while it has a link.
 | State | `state`, `subscribe`, `discover` |
 | Pairing | `pair.address`, `pair.request`, `pair.accept`, `pair.reject`, `pair.unpair` |
 | Addresses | `addresses.add`, `addresses.remove` |
-| Device | `ring`, `ping`, `dnd.set`, `device.settings`, `device.settings.set` |
+| Device | `ring`, `ping`, `dnd.set`, `call.action`, `device.settings`, `device.settings.set` |
 | Sharing | `clipboard.send`, `clipboard.copy`, `clipboard.pause`, `clipboard.resume`, `clipboard.pauseOwned`, `clipboard.resumeOwned`, `clipboard.delete`, `clipboard.clear`, `clipboard.pin`, `clipboard.unpin`, `clipboard.search`, `share.files`, `share.text`, `share.url`, `transfer.retry`, `transfer.cancel`, `transfer.open`, `transfer.copy` |
 | Commands | `commands.add`, `commands.remove`, `commands.run`, `automation.add`, `automation.remove` |
 | Notifications | `notification.dismiss`, `notification.dismissAll`, `notification.reply`, `notification.action`, `notification.rule.add`, `notification.rule.remove`, `notify.send` |
@@ -216,6 +217,7 @@ Without `device`, a method uses the only connected paired device.
 | `ring` | `device` |
 | `ping` | `device`, and an optional `message` |
 | `dnd.set` | `device`, and `on` (`true` or `false`). It sets Do Not Disturb on that phone only and returns `{"sent":true}`. The phone's next `dnd` report shows the result. Errors: `bad_params` without `on`, `not_supported` when the device lacks `dnd` in `plugins`, `offline` without a link. |
+| `call.action` | `device`, `id` from the current `call`, and `action` (`answer` or `reject`). Sends `flux.telephony.action` only for a paired, online, ringing, non-waiting call with a matching non-empty id and the `telephony.action` capability. Returns `{"sent":true}` when sent; the next call report shows the result. |
 | `clipboard.send` | `device`, and `text`. Without `text`, the clipboard of the computer. |
 | `clipboard.copy` | `id` of an entry, or `text`, or `path` of an image in the history |
 | `clipboard.pause` | None. `owner` or `expires`, even `null` or `0`, returns `bad_params`: use `clipboard.pauseOwned`. |

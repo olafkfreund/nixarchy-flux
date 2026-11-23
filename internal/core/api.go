@@ -149,7 +149,7 @@ func (d *Daemon) Snapshot() json.RawMessage {
 			// The phone data of a device that is not paired stays out of
 			// the state, also after an unpair.
 			v.Battery, v.Notifications, v.Conversations = nil, []*PhoneNotification{}, []*Conversation{}
-			v.Call, v.MissedCall, v.Dnd = nil, nil, nil
+			v.Call, v.MissedCall, v.LastCall, v.Dnd = nil, nil, nil, nil
 			v.Outbox = []OutboxMessage{}
 		}
 		v.AppUpdate = d.appUpdateLocked(dev)
@@ -574,6 +574,24 @@ func (d *Daemon) Call(ctx context.Context, method string, raw json.RawMessage) (
 			return nil, apiErr("offline", "%s is offline", name)
 		}
 		return map[string]any{"sent": true}, d.send(dev, proto.New(proto.TypeFluxDndSet, map[string]any{"on": *p.On}))
+	case "call.action":
+		if p.Action != "answer" && p.Action != "reject" || p.ID == "" {
+			return nil, apiErr("bad_params", "call.action needs answer or reject and an id")
+		}
+		d.mu.Lock()
+		can, link := dev.accepts(proto.TypeFluxTelephonyAction), dev.link
+		valid := dev.Paired && link != nil && dev.callOK && dev.call.State == "ringing" && !dev.call.Waiting && dev.call.ID == p.ID
+		d.mu.Unlock()
+		if !can {
+			return nil, apiErr("not_supported", "%s cannot answer or reject calls from this computer", name)
+		}
+		if link == nil {
+			return nil, apiErr("offline", "%s is offline", name)
+		}
+		if !valid {
+			return nil, apiErr("bad_params", "call.action needs the current ringing call id")
+		}
+		return map[string]any{"sent": true}, link.Send(proto.New(proto.TypeFluxTelephonyAction, map[string]any{"action": p.Action, "id": p.ID}))
 	}
 	return nil, apiErr("unknown_method", "Unknown method %q", method)
 }
@@ -583,7 +601,7 @@ var deviceMethods = map[string]bool{
 	"device.settings": true, "device.settings.set": true,
 	"pair.request": true, "pair.accept": true, "pair.reject": true, "pair.unpair": true,
 	"addresses.add": true, "addresses.remove": true,
-	"ring": true, "ping": true, "dnd.set": true,
+	"ring": true, "ping": true, "dnd.set": true, "call.action": true,
 	"clipboard.send": true, "share.files": true, "share.text": true, "share.url": true,
 	"notification.dismiss": true, "notification.dismissAll": true, "notification.reply": true, "notification.action": true,
 	"sms.refresh": true, "sms.thread": true, "sms.send": true,

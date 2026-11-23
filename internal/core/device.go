@@ -62,6 +62,7 @@ type Device struct {
 	threadWait    map[int64][]chan []SmsMessage
 	call          CallView
 	callOK        bool
+	lastCall      LastCallView
 	missed        MissedView
 	missedOK      bool
 	dnd           DndView
@@ -131,16 +132,26 @@ type Battery struct {
 }
 
 type CallView struct {
-	State  string `json:"state"`
-	Caller string `json:"caller"`
-	Number string `json:"number"`
-	Since  int64  `json:"since"`
+	ID        string   `json:"id"`
+	State     string   `json:"state"`
+	Caller    string   `json:"caller"`
+	Number    string   `json:"number"`
+	Since     int64    `json:"since"`
+	Waiting   bool     `json:"waiting"`
+	HandsFree []string `json:"handsFree"`
 }
 
 type MissedView struct {
+	ID     string `json:"id"`
 	Caller string `json:"caller"`
 	Number string `json:"number"`
 	At     int64  `json:"at"`
+}
+
+type LastCallView struct {
+	ID  string `json:"id"`
+	End string `json:"end"`
+	At  int64  `json:"at"`
 }
 
 var now = time.Now
@@ -271,6 +282,7 @@ func (dev *Device) plugins() []string {
 		// The device can play the audio of this computer, and start it
 		// after a request of this computer and a tap of its user.
 		{"dnd", dev.accepts(proto.TypeFluxDndSet) && dev.supports(proto.TypeFluxDndState)},
+		{"telephony.action", dev.accepts(proto.TypeFluxTelephonyAction)},
 		{"speaker", dev.accepts(proto.TypeFluxSpeaker) && dev.accepts(proto.TypeFluxStreamRequest)},
 	}
 	out := []string{}
@@ -298,6 +310,7 @@ type DeviceView struct {
 	Battery       *Battery             `json:"battery"`
 	Call          *CallView            `json:"call,omitempty"`
 	MissedCall    *MissedView          `json:"missedCall,omitempty"`
+	LastCall      *LastCallView        `json:"lastCall,omitempty"`
 	Dnd           *DndView             `json:"dnd,omitempty"`
 	Plugins       []string             `json:"plugins"`
 	Notifications []*PhoneNotification `json:"notifications"`
@@ -347,7 +360,12 @@ func (dev *Device) view() DeviceView {
 	}
 	if dev.callOK {
 		call := dev.call
+		call.HandsFree = slices.Clone(call.HandsFree)
 		v.Call = &call
+	}
+	if dev.lastCall.End != "" && now().Unix()-dev.lastCall.At < 30 {
+		last := dev.lastCall
+		v.LastCall = &last
 	}
 	if dev.missedOK && now().Unix()-dev.missed.At < int64((10*time.Minute)/time.Second) {
 		missed := dev.missed
