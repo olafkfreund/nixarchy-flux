@@ -53,6 +53,7 @@ object FluxCore {
 
     val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { Thread(it, "flux-timer").apply { isDaemon = true } }
     val io = Executors.newCachedThreadPool { Thread(it, "flux-io").apply { isDaemon = true } }
+    val callTracker = CallTracker()
 
     /** The tailnet settings, as [TsnetNode] reads and writes them. */
     private val tailnetStore = object : TsnetNode.Store {

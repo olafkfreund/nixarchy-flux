@@ -10,9 +10,11 @@ import org.omarchy.flux.protocol.Types
 import org.omarchy.flux.protocol.bodyOf
 
 class BridgesTest {
+    private fun List<CallEvent>.withoutIds() = map { it.copy(id = null) }
+
     private fun events(vararg states: LineState): List<CallEvent> {
         val t = CallTracker()
-        return states.flatMap { t.onState(it) }
+        return states.flatMap { t.onState(it) }.withoutIds()
     }
 
     @Test
@@ -42,14 +44,14 @@ class BridgesTest {
     @Test
     fun numberFromLateBroadcast() {
         val t = CallTracker()
-        assertEquals(listOf(CallEvent("ringing")), t.onState(LineState.Ringing))
+        assertEquals(listOf(CallEvent("ringing")), t.onState(LineState.Ringing).withoutIds())
         // The broadcast without READ_CALL_LOG has no number.
         assertEquals(emptyList<CallEvent>(), t.onNumber(null, LineState.Ringing))
-        assertEquals(listOf(CallEvent("ringing", number = "+47 111")), t.onNumber(" +47 111 ", LineState.Ringing))
+        assertEquals(listOf(CallEvent("ringing", number = "+47 111")), t.onNumber(" +47 111 ", LineState.Ringing).withoutIds())
         assertEquals(emptyList<CallEvent>(), t.onNumber("+47 111", LineState.Ringing))
         assertEquals(
             listOf(CallEvent("missedCall", number = "+47 111"), CallEvent("ringing", cancel = true, number = "+47 111")),
-            t.onState(LineState.Idle),
+            t.onState(LineState.Idle).withoutIds(),
         )
         assertNull(t.number)
     }
@@ -58,9 +60,9 @@ class BridgesTest {
     fun numberFromEarlyBroadcast() {
         val t = CallTracker()
         assertEquals(emptyList<CallEvent>(), t.onNumber("+47 111", LineState.Ringing))
-        assertEquals(listOf(CallEvent("ringing", number = "+47 111")), t.onState(LineState.Ringing))
+        assertEquals(listOf(CallEvent("ringing", number = "+47 111")), t.onState(LineState.Ringing).withoutIds())
         assertEquals(emptyList<CallEvent>(), t.onNumber("+47 111", LineState.OffHook))
-        assertEquals(listOf(CallEvent("talking", number = "+47 111")), t.onState(LineState.OffHook))
+        assertEquals(listOf(CallEvent("talking", number = "+47 111")), t.onState(LineState.OffHook).withoutIds())
     }
 
     @Test
@@ -74,8 +76,8 @@ class BridgesTest {
         assertNull(t.number)
 
         // The second call rings before its broadcast comes.
-        assertEquals(listOf(CallEvent("ringing")), t.onState(LineState.Ringing))
-        assertEquals(listOf(CallEvent("ringing", number = "+47 222")), t.onNumber("+47 222", LineState.Ringing))
+        assertEquals(listOf(CallEvent("ringing")), t.onState(LineState.Ringing).withoutIds())
+        assertEquals(listOf(CallEvent("ringing", number = "+47 222")), t.onNumber("+47 222", LineState.Ringing).withoutIds())
     }
 
     @Test
@@ -88,16 +90,62 @@ class BridgesTest {
         t.onNumber("+47 111", LineState.Ringing)
         t.onNumber("+47 111", LineState.Idle)
         assertNull(t.number)
-        assertEquals(listOf(CallEvent("ringing")), t.onState(LineState.Ringing))
+        assertEquals(listOf(CallEvent("ringing")), t.onState(LineState.Ringing).withoutIds())
     }
 
     @Test
     fun numberBeforeAndroid12() {
         val t = CallTracker()
-        assertEquals(listOf(CallEvent("ringing", number = "+47 111")), t.onState(LineState.Ringing, "+47 111"))
-        assertEquals(listOf(CallEvent("talking", number = "+47 111")), t.onState(LineState.OffHook, ""))
-        assertEquals(listOf(CallEvent("talking", cancel = true, number = "+47 111")), t.onState(LineState.Idle, "+47 111"))
-        assertEquals(listOf(CallEvent("ringing", number = "+47 222")), t.onState(LineState.Ringing, "+47 222"))
+        assertEquals(listOf(CallEvent("ringing", number = "+47 111")), t.onState(LineState.Ringing, "+47 111").withoutIds())
+        assertEquals(listOf(CallEvent("talking", number = "+47 111")), t.onState(LineState.OffHook, "").withoutIds())
+        assertEquals(listOf(CallEvent("talking", cancel = true, number = "+47 111")), t.onState(LineState.Idle, "+47 111").withoutIds())
+        assertEquals(listOf(CallEvent("ringing", number = "+47 222")), t.onState(LineState.Ringing, "+47 222").withoutIds())
+    }
+
+    @Test
+    fun callIdsFollowCallsAndClearAtIdle() {
+        val t = CallTracker()
+        assertNull(t.snapshot().id)
+        val first = t.onState(LineState.Ringing).single().id
+        assertEquals(16, first?.length)
+        assertEquals(first, t.onState(LineState.OffHook).single().id)
+        val ended = t.onState(LineState.Idle).single()
+        assertEquals(first, ended.id)
+        assertEquals(first, CallPackets.packet(ended, null, null).string("callId"))
+        assertNull(t.snapshot().id)
+        val missedId = t.onState(LineState.Ringing).single().id
+        val missed = t.onState(LineState.Idle)
+        assertTrue(missed.all { CallPackets.packet(it, null, null).string("callId") == missedId })
+        val second = t.onState(LineState.OffHook).single().id
+        assertTrue(first != second && missedId != second)
+        assertEquals(second, t.onState(LineState.Idle).single().id)
+    }
+
+    @Test
+    fun waitingCallHasItsOwnIdAndKeepsItOnEnd() {
+        val t = CallTracker()
+        val first = t.onState(LineState.OffHook).single().id
+        val waiting = t.onState(LineState.Ringing).single()
+        assertTrue(waiting.waiting)
+        assertTrue(first != waiting.id)
+        assertEquals(CallSnapshot(LineState.Ringing, waiting.id, true), t.snapshot())
+        val ended = t.onState(LineState.Idle)
+        assertEquals(listOf("missedCall", "ringing"), ended.map { it.event })
+        assertTrue(ended.all { it.id == waiting.id && it.waiting })
+        assertTrue(ended.all { CallPackets.packet(it, null, null).string("callId") == waiting.id })
+        assertEquals(CallSnapshot(LineState.Idle, null, false), t.snapshot())
+    }
+
+    @Test
+    fun lineIsOneCallAgainAfterTheWaitingCall() {
+        val t = CallTracker()
+        val first = t.onState(LineState.OffHook).single().id
+        t.onState(LineState.Ringing)
+        val back = t.onState(LineState.OffHook).single()
+        assertEquals("talking", back.event)
+        assertEquals(first, back.id)
+        assertTrue(!back.waiting)
+        assertEquals(CallSnapshot(LineState.OffHook, first, false), t.snapshot())
     }
 
     @Test
@@ -111,12 +159,18 @@ class BridgesTest {
 
         // Without the contacts permission, the packet has only the number.
         val numberOnly = CallPackets.body(CallEvent("talking", cancel = true), "+47 123", null)
-        assertEquals(setOf("event", "phoneNumber", "isCancel"), numberOnly.keys)
+        assertEquals(setOf("event", "phoneNumber", "isCancel", "callId", "waiting", "handsFree"), numberOnly.keys)
 
         // With no number either, the name is "Unknown caller".
         val unknown = Packet(Types.TELEPHONY, CallPackets.body(CallEvent("ringing"), null, null))
         assertEquals(CallPackets.UNKNOWN, unknown.string("contactName"))
         assertFalse(unknown.has("phoneNumber"))
+
+        val call = CallTracker().onState(LineState.Ringing).single()
+        val withHandsFree = Packet(Types.TELEPHONY, CallPackets.body(call, null, null, listOf("p620", "razer")))
+        assertEquals(call.id, withHandsFree.string("callId"))
+        assertEquals(false, withHandsFree.bool("waiting"))
+        assertEquals(listOf("p620", "razer"), withHandsFree.strings("handsFree"))
     }
 
     private fun notification(vararg fields: Pair<String, Any?>) = Packet(Types.NOTIFICATION, bodyOf(*fields))

@@ -5,7 +5,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
+import androidx.core.content.ContextCompat
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -185,8 +187,12 @@ fun SyncScreen(state: UiState, onBack: () -> Unit) {
         })
         add(
             SyncItem(CALLS, Ic.call, "Call alerts", "Shows a call to this phone on the computers.", state.callAlerts && state.callAccess) {
-                if (!state.callAccess) {
-                    askPhone.launch(arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_CONTACTS))
+                val extra = buildList {
+                    add(Manifest.permission.ANSWER_PHONE_CALLS)
+                    if (Build.VERSION.SDK_INT >= 31) add(Manifest.permission.BLUETOOTH_CONNECT)
+                }
+                if (!state.callAccess || extra.any { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }) {
+                    askPhone.launch((listOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_CONTACTS) + extra).toTypedArray())
                 } else {
                     FluxCore.setCallAlerts(!state.callAlerts)
                 }
