@@ -86,8 +86,7 @@ class CallMonitor(private val context: Context) {
 
     fun stop() {
         Android.stopHandsFree()
-        tracker.reset()
-        val l = listener ?: return
+        val l = listener ?: return tracker.reset()
         listener = null
         runCatching {
             if (Build.VERSION.SDK_INT >= 31 && l is TelephonyCallback) {
@@ -99,6 +98,7 @@ class CallMonitor(private val context: Context) {
         }
         receiver?.let { runCatching { context.unregisterReceiver(it) } }
         receiver = null
+        tracker.reset()   // after the callbacks are gone, so none can refill it
     }
 
     private fun onState(state: Int, phoneNumber: String?) {

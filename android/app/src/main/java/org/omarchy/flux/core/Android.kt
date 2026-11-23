@@ -59,7 +59,7 @@ object Android {
         if (handsFreeStarted || !hasBluetoothConnect(context)) return
         val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter ?: return
         handsFreeAdapter = adapter
-        handsFreeStarted = runCatching { adapter.getProfileProxy(context, headsetListener, BluetoothProfile.HEADSET) }.getOrDefault(false)
+        handsFreeStarted = runCatching { adapter.getProfileProxy(context.applicationContext, headsetListener, BluetoothProfile.HEADSET) }.getOrDefault(false)
     }
 
     @Synchronized fun stopHandsFree() {

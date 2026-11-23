@@ -116,6 +116,7 @@ fun SyncScreen(state: UiState, onBack: () -> Unit) {
     val askPhone = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
         if (granted[Manifest.permission.READ_PHONE_STATE] == true) {
             clearRefused()
+            Android.startHandsFree(context)   // bind now, so the first call already knows the hands-free devices
             FluxCore.setCallAlerts(true)
         } else {
             refuse(CALLS, "Call alerts need phone access. Allow it in the app settings.")
