@@ -27,6 +27,7 @@ object Types {
     const val SFTP = "flux.sftp"
     const val SFTP_REQUEST = "flux.sftp.request"
     const val TELEPHONY = "flux.telephony"
+    const val FLUX_TELEPHONY_ACTION = "flux.telephony.action"
     const val SMS_MESSAGES = "flux.sms.messages"
     const val SMS_REQUEST = "flux.sms.request"
     const val SMS_REQUEST_CONVERSATIONS = "flux.sms.request_conversations"
@@ -126,7 +127,7 @@ val INCOMING = listOf(
     Types.PING, Types.BATTERY, Types.CLIPBOARD, Types.CLIPBOARD_CONNECT,
     Types.SHARE, Types.SHARE_UPDATE, Types.NOTIFICATION, Types.NOTIFICATION_REQUEST, Types.NOTIFICATION_REPLY,
     Types.NOTIFICATION_ACTION, Types.FIND_MY_PHONE, Types.RUN_COMMAND, Types.MPRIS,
-    Types.SFTP, Types.FLUX_TUNNEL, Types.FLUX_WEBCAM, Types.FLUX_DND, Types.FLUX_DND_SET,
+    Types.SFTP, Types.FLUX_TUNNEL, Types.FLUX_WEBCAM, Types.FLUX_DND, Types.FLUX_DND_SET, Types.FLUX_TELEPHONY_ACTION,
     Types.FLUX_MIC, Types.FLUX_SCREEN, Types.FLUX_APPROVE, Types.FLUX_HERDR, Types.FLUX_INPUT,
     Types.FLUX_DESKTOP, Types.FLUX_SHORTCUTS, Types.FLUX_THEME, Types.FLUX_STREAM_REQUEST, Types.FLUX_TRANSFER,
     Types.FLUX_WAKE,

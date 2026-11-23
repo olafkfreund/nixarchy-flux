@@ -133,6 +133,9 @@ object Plugins {
             Types.FLUX_WEBCAM -> org.omarchy.flux.webcam.WebcamSession.onPacket(core, d, p)
             Types.FLUX_DND -> DndSync.onPacket(core, d, p)
             Types.FLUX_DND_SET -> DndSync.onSet(core, p)
+            Types.FLUX_TELEPHONY_ACTION -> core.io.execute {
+                CallControl.act(core.app, core.callTracker, p.string("id"), p.string("action"))
+            }
             Types.FLUX_MIC -> org.omarchy.flux.mic.MicSession.onPacket(core, d, p)
             Types.FLUX_SPEAKER -> org.omarchy.flux.speaker.SpeakerSession.onPacket(core, d, p)
             Types.FLUX_SCREEN -> org.omarchy.flux.screen.ScreenSession.onPacket(core, d, p)
