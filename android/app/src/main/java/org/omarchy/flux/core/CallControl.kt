@@ -30,7 +30,11 @@ object CallControl {
                 return@withLock
             }
             runCatching {
-                if (action == "answer") telecom.acceptRingingCall()
+                // The tracker follows TelephonyCallback, which can lag an answer on the phone. Telecom's live
+                // ringing state is checked last: endCall() with nothing ringing would hang up the answered call.
+                if (!telecom.isInManagedCall || !telecom.isRinging) {
+                    Log.w(TAG, "refused call action: no ringing call")
+                } else if (action == "answer") telecom.acceptRingingCall()
                 else if (!telecom.endCall()) Log.w(TAG, "reject call returned false")
             }.onFailure { Log.w(TAG, "call action failed", it) }
         }

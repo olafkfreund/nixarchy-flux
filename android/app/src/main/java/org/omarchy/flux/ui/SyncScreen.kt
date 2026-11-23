@@ -191,7 +191,10 @@ fun SyncScreen(state: UiState, onBack: () -> Unit) {
                     add(Manifest.permission.ANSWER_PHONE_CALLS)
                     if (Build.VERSION.SDK_INT >= 31) add(Manifest.permission.BLUETOOTH_CONNECT)
                 }
-                if (!state.callAccess || extra.any { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }) {
+                val on = state.callAlerts && state.callAccess
+                if (on) {
+                    FluxCore.setCallAlerts(false)   // turning off never waits on a permission
+                } else if (!state.callAccess || extra.any { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }) {
                     askPhone.launch((listOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_CONTACTS) + extra).toTypedArray())
                 } else {
                     FluxCore.setCallAlerts(!state.callAlerts)
