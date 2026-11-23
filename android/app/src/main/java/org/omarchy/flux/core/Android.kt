@@ -1,9 +1,15 @@
 package org.omarchy.flux.core
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.UiModeManager
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothHeadset
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
@@ -11,6 +17,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -21,6 +28,7 @@ import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import org.omarchy.flux.R
 import org.omarchy.flux.protocol.groupKey
 import org.omarchy.flux.ui.MainActivity
@@ -29,6 +37,47 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /** Small wrappers around Android APIs that the core uses. */
 object Android {
+    private var headset: BluetoothHeadset? = null
+    private var handsFreeAdapter: BluetoothAdapter? = null
+    private var handsFreeStarted = false
+    private val headsetListener = object : BluetoothProfile.ServiceListener {
+        override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+            if (profile != BluetoothProfile.HEADSET) return
+            synchronized(Android) {
+                if (handsFreeStarted) headset = proxy as BluetoothHeadset
+                else handsFreeAdapter?.closeProfileProxy(BluetoothProfile.HEADSET, proxy)
+            }
+        }
+
+        override fun onServiceDisconnected(profile: Int) {
+            if (profile == BluetoothProfile.HEADSET) synchronized(Android) { headset = null }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    @Synchronized fun startHandsFree(context: Context) {
+        if (handsFreeStarted || !hasBluetoothConnect(context)) return
+        val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter ?: return
+        handsFreeAdapter = adapter
+        handsFreeStarted = runCatching { adapter.getProfileProxy(context.applicationContext, headsetListener, BluetoothProfile.HEADSET) }.getOrDefault(false)
+    }
+
+    @Synchronized fun stopHandsFree() {
+        handsFreeStarted = false
+        val proxy = headset
+        headset = null
+        if (proxy != null) runCatching { handsFreeAdapter?.closeProfileProxy(BluetoothProfile.HEADSET, proxy) }
+    }
+
+    @SuppressLint("MissingPermission")
+    @Synchronized fun handsFreeNames(context: Context): List<String> {
+        if (!hasBluetoothConnect(context)) return emptyList()
+        return runCatching { headset?.connectedDevices?.mapNotNull { it.name } ?: emptyList() }.getOrDefault(emptyList())
+    }
+
+    private fun hasBluetoothConnect(context: Context) = Build.VERSION.SDK_INT < 31 ||
+        ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+
     const val CHANNEL_SERVICE = "flux.service"
     const val CHANNEL_EVENTS = "flux.events"
     const val CHANNEL_RING = "flux.ring"

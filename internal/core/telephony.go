@@ -73,6 +73,9 @@ type callState struct {
 
 // callBody is the body of a flux.telephony packet.
 type callBody struct {
+	CallID      string     `json:"callId"`
+	Waiting     bool       `json:"waiting"`
+	HandsFree   []string   `json:"handsFree"`
 	Event       string     `json:"event"`
 	PhoneNumber string     `json:"phoneNumber"`
 	ContactName string     `json:"contactName"`
@@ -136,12 +139,21 @@ func (d *Daemon) callEvent(dev *Device, l *lan.Link, b callBody) {
 	caller := strings.TrimSpace(b.ContactName)
 	switch {
 	case b.IsCancel.bool():
+		if dev.callOK {
+			end := "hangup"
+			if dev.call.State == "ringing" {
+				end = "missed"
+			}
+			dev.lastCall = LastCallView{ID: dev.call.ID, End: end, At: stamp}
+			time.AfterFunc(30*time.Second, d.markDirty)
+		}
 		dev.callOK = false
 	case b.Event == "ringing":
 		if !dev.callOK || dev.call.State != "ringing" {
 			dev.call.Since = stamp
 		}
 		dev.call.State, dev.call.Caller, dev.call.Number = "ringing", caller, b.PhoneNumber
+		dev.call.ID, dev.call.Waiting, dev.call.HandsFree = b.CallID, b.Waiting, slices.Clone(b.HandsFree)
 		dev.callOK, dev.missedOK = true, false
 	case b.Event == "talking":
 		if !dev.callOK {
@@ -155,10 +167,13 @@ func (d *Daemon) callEvent(dev *Device, l *lan.Link, b callBody) {
 		}
 		// An answered call keeps the name and number it rang with.
 		dev.call.State = "talking"
+		dev.call.ID, dev.call.Waiting, dev.call.HandsFree = b.CallID, b.Waiting, slices.Clone(b.HandsFree)
 		dev.callOK, dev.missedOK = true, false
 	case b.Event == "missedCall":
+		dev.lastCall = LastCallView{ID: b.CallID, End: "missed", At: stamp}
+		time.AfterFunc(30*time.Second, d.markDirty)
 		dev.callOK = false
-		dev.missed = MissedView{Caller: caller, Number: b.PhoneNumber, At: stamp}
+		dev.missed = MissedView{ID: b.CallID, Caller: caller, Number: b.PhoneNumber, At: stamp}
 		dev.missedOK = true
 		time.AfterFunc(10*time.Minute, d.markDirty)
 	}
@@ -227,6 +242,10 @@ func (d *Daemon) dropCall(dev *Device, l *lan.Link) {
 		return
 	}
 	delete(d.calls, dev.ID)
+	if dev.callOK {
+		dev.lastCall = LastCallView{ID: dev.call.ID, End: "lost", At: now().Unix()}
+		time.AfterFunc(30*time.Second, d.markDirty)
+	}
 	dev.callOK = false
 	d.mu.Unlock()
 	d.markDirty()

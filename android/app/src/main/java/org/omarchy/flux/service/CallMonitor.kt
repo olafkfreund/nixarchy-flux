@@ -15,7 +15,6 @@ import androidx.core.content.ContextCompat
 import org.omarchy.flux.core.Android
 import org.omarchy.flux.core.CallEvent
 import org.omarchy.flux.core.CallPackets
-import org.omarchy.flux.core.CallTracker
 import org.omarchy.flux.core.FluxCore
 import org.omarchy.flux.core.LineState
 import org.omarchy.flux.protocol.Types
@@ -40,7 +39,7 @@ private const val TAG = "FluxCalls"
  */
 class CallMonitor(private val context: Context) {
     private val tm = context.getSystemService(TelephonyManager::class.java)
-    private val tracker = CallTracker()
+    private val tracker = FluxCore.callTracker
     private var listener: Any? = null
     private var receiver: BroadcastReceiver? = null
 
@@ -48,6 +47,7 @@ class CallMonitor(private val context: Context) {
 
     fun start() {
         if (running || tm == null || !granted(Manifest.permission.READ_PHONE_STATE)) return
+        Android.startHandsFree(context)
         runCatching {
             if (Build.VERSION.SDK_INT >= 31) {
                 val cb = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
@@ -85,7 +85,8 @@ class CallMonitor(private val context: Context) {
     }
 
     fun stop() {
-        val l = listener ?: return
+        Android.stopHandsFree()
+        val l = listener ?: return tracker.reset()
         listener = null
         runCatching {
             if (Build.VERSION.SDK_INT >= 31 && l is TelephonyCallback) {
@@ -97,6 +98,7 @@ class CallMonitor(private val context: Context) {
         }
         receiver?.let { runCatching { context.unregisterReceiver(it) } }
         receiver = null
+        tracker.reset()   // after the callbacks are gone, so none can refill it
     }
 
     private fun onState(state: Int, phoneNumber: String?) {
@@ -111,7 +113,8 @@ class CallMonitor(private val context: Context) {
     private fun send(e: CallEvent) {
         val n = e.number
         FluxCore.io.execute {
-            val packet = CallPackets.packet(e, n, n?.let { Android.contactName(context, it) })
+            Android.startHandsFree(context)   // (a no-op once bound: covers BLUETOOTH_CONNECT granted after start)
+            val packet = CallPackets.packet(e, n, n?.let { Android.contactName(context, it) }, Android.handsFreeNames(context))
             FluxCore.connectedPaired().filter { Types.TELEPHONY in it.identity.incoming }.forEach { it.send(packet) }
         }
     }

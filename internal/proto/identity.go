@@ -57,7 +57,8 @@ const (
 	TypeFluxDnd = "flux.dnd"
 	// TypeFluxDndSet asks the phone to set its own Do Not Disturb state,
 	// {"on": bool}. The computer sends it.
-	TypeFluxDndSet = "flux.dnd.set"
+	TypeFluxDndSet          = "flux.dnd.set"
+	TypeFluxTelephonyAction = "flux.telephony.action"
 	// TypeFluxDndState reports the Do Not Disturb state of the phone,
 	// {"on": bool|null, "by": string}. The phone sends it.
 	TypeFluxDndState = "flux.dnd.state"
@@ -157,7 +158,7 @@ var Outgoing = []string{
 	TypeNotification, TypeNotificationRequest, TypeNotificationReply, TypeNotificationAction,
 	TypeFindMyPhone, TypeRunCommand, TypeMpris,
 	TypeSmsRequest, TypeSmsConversations,
-	TypeSmsConversation, TypeSftp, TypeFluxWebcam, TypeFluxDnd, TypeFluxDndSet,
+	TypeSmsConversation, TypeSftp, TypeFluxWebcam, TypeFluxDnd, TypeFluxDndSet, TypeFluxTelephonyAction,
 	TypeFluxMic, TypeFluxScreen, TypeFluxApprove, TypeFluxHerdr,
 	TypeFluxClipboardImage, TypeFluxInput, TypeFluxDesktop, TypeFluxShortcuts, TypeFluxTransfer,
 	TypeFluxTheme, TypeFluxStreamRequest,

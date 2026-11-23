@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -152,6 +153,133 @@ func TestCallViews(t *testing.T) {
 	}
 }
 
+func TestCallFieldsAndEndReasons(t *testing.T) {
+	d, dev := approveDaemon()
+	base := time.Unix(1_700_000_000, 0)
+	now = func() time.Time { return base }
+	t.Cleanup(func() { now = time.Now })
+	handsFree := []string{"p620"}
+	d.callEvent(dev, nil, callBody{Event: "ringing", CallID: "one", HandsFree: handsFree, Waiting: true})
+	handsFree[0] = "changed"
+	v := dev.view()
+	if v.Call == nil || v.Call.ID != "one" || !v.Call.Waiting || !slices.Equal(v.Call.HandsFree, []string{"p620"}) {
+		t.Fatalf("call fields: %+v", v.Call)
+	}
+	v.Call.HandsFree[0] = "changed"
+	if dev.view().Call.HandsFree[0] != "p620" {
+		t.Fatal("snapshot shares handsFree")
+	}
+	d.callEvent(dev, nil, callBody{Event: "ringing", IsCancel: "true"})
+	if got := dev.view().LastCall; got == nil || got.ID != "one" || got.End != "missed" {
+		t.Fatalf("ring cancel: %+v", got)
+	}
+	d.callEvent(dev, nil, callBody{Event: "missedCall", CallID: "one"})
+	if got := dev.view().MissedCall; got == nil || got.ID != "one" {
+		t.Fatalf("missed id: %+v", got)
+	}
+	d.callEvent(dev, nil, callBody{Event: "ringing", CallID: "two"})
+	d.callEvent(dev, nil, callBody{Event: "talking", CallID: "two"})
+	d.callEvent(dev, nil, callBody{Event: "talking", IsCancel: "true"})
+	if got := dev.view().LastCall; got == nil || got.ID != "two" || got.End != "hangup" {
+		t.Fatalf("talking cancel: %+v", got)
+	}
+	d.callEvent(dev, nil, callBody{Event: "ringing", CallID: "three"})
+	l := &lan.Link{}
+	d.calls[dev.ID].link = l
+	d.dropCall(dev, l)
+	if got := dev.view().LastCall; got == nil || got.ID != "three" || got.End != "lost" {
+		t.Fatalf("link drop: %+v", got)
+	}
+	d.callEvent(dev, nil, callBody{Event: "ringing"})
+	if got := dev.view().Call; got == nil || got.ID != "" || got.Waiting || len(got.HandsFree) != 0 {
+		t.Fatalf("old packet: %+v", got)
+	}
+	now = func() time.Time { return base.Add(30 * time.Second) }
+	if dev.view().LastCall != nil {
+		t.Fatal("lastCall stayed after 30 seconds")
+	}
+}
+
+func TestCallActionMethod(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	onDesk, onPhone, _, phoneID := linkPair(t, ctx)
+	got := make(chan *proto.Packet, 2)
+	go onPhone.Receive(func(p *proto.Packet) { got <- p })
+	d := &Daemon{cfg: &config.Config{}, devices: map[string]*Device{}, logger: log.New(io.Discard, "", 0), ctx: ctx}
+	dev := &Device{ID: phoneID, Name: "Pixel 8", Paired: true, link: onDesk, callOK: true,
+		call: CallView{ID: "current", State: "ringing"}}
+	d.devices[phoneID] = dev
+	call := func(id, action string) string {
+		b, _ := json.Marshal(map[string]string{"device": phoneID, "id": id, "action": action})
+		_, err := d.Call(ctx, "call.action", b)
+		return errCode(err)
+	}
+	if got := call("current", "answer"); got != "not_supported" {
+		t.Fatalf("capability: %q", got)
+	}
+	d.mu.Lock()
+	dev.Incoming = []string{proto.TypeFluxTelephonyAction}
+	d.mu.Unlock()
+	if !slices.Contains(dev.plugins(), "telephony.action") {
+		t.Fatal("capability absent from plugins")
+	}
+	for _, tc := range []struct {
+		name, id, action, state string
+		waiting, callOK         bool
+	}{
+		{"empty id", "", "answer", "ringing", false, true},
+		{"wrong id", "other", "answer", "ringing", false, true},
+		{"unknown action", "current", "hangup", "ringing", false, true},
+		{"waiting", "current", "answer", "ringing", true, true},
+		{"talking", "current", "answer", "talking", false, true},
+		{"idle", "current", "answer", "ringing", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d.mu.Lock()
+			dev.call.State, dev.call.Waiting, dev.callOK = tc.state, tc.waiting, tc.callOK
+			d.mu.Unlock()
+			if code := call(tc.id, tc.action); code == "" {
+				t.Fatal("refused call action succeeded")
+			}
+			select {
+			case p := <-got:
+				t.Fatalf("refused action sent %+v", p)
+			default:
+			}
+		})
+	}
+	d.mu.Lock()
+	dev.call.State, dev.call.Waiting, dev.callOK = "ringing", false, true
+	d.mu.Unlock()
+	for _, action := range []string{"answer", "reject"} {
+		if code := call("current", action); code != "" {
+			t.Fatalf("%s: %q", action, code)
+		}
+		select {
+		case p := <-got:
+			var body struct{ Action, ID string }
+			if p.Type != proto.TypeFluxTelephonyAction || p.Decode(&body) != nil || body.Action != action || body.ID != "current" {
+				t.Fatalf("sent %+v, body %+v", p, body)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("no telephony action")
+		}
+	}
+	d.mu.Lock()
+	dev.link = nil
+	d.mu.Unlock()
+	if got := call("current", "answer"); got != "offline" {
+		t.Fatalf("offline: %q", got)
+	}
+	d.mu.Lock()
+	dev.Paired = false
+	d.mu.Unlock()
+	if got := call("current", "answer"); got != "not_paired" {
+		t.Fatalf("unpaired: %q", got)
+	}
+}
+
 func TestMissedCallAgeing(t *testing.T) {
 	d, dev := approveDaemon()
 	base := time.Unix(1_700_000_000, 0)
@@ -188,7 +316,7 @@ func TestCallSnapshotConcurrentUnpair(t *testing.T) {
 				return
 			}
 			for _, v := range snapshot.Devices {
-				if !v.Paired && (v.Call != nil || v.MissedCall != nil) {
+				if !v.Paired && (v.Call != nil || v.MissedCall != nil || v.LastCall != nil) {
 					t.Errorf("unpaired call data: %+v", v)
 				}
 			}
@@ -206,7 +334,7 @@ func TestCallSnapshotConcurrentUnpair(t *testing.T) {
 		t.Fatal(err)
 	}
 	wg.Wait()
-	if v := dev.view(); v.Call != nil || v.MissedCall != nil {
+	if v := dev.view(); v.Call != nil || v.MissedCall != nil || v.LastCall != nil {
 		t.Fatalf("unpair kept call data: %+v", v)
 	}
 }
